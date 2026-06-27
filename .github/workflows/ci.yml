@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    name: Build, test & lint (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --all-targets
+
+      - name: Test
+        run: cargo test --all
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxidize-windows
+          path: |
+            target/release/oxidize-cli.exe
+            target/release/oxidize-gui.exe
+          if-no-files-found: error
