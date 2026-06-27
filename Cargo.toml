@@ -1,0 +1,74 @@
+[package]
+name = "oxidize"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "A thorough Windows uninstaller. Runs a program's own uninstaller, then finds and removes the registry/filesystem leftovers it leaves behind."
+authors = ["Dominik Könitzer <dominik.koenitzer@gmail.com>"]
+publish = false
+readme = "README.md"
+repository = "https://github.com/dominikkoenitzer/Oxidize"
+homepage = "https://github.com/dominikkoenitzer/Oxidize"
+keywords = ["windows", "uninstall", "registry", "cleanup", "cli"]
+categories = ["command-line-utilities"]
+build = "build.rs"
+
+[lib]
+name = "oxidize"
+path = "src/lib.rs"
+
+# Command-line front-end.
+[[bin]]
+name = "oxidize-cli"
+path = "src/main.rs"
+
+# Graphical front-end (egui window).
+[[bin]]
+name = "oxidize-gui"
+path = "src/bin/oxidize-gui.rs"
+
+[dependencies]
+# CLI parsing (derive API).
+clap = { version = "4.6", features = ["derive"] }
+# Windows registry access.
+winreg = "0.56"
+# Process enumeration for hunter mode.
+sysinfo = "0.39"
+# Ergonomic error handling for a CLI (Result + context).
+anyhow = "1"
+# Timestamps for backup directory names.
+chrono = "0.4"
+# JSON output (`--json`).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Native GUI toolkit for the graphical front-end (oxidize-gui). 0.33 keeps the
+# classic update()/SidePanel API and defaults to the glow (OpenGL) backend,
+# which is more robust under VMs / remote desktop.
+eframe = "0.33"
+
+# A small, feature-gated slice of the Windows API:
+#   - token elevation detection (is this process Administrator?)
+#   - relaunch-as-admin via ShellExecuteW "runas"
+#   - enabling ANSI/VT colour processing on the console
+[dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+]
+
+[build-dependencies]
+# Embeds the application icon into the Windows .exe files (build.rs).
+winresource = "0.1"
+
+[profile.release]
+# Smaller, faster binary for a tool people run occasionally.
+opt-level = 2
+lto = "thin"
+strip = true
