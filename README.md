@@ -229,4 +229,4 @@ deeper "Advanced" scan mode that walks more registry surface.
 
 **Dominik Könitzer** — software engineer in Zürich, Switzerland.
 
-[dominikkoenitzer.ch](https://dominikkoenitzer.ch) · [@dominikkoenitzer](https://github.com/dominikkoenitzer) · [dominik.koenitzer@gmail.com](mailto:dominik.koenitzer@gmail.com)
+[dominikkoenitzer.ch](https://dominikkoenitzer.ch) · [CV](https://dominikkoenitzer.ch/cv) · [@dominikkoenitzer](https://github.com/dominikkoenitzer) · [dominik.koenitzer@gmail.com](mailto:dominik.koenitzer@gmail.com)
