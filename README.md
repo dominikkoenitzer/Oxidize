@@ -224,3 +224,9 @@ deeper "Advanced" scan mode that walks more registry surface.
 <div align="center">
 <sub>Built in Rust 🦀 · <code>oxidize-cli</code> + <code>oxidize-gui</code></sub>
 </div>
+
+## Author
+
+**Dominik Könitzer** — software engineer in Zürich, Switzerland.
+
+[dominikkoenitzer.ch](https://dominikkoenitzer.ch) · [@dominikkoenitzer](https://github.com/dominikkoenitzer) · [dominik.koenitzer@gmail.com](mailto:dominik.koenitzer@gmail.com)
