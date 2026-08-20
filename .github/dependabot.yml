@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # Cargo dependencies. Semver-compatible bumps land in Cargo.lock; a major
+  # arrives as its own PR, which matters here because the Windows API, egui
+  # and winreg crates all break across majors.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      minor-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: deps
+    labels:
+      - dependencies
+
+  # GitHub Actions used in workflows
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels:
+      - dependencies
+      - ci
