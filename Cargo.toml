@@ -44,7 +44,7 @@ serde_json = "1"
 # Native GUI toolkit for the graphical front-end (oxidize-gui). 0.33 keeps the
 # classic update()/SidePanel API and defaults to the glow (OpenGL) backend,
 # which is more robust under VMs / remote desktop.
-eframe = "0.33"
+eframe = "0.36"
 
 # A small, feature-gated slice of the Windows API:
 #   - token elevation detection (is this process Administrator?)
