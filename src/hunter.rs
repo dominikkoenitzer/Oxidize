@@ -27,7 +27,7 @@ fn looks_like_path(q: &str) -> bool {
 }
 
 /// Make a path absolute (joining the current dir if relative) without
-/// canonicalising — canonicalisation yields `\\?\` verbatim paths on Windows,
+/// canonicalising. Canonicalisation yields `\\?\` verbatim paths on Windows,
 /// which break simple prefix comparisons against registry `InstallLocation`s.
 fn absolutize(p: &Path) -> PathBuf {
     if p.is_absolute() {

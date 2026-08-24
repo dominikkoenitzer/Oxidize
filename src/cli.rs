@@ -4,7 +4,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 use crate::model::Confidence;
 
-/// Oxidize — a thorough Windows uninstaller.
+/// A thorough Windows uninstaller.
 ///
 /// Runs a program's own uninstaller, then finds and removes the registry and
 /// filesystem leftovers it leaves behind. Always backs up registry keys (to

@@ -2,9 +2,9 @@
 //! keys, and the low-level read/exists/delete primitives used by the scanner and
 //! the safety layer.
 //!
-//! Everything addresses keys by their *physical* path (WOW6432Node spelled out)
-//! and opens with `KEY_WOW64_64KEY`, so a 64-bit `oxidize` always sees the exact
-//! key it intends to back up or delete — no WOW64 redirection surprises.
+//! Every key is addressed by its physical path, with WOW6432Node spelled out,
+//! and opened with `KEY_WOW64_64KEY`. A 64-bit `oxidize` therefore always sees
+//! the key it means to back up or delete, with no WOW64 redirection in play.
 
 use std::io;
 
