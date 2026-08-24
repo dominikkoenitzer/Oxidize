@@ -1,9 +1,10 @@
-//! The safety layer: administrator-privilege detection (and optional
-//! self-elevation), plus the single choke point through which every destructive
-//! action passes. Nothing in Oxidize deletes a registry key or a file except via
-//! [`remove_leftovers`], which guarantees: dry-run shows-but-never-touches,
-//! registry keys are exported to a `.reg` before deletion, and files are moved
-//! to a reversible quarantine rather than destroyed.
+//! Administrator-privilege detection, optional self-elevation, and the one
+//! function every destructive action has to pass through.
+//!
+//! Nothing in Oxidize deletes a registry key or a file except via
+//! [`remove_leftovers`]. It guarantees three things: a dry run shows without
+//! touching, registry keys are exported to a `.reg` before deletion, and files
+//! are moved to a reversible quarantine instead of being destroyed.
 
 use std::path::{Path, PathBuf};
 
@@ -34,9 +35,8 @@ pub struct DeletionOutcome {
     pub backup_dir: Option<PathBuf>,
 }
 
-// ---------------------------------------------------------------------------
 // Elevation
-// ---------------------------------------------------------------------------
+// ---------
 
 /// Is this process running with an elevated (Administrator) token?
 #[cfg(windows)]
@@ -179,9 +179,8 @@ pub fn warn_if_not_elevated() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The single destructive choke point
-// ---------------------------------------------------------------------------
+// The one destructive choke point
+// -------------------------------
 
 /// Remove the given leftovers, honouring the safety context. Prints per-item
 /// progress and returns a tally.
@@ -211,10 +210,9 @@ pub fn remove_leftovers(
     }
 
     // Set up the backup session (unless backups are disabled).
-    // When backups are enabled (the default) the user is relying on them, so a
-    // failure to create the backup directory must abort — we never silently fall
-    // through to unbacked deletion, even with --yes. (Use --no-backup to opt out
-    // explicitly.)
+    // When backups are on (the default) the user is relying on them, so failing
+    // to create the backup directory has to abort. We never fall through to an
+    // unbacked deletion, not even with --yes. --no-backup is the way to opt out.
     let session = if ctx.make_backups {
         match BackupSession::new(program_label) {
             Ok(session) => {

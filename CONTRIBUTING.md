@@ -22,15 +22,15 @@ front-ends: `src/main.rs` (CLI, `oxidize-cli`) and `src/bin/oxidize-gui.rs`
   destructive must go through `safety::remove_leftovers`, support `--dry-run`,
   and be backed up first (`.reg` export / file quarantine). Please don't add a
   delete path that bypasses that.
-- **Test the risky logic.** The matcher, command-line parser, and backup
-  validation have unit tests — add to them when you change behaviour, and prefer
-  testing in a throwaway VM.
+- **Test the risky logic.** The matcher, command-line parser and backup
+  validation have unit tests. Add to them when you change behaviour, and test in
+  a throwaway VM.
 - Keep `cargo clippy --all-targets -- -D warnings` clean; run `cargo fmt`.
 - Match the surrounding style and keep comments where intent isn't obvious.
 
 ## Reporting bugs / ideas
 
-Bug reports and ideas via issues are welcome — include your Windows version,
-what you ran, and what happened (redact anything sensitive from registry
-paths). To use Oxidize or contribute code, please open an issue to arrange
+Bug reports and ideas via issues are welcome. Include your Windows version,
+what you ran, and what happened, and redact anything sensitive from registry
+paths. To use Oxidize or contribute code, please open an issue to arrange
 permission first, since the project is all-rights-reserved.

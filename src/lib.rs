@@ -1,8 +1,8 @@
-//! Oxidize — engine + CLI exposed as a library so that both the `oxidize`
-//! (command-line) and `oxidize-gui` (graphical) binaries can share exactly the
-//! same uninstall/scan/backup/safety logic.
+//! The Oxidize engine, packaged as a library so the `oxidize` command-line
+//! binary and the `oxidize-gui` binary share one copy of the uninstall, scan,
+//! backup and safety code.
 //!
-//! See `main.rs` (CLI) and `bin/oxidize-gui.rs` (GUI) for the two front-ends.
+//! The two front-ends are `main.rs` and `bin/oxidize-gui.rs`.
 
 pub mod backup;
 pub mod cli;

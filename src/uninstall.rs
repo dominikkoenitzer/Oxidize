@@ -1,4 +1,4 @@
-//! Running a program's *own* registered uninstaller.
+//! Running a program's own registered uninstaller.
 //!
 //! We build an explicit argument vector (never shelling through `cmd.exe`, which
 //! would lose the child's exit code and re-interpret metacharacters), prefer the
@@ -62,7 +62,7 @@ fn system32(exe: &str) -> String {
 
 /// Decide how to uninstall `program`. `silent` requests an unattended run.
 pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
-    // MSI products: build the command from the ProductCode rather than trusting
+    // MSI products: build the command from the ProductCode instead of trusting
     // the stored string's UI level. `msiexec /x` is synchronous and returns a
     // meaningful exit code.
     if program.is_windows_installer && looks_like_guid(&program.registry_key) {
@@ -107,8 +107,8 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
 
 /// Launch the plan and wait for the spawned process to exit.
 ///
-/// Note: for non-MSI uninstallers this is necessary but not always sufficient —
-/// see [`still_installed`] for the post-run verification.
+/// Note: for non-MSI uninstallers this is necessary but not always sufficient.
+/// See [`still_installed`] for the post-run verification.
 pub fn run(plan: &UninstallPlan) -> Result<ExitStatus> {
     let (exe, args) = plan
         .argv

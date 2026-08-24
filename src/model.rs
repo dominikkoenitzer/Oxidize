@@ -1,10 +1,9 @@
-//! Shared data model for Oxidize.
+//! Shared data model.
 //!
-//! This module is deliberately dependency-free (aside from `serde` for `--json`
-//! output): it describes *what* the rest of the program operates on, while the
-//! Windows-specific mechanics (winreg, the `windows` crate) live in their own
-//! modules. Keeping the model pure makes it trivial to unit-test the matching
-//! and formatting logic without touching a real registry.
+//! Nothing here touches Windows. `serde` is the only dependency, and only for
+//! `--json` output; the winreg and `windows` calls stay in the modules that
+//! need them. That keeps the matching and formatting logic unit-testable
+//! without a real registry to point it at.
 
 use std::path::PathBuf;
 
@@ -13,9 +12,9 @@ use serde::Serialize;
 /// Which registry hive an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Hive {
-    /// `HKEY_LOCAL_MACHINE` — machine-wide installs (needs admin to modify).
+    /// `HKEY_LOCAL_MACHINE`, for machine-wide installs. Needs admin to modify.
     LocalMachine,
-    /// `HKEY_CURRENT_USER` — per-user installs (writable without elevation).
+    /// `HKEY_CURRENT_USER`, for per-user installs. Writable without elevation.
     CurrentUser,
 }
 
@@ -39,11 +38,11 @@ impl Hive {
 
 /// Which WOW64 view an `HKLM\SOFTWARE` entry lives in.
 ///
-/// On 64-bit Windows the registry is split: 64-bit programs register under the
-/// native `SOFTWARE\...` path, while 32-bit programs are physically stored under
-/// `SOFTWARE\WOW6432Node\...`. We always address keys by their *physical* path
-/// (i.e. we spell out `WOW6432Node` explicitly) so that backup/export/delete all
-/// refer to exactly the same key with no redirection surprises.
+/// On 64-bit Windows the registry is split. 64-bit programs register under the
+/// native `SOFTWARE\...` path; 32-bit programs are physically stored under
+/// `SOFTWARE\WOW6432Node\...`. We always address keys by their physical path,
+/// spelling out `WOW6432Node`, so backup, export and delete all land on the
+/// same key with no redirection in between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum RegistryView {
     /// Native 64-bit view (also the only view that exists on 32-bit Windows).
@@ -175,11 +174,11 @@ pub struct Leftover {
     /// True if this is an empty directory.
     pub is_empty_dir: bool,
 
-    // --- Registry-only addressing (None for filesystem leftovers) ---
+    // Registry-only addressing. None for filesystem leftovers.
     pub hive: Option<Hive>,
     /// Path under the hive root (no `HKEY_...` prefix), for delete/export.
     pub subpath: Option<String>,
-    /// When set, this leftover is a single *value* (not the whole key).
+    /// When set, this leftover is one value, not the whole key.
     pub value_name: Option<String>,
 }
 
@@ -285,8 +284,8 @@ impl ScanReport {
 }
 
 /// The "seed" describing the program we are scanning leftovers for. Captured
-/// *before* running the uninstaller (a snapshot of the footprint) so we can
-/// still recognise leftovers after the entry itself is gone.
+/// before the uninstaller runs, as a snapshot of the footprint, so we can still
+/// recognise leftovers once the entry itself is gone.
 #[derive(Debug, Clone)]
 pub struct ScanTarget {
     pub display_name: String,

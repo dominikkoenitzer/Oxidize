@@ -1,12 +1,12 @@
-//! `oxidize` — the command-line front-end for the Oxidize uninstaller.
+//! The `oxidize` command-line front-end.
 //!
-//! Windows' built-in uninstaller frequently leaves junk behind: orphaned
-//! registry keys, leftover files, and empty folders under AppData/ProgramData/
-//! Program Files. Oxidize runs a program's *own* uninstaller and then scans for
-//! and (with confirmation, and after backing things up) removes what survived.
+//! Windows' built-in uninstaller tends to leave junk behind: orphaned registry
+//! keys, leftover files, empty folders under AppData, ProgramData and Program
+//! Files. Oxidize runs the program's own uninstaller first, then scans for
+//! whatever survived and removes it, after asking and after taking a backup.
 //!
-//! The engine lives in the `oxidize` library (`lib.rs`); this binary is a thin
-//! CLI on top of it. The graphical front-end is `bin/oxidize-gui.rs`.
+//! The engine itself lives in `lib.rs`; this binary is a thin CLI over it.
+//! `bin/oxidize-gui.rs` is the graphical front-end.
 
 use clap::Parser;
 

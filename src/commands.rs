@@ -45,9 +45,8 @@ pub fn dispatch(cli: Cli) -> Result<()> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // list
-// ---------------------------------------------------------------------------
+// ----
 
 fn cmd_list(args: &ListArgs, g: &Global) -> Result<()> {
     let mut programs = registry::enumerate_installed_programs(args.all);
@@ -142,9 +141,8 @@ fn fit(s: &str, width: usize) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // uninstall / scan (shared core)
-// ---------------------------------------------------------------------------
+// ------------------------------
 
 fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
     let programs = registry::enumerate_installed_programs(true);
@@ -251,9 +249,8 @@ fn uninstall_program(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // hunter
-// ---------------------------------------------------------------------------
+// ------
 
 fn cmd_hunter(args: &HunterArgs, g: &Global) -> Result<()> {
     let programs = registry::enumerate_installed_programs(true);
@@ -319,9 +316,8 @@ fn cmd_hunter(args: &HunterArgs, g: &Global) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // shared rendering / removal
-// ---------------------------------------------------------------------------
+// --------------------------
 
 fn render_report(report: &ScanReport, g: &Global) -> Result<()> {
     if g.json {
@@ -457,9 +453,8 @@ fn print_outcome(outcome: &safety::DeletionOutcome, safety_ctx: &SafetyContext) 
     }
 }
 
-// ---------------------------------------------------------------------------
 // program resolution
-// ---------------------------------------------------------------------------
+// ------------------
 
 /// Resolve a user-supplied target to exactly one program: by exact id, then
 /// exact name, then unique case-insensitive substring of the display name.

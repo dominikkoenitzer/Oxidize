@@ -1,18 +1,16 @@
-//! The leftover scanner — what makes Oxidize thorough rather than a thin
-//! wrapper around the Windows uninstaller.
+//! Finds what a program's own uninstaller left behind.
 //!
-//! Given a [`ScanTarget`] (a snapshot of a program's identity captured *before*
-//! uninstalling), it searches a fixed, program-scoped set of registry and
-//! filesystem locations for remnants the program's own uninstaller left behind,
-//! scoring each by confidence.
+//! It takes a [`ScanTarget`], the program's identity captured before the
+//! uninstall ran, and searches a fixed, program-scoped set of registry and
+//! filesystem locations, scoring each hit by confidence.
 //!
-//! Safety is designed in, not bolted on:
-//!   * we never recurse the whole disk or the whole registry (program-scoped,
-//!     shallow walks);
-//!   * publisher folders/keys (which may hold sibling products) are *descended
-//!     into* to find the specific product, never flagged wholesale;
-//!   * denylists keep OS/shared locations (`C:\Windows`, `SOFTWARE\Microsoft`,
-//!     driver vendor roots, …) out of the results entirely.
+//! Three rules keep it from doing damage:
+//!   * no walk ever covers the whole disk or the whole registry; every one is
+//!     program-scoped and shallow;
+//!   * a publisher folder or key can hold sibling products, so we descend into
+//!     it looking for the specific product and never flag it wholesale;
+//!   * denylists keep OS and shared locations (`C:\Windows`,
+//!     `SOFTWARE\Microsoft`, driver vendor roots) out of the results entirely.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -63,7 +61,7 @@ const REG_DENY: &[&str] = &[
     "odbc",
 ];
 
-/// OS/shared directory names that must never appear as *any* component of a path
+/// OS/shared directory names that must never appear as any component of a path
 /// we propose deleting (guards against an install folder recorded as a shared
 /// location, e.g. `Program Files\Common Files\...`). Unlike `FS_DENY` this is
 /// checked per path component, so it omits names that are legitimate as
@@ -103,9 +101,8 @@ fn reg_denied(name: &str) -> bool {
     REG_DENY.contains(&n.as_str())
 }
 
-// ---------------------------------------------------------------------------
 // Building a scan target from a program
-// ---------------------------------------------------------------------------
+// -------------------------------------
 
 /// Capture the identity/footprint of a program into a [`ScanTarget`].
 pub fn build_target(program: &Program) -> ScanTarget {
@@ -173,22 +170,21 @@ pub fn build_target(program: &Program) -> ScanTarget {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Matching
-// ---------------------------------------------------------------------------
+// --------
 
-/// Score a folder/key name against the *product* identity. Matching is
-/// word/token-aware (so "ZoomIt" does **not** match "Zoom"); a single
-/// coincidental keyword is at most `Medium`, so it never enters the default
-/// (High-only) removal set. Publisher-only names are handled by
-/// [`matches_publisher`] so a shared vendor folder is descended into, never
-/// flagged wholesale.
+/// Score a folder/key name against the product identity. Matching is
+/// word/token-aware, so "ZoomIt" does not match "Zoom", and a single
+/// coincidental keyword is capped at `Medium` so it never enters the default
+/// (High-only) removal set. Publisher-only names go through
+/// [`matches_publisher`] instead, so a shared vendor folder gets descended into
+/// and is never flagged wholesale.
 fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
     let norm = normalize(name);
     if norm.len() < 3 {
         return None;
     }
-    // 1. Exact normalized match — the strongest signal.
+    // 1. Exact normalized match, the strongest signal.
     if !target.display_name.is_empty() && norm == normalize(&target.display_name) {
         return Some((
             Confidence::High,
@@ -219,7 +215,7 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
         ));
     }
 
-    // 4. A single distinctive keyword matches — plausible, but Medium only.
+    // 4. A single distinctive keyword matches. Plausible, so Medium only.
     if let Some(hit) = target
         .name_tokens
         .iter()
@@ -239,8 +235,8 @@ fn contains_subslice(haystack: &[String], needle: &[String]) -> bool {
 }
 
 /// True if `name` is essentially just the program's publisher (a shared vendor
-/// root such as "Google" or "BraveSoftware"), so we should descend one level to
-/// find the specific product rather than flag the vendor folder wholesale.
+/// root such as "Google" or "BraveSoftware"). We descend one level into those to
+/// find the specific product instead of flagging the vendor folder wholesale.
 fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
     let Some(publisher) = &target.publisher else {
         return false;
@@ -248,7 +244,7 @@ fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
     let norm = normalize(name);
     let pubn = normalize(publisher);
     // Only the "name is contained in the publisher" direction: a folder whose
-    // name *contains* the publisher (e.g. "Mozilla Firefox") is a product, not a
+    // name contains the publisher (e.g. "Mozilla Firefox") is a product, not a
     // vendor root, and must NOT be treated as publisher-only.
     if norm.len() >= 4 && pubn.len() >= 4 && pubn.contains(&norm) {
         return true;
@@ -260,9 +256,8 @@ fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
         && candidate.iter().all(|t| target.publisher_tokens.contains(t))
 }
 
-// ---------------------------------------------------------------------------
 // Filesystem scan
-// ---------------------------------------------------------------------------
+// ---------------
 
 fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var)
@@ -305,18 +300,18 @@ fn norm_path_key(p: &Path) -> String {
     norm_path_str(&p.to_string_lossy())
 }
 
-/// True if directory `dir` *strictly* contains `other` (i.e. `other` is a
-/// descendant of `dir`). Both arguments must already be normalized via
+/// True if directory `dir` strictly contains `other`, meaning `other` is a
+/// descendant of `dir`. Both arguments must already be normalized via
 /// [`norm_path_str`]. The trailing-separator boundary prevents a sibling such as
 /// `...\Apple` from being treated as inside `...\App`.
 fn dir_contains(dir: &str, other: &str) -> bool {
     other.len() > dir.len() && other.starts_with(&format!("{dir}\\"))
 }
 
-/// Install directories of every *other* installed program. Used so we never
-/// propose deleting a directory that still houses a different program — e.g.
-/// when a program's recorded `InstallLocation` is a shared parent folder that
-/// also contains a sibling product.
+/// Install directories of every other installed program. Used so we never
+/// propose deleting a directory that still houses a different program, which
+/// happens when a program's recorded `InstallLocation` is a shared parent
+/// folder that also contains a sibling product.
 fn other_program_install_dirs(target: &ScanTarget) -> Vec<PathBuf> {
     registry::enumerate_installed_programs(true)
         .into_iter()
@@ -466,19 +461,19 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
     let mut out: Vec<Leftover> = Vec::new();
 
     // 1. The install folder itself, if the uninstaller left it behind. Be
-    //    careful: a program's recorded `InstallLocation` can be a *shared* parent
+    //    careful: a program's recorded `InstallLocation` can be a shared parent
     //    directory (two products under `C:\Program Files\Vendor`, a suite root,
     //    or even a publisher folder). Deleting it wholesale would take a sibling
     //    program's files with it, so we only flag the folder itself when it is
-    //    unambiguously this product's own — otherwise we descend and flag just
-    //    the matching sub-folder, or downgrade out of the default removal set.
+    //    unambiguously this product's own. Otherwise we descend and flag just
+    //    the matching sub-folder, or downgrade it out of the default removal set.
     if let Some(loc) = &target.install_location {
         if loc.is_dir() && !is_protected_path(loc) {
             let leaf = loc.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             let descend_note = format!("under recorded install folder \"{leaf}\"");
 
             if matches_publisher(leaf, target) {
-                // The folder is the publisher/vendor root — never wholesale.
+                // The folder is the publisher/vendor root, so never wholesale.
                 flag_product_children(loc, target, &mut out, &descend_note);
             } else {
                 let loc_key = norm_path_key(loc);
@@ -490,7 +485,7 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
                     // A different installed program lives inside this folder.
                     flag_product_children(loc, target, &mut out, &descend_note);
                 } else if let Some((conf, _)) = score_product(leaf, target) {
-                    // The folder's own name identifies the product → safe whole.
+                    // The folder's own name identifies the product, so it is safe whole.
                     push_dir_leftover(
                         &mut out,
                         loc.clone(),
@@ -526,9 +521,9 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
 
 /// Collapse nested filesystem leftovers so a folder and items inside it aren't
 /// both listed (and sizes aren't double-counted). The ancestor is kept and its
-/// weaker/equal descendants dropped — but a *more* confident descendant is kept
-/// as its own entry rather than inflating the broader ancestor's confidence
-/// (which could promote a vendor folder to High and propose deleting siblings).
+/// weaker or equal descendants dropped. A more confident descendant stays on as
+/// its own entry instead of inflating the broader ancestor's confidence, which
+/// could promote a vendor folder to High and propose deleting siblings.
 fn dedupe_nested_fs(items: Vec<Leftover>) -> Vec<Leftover> {
     let key = norm_path_str;
 
@@ -557,9 +552,8 @@ fn dedupe_nested_fs(items: Vec<Leftover>) -> Vec<Leftover> {
     kept
 }
 
-// ---------------------------------------------------------------------------
 // Registry scan
-// ---------------------------------------------------------------------------
+// -------------
 
 /// `SOFTWARE` roots whose immediate children we inspect for vendor/product keys.
 fn software_roots() -> [(Hive, &'static str); 3] {
@@ -734,9 +728,8 @@ fn dedupe_by_path(items: &mut Vec<Leftover>) {
     items.retain(|l| seen.insert(l.path.to_lowercase()));
 }
 
-// ---------------------------------------------------------------------------
 // Public entry point
-// ---------------------------------------------------------------------------
+// ------------------
 
 /// Run a full leftover scan for `target`, returning registry and filesystem
 /// findings grouped separately.
@@ -875,7 +868,7 @@ mod tests {
         ));
         // A sibling sharing a name prefix is NOT (App must not "contain" Apple).
         assert!(!dir_contains(r"c:\program files\app", r"c:\program files\apple"));
-        // An equal path is not a *strict* descendant.
+        // An equal path is not a strict descendant.
         assert!(!dir_contains(r"c:\program files\app", r"c:\program files\app"));
         // An ancestor is not contained by its descendant.
         assert!(!dir_contains(r"c:\program files\vendor\app", r"c:\program files\vendor"));

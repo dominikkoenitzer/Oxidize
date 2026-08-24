@@ -1,14 +1,14 @@
 //! Reversible-deletion support.
 //!
-//! Registry keys are backed up by shelling out to `reg.exe export` — the OS's
+//! Registry keys are backed up by shelling out to `reg.exe export`, the OS's
 //! own serializer, whose output is guaranteed to round-trip back through
-//! `reg import`. We validate the produced file (BOM + header + non-empty)
-//! *before* allowing any delete, so we never destroy a key without a verified
+//! `reg import`. We validate the file it produces (BOM, header, non-empty)
+//! before allowing any delete, so a key is never destroyed without a verified
 //! backup. The export runs under a watchdog because `reg export` is known to
-//! occasionally hang.
+//! hang occasionally.
 //!
-//! Files and folders are not deleted outright by default: they are *moved* into
-//! a quarantine folder inside the backup directory (a rename when on the same
+//! Files and folders are not deleted outright by default. They are moved into a
+//! quarantine folder inside the backup directory (a rename when on the same
 //! volume, a recursive copy otherwise), which the user can simply move back.
 
 use std::collections::hash_map::DefaultHasher;
@@ -51,7 +51,7 @@ impl BackupSession {
     }
 
     /// Back up a registry key (and its whole subtree) to a `.reg` file. For a
-    /// value-level leftover, pass the key that contains the value — the export
+    /// value-level leftover, pass the key that contains the value; the export
     /// captures the value too. Returns the path of the validated backup file.
     pub fn backup_registry_key(&self, hive: Hive, subpath: &str) -> Result<PathBuf> {
         fs::create_dir_all(&self.registry_dir)

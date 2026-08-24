@@ -1,11 +1,11 @@
-//! `oxidize-gui` — the graphical front-end for Oxidize (egui/eframe).
+//! `oxidize-gui`, the graphical front-end, built on egui/eframe.
 //!
-//! It's a thin window over the same engine the CLI uses (`oxidize` library):
-//! pick a program, scan for leftovers, review them with per-item checkboxes and
-//! confidence colours, then uninstall / remove. Every slow operation runs on a
-//! background thread and reports back over a channel, so the UI never freezes;
-//! every destructive action honours the dry-run / backup toggles and asks for
-//! confirmation, exactly like the CLI.
+//! A thin window over the same engine the CLI uses: pick a program, scan for
+//! leftovers, review them with per-item checkboxes and confidence colours, then
+//! uninstall or remove. Slow work runs on a background thread and reports back
+//! over a channel so the UI never freezes, and every destructive action honours
+//! the dry-run and backup toggles and asks for confirmation, the same way the
+//! CLI does.
 
 // Hide the console window in release builds (keep it in debug for logs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -722,8 +722,8 @@ impl eframe::App for OxidizeApp {
 }
 
 /// Render one group (registry or filesystem) of leftovers with checkboxes.
-/// `idx` is the running index into the flat `checked` vector (registry first,
-/// then filesystem — matching `ScanReport::all()`).
+/// `idx` is the running index into the flat `checked` vector: registry first,
+/// then filesystem, matching `ScanReport::all()`.
 fn render_group(
     ui: &mut egui::Ui,
     title: &str,
@@ -751,9 +751,8 @@ fn render_group(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Windows icon extraction (DisplayIcon -> RGBA), used by spawn_icon_load.
-// ---------------------------------------------------------------------------
+// ------------------------------------------------------------------------
 
 /// Get a program's icon as raw RGBA + dimensions. Tries, in order: the
 /// `DisplayIcon` value (path + optional `,index`), then the largest `.exe` in
@@ -847,7 +846,7 @@ unsafe fn icon_from_file(path: &str, index: i32) -> Option<(Vec<u8>, u32, u32)> 
 
     let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
 
-    // ExtractIconExW — honours the icon index.
+    // ExtractIconExW honours the icon index.
     let mut hicon = HICON::default();
     let n = ExtractIconExW(PCWSTR(wide.as_ptr()), index, Some(&mut hicon), None, 1);
     if n > 0 && n != u32::MAX && !hicon.is_invalid() {
@@ -938,7 +937,7 @@ unsafe fn hicon_to_rgba(
     for px in buf.chunks_exact_mut(4) {
         px.swap(0, 2);
     }
-    // Some icons report no alpha at all (all zero) — treat them as opaque.
+    // Some icons report no alpha at all (all zero); treat those as opaque.
     if buf.chunks_exact(4).all(|p| p[3] == 0) {
         for px in buf.chunks_exact_mut(4) {
             px[3] = 255;
