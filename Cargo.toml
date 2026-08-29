@@ -2,7 +2,7 @@
 name = "oxidize"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.95"
 description = "A thorough Windows uninstaller. Runs a program's own uninstaller, then finds and removes the registry/filesystem leftovers it leaves behind."
 authors = ["dominikkoenitzer <dominikkoenitzer@users.noreply.github.com>"]
 publish = false
@@ -41,10 +41,17 @@ chrono = "0.4"
 # JSON output (`--json`).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Native GUI toolkit for the graphical front-end (oxidize-gui). 0.33 keeps the
-# classic update()/SidePanel API and defaults to the glow (OpenGL) backend,
-# which is more robust under VMs / remote desktop.
-eframe = "0.33"
+# Native GUI toolkit for the graphical front-end (oxidize-gui). Since 0.36 the
+# default backend is wgpu, so the feature list is spelled out to stay on glow
+# (OpenGL), which is more robust under VMs / remote desktop.
+eframe = { version = "0.36", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "links",
+    "wayland",
+    "x11",
+] }
 
 # A small, feature-gated slice of the Windows API:
 #   - token elevation detection (is this process Administrator?)

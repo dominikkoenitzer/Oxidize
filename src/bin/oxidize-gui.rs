@@ -442,7 +442,12 @@ fn conf_tag(conf: Confidence) -> &'static str {
 }
 
 impl eframe::App for OxidizeApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Panels take a `Ui`, but the worker helpers and the confirmation
+        // window still need the `Context`; cloning it is just an Arc bump.
+        let ctx = ui.ctx().clone();
+        let ctx = &ctx;
+
         self.drain_messages(ctx);
         self.show_confirm(ctx);
 
@@ -450,7 +455,7 @@ impl eframe::App for OxidizeApp {
         let mut action: Option<Action> = None;
 
         // ---- Top toolbar -------------------------------------------------
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        egui::Panel::top("toolbar").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Oxidize");
@@ -490,7 +495,7 @@ impl eframe::App for OxidizeApp {
         });
 
         // ---- Bottom status / log ----------------------------------------
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+        egui::Panel::bottom("status").show(ui, |ui| {
             ui.add_space(2.0);
             ui.label(RichText::new(&self.status).italics());
             egui::ScrollArea::vertical()
@@ -506,9 +511,9 @@ impl eframe::App for OxidizeApp {
         });
 
         // ---- Left: program list -----------------------------------------
-        egui::SidePanel::left("programs")
-            .default_width(400.0)
-            .show(ctx, |ui| {
+        egui::Panel::left("programs")
+            .default_size(400.0)
+            .show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.label("Search:");
@@ -557,7 +562,7 @@ impl eframe::App for OxidizeApp {
         let mut checked = std::mem::take(&mut self.checked);
 
         // ---- Central: details + scan results ----------------------------
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ui, |ui| {
             let Some(program) = &selected_program else {
                 ui.add_space(20.0);
                 ui.vertical_centered(|ui| {
