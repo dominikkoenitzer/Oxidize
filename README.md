@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/dominikkoenitzer/Oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/dominikkoenitzer/Oxidize/actions/workflows/ci.yml)
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
-![Rust 1.82+](https://img.shields.io/badge/rust-1.82%2B-CE412B?logo=rust&logoColor=white)
+![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-CE412B?logo=rust&logoColor=white)
 
 </div>
 
