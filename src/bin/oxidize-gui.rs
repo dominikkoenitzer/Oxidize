@@ -285,7 +285,7 @@ impl OxidizeApp {
                 } => {
                     self.log.push(message);
                     self.status = if still_installed {
-                        "Uninstaller finished — program is still registered.".to_string()
+                        "Uninstaller finished. The program is still registered.".to_string()
                     } else {
                         "Program removed from the installed list.".to_string()
                     };
@@ -311,7 +311,7 @@ impl OxidizeApp {
                     }
                     if outcome.failed > 0 {
                         self.log
-                            .push("Some removals failed — likely missing admin rights.".to_string());
+                            .push("Some removals failed, likely missing admin rights.".to_string());
                     }
                     self.status = line;
                     self.busy = false;
@@ -673,7 +673,7 @@ impl eframe::App for OxidizeApp {
                             render_group(ui, "Files & folders", &report.filesystem, &mut checked, &mut idx);
                             if report.is_empty() {
                                 ui.label(
-                                    RichText::new("No leftovers found — clean uninstall.")
+                                    RichText::new("No leftovers found. Clean uninstall.")
                                         .color(conf_color(Confidence::High)),
                                 );
                             }
