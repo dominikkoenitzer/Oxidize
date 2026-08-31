@@ -29,7 +29,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1040.0, 700.0])
             .with_min_inner_size([720.0, 480.0])
-            .with_title("Oxidize — thorough uninstaller")
+            .with_title("Oxidize - thorough uninstaller")
             .with_icon(egui::IconData {
                 rgba: ICON_RGBA.to_vec(),
                 width: 64,
@@ -534,7 +534,7 @@ impl eframe::App for OxidizeApp {
                                 let size = p
                                     .size_bytes()
                                     .map(util::human_size)
-                                    .unwrap_or_else(|| "—".to_string());
+                                    .unwrap_or_else(|| "-".to_string());
                                 (
                                     p.id().to_string(),
                                     format!("{}   ({size})", p.display_name),
@@ -583,19 +583,19 @@ impl eframe::App for OxidizeApp {
                     ui.label(v);
                     ui.end_row();
                 };
-                row(ui, "Version", program.display_version.as_deref().unwrap_or("—"));
-                row(ui, "Publisher", program.publisher.as_deref().unwrap_or("—"));
+                row(ui, "Version", program.display_version.as_deref().unwrap_or("-"));
+                row(ui, "Publisher", program.publisher.as_deref().unwrap_or("-"));
                 row(
                     ui,
                     "Size",
-                    &program.size_bytes().map(util::human_size).unwrap_or_else(|| "—".to_string()),
+                    &program.size_bytes().map(util::human_size).unwrap_or_else(|| "-".to_string()),
                 );
-                row(ui, "Installed", program.install_date.as_deref().unwrap_or("—"));
+                row(ui, "Installed", program.install_date.as_deref().unwrap_or("-"));
                 row(ui, "Source", &program.source.label());
                 row(
                     ui,
                     "Location",
-                    program.install_location.as_deref().unwrap_or("—"),
+                    program.install_location.as_deref().unwrap_or("-"),
                 );
             });
 
