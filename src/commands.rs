@@ -220,7 +220,7 @@ fn uninstall_program(
                 ));
                 if uninstall::still_installed(program) {
                     term::warn(
-                        "The program is still registered — the uninstaller may have been \
+                        "The program is still registered. The uninstaller may have been \
                          cancelled, or may still be finishing in the background.",
                     );
                 } else {
@@ -335,7 +335,7 @@ fn render_report(report: &ScanReport, g: &Global) -> Result<()> {
 
     println!();
     if report.is_empty() {
-        term::success("No leftovers found — looks like a clean uninstall.");
+        term::success("No leftovers found. Looks like a clean uninstall.");
     } else {
         let reclaim = report.reclaimable_bytes();
         let reclaim_note = if reclaim > 0 {
@@ -449,7 +449,7 @@ fn print_outcome(outcome: &safety::DeletionOutcome, safety_ctx: &SafetyContext) 
         term::info(&format!("Backups & quarantined files: {}", dir.display()));
     }
     if outcome.failed > 0 {
-        term::warn("Some removals failed — likely missing Administrator rights. Re-run elevated.");
+        term::warn("Some removals failed, likely missing Administrator rights. Re-run elevated.");
     }
 }
 

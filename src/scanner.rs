@@ -501,7 +501,7 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
                         &mut out,
                         loc.clone(),
                         Confidence::Medium,
-                        "recorded install folder still present (name does not match the product — verify before removing)".to_string(),
+                        "recorded install folder still present (name does not match the product, verify before removing)".to_string(),
                     );
                 }
             }
@@ -630,7 +630,7 @@ fn scan_app_paths(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Lef
 fn match_run_value(name: &str, data: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
     // 1. The value name itself identifies the product.
     if let Some((conf, reason)) = score_product(name, target) {
-        return Some((conf, format!("autostart entry — {reason}")));
+        return Some((conf, format!("autostart entry: {reason}")));
     }
     // 2. The command launches one of the program's executables.
     let expanded = util::expand_env_vars(data);
