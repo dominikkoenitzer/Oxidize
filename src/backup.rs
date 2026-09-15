@@ -1,15 +1,13 @@
-//! Reversible-deletion support.
+//! Reversible removal. Each removal run gets a folder under
+//! `%LOCALAPPDATA%\Oxidize\backups\<timestamp> <program>` with:
 //!
-//! Registry keys are backed up by shelling out to `reg.exe export`, the OS's
-//! own serializer, whose output is guaranteed to round-trip back through
-//! `reg import`. We validate the file it produces (BOM, header, non-empty)
-//! before allowing any delete, so a key is never destroyed without a verified
-//! backup. The export runs under a watchdog because `reg export` is known to
-//! hang occasionally.
-//!
-//! Files and folders are not deleted outright by default. They are moved into a
-//! quarantine folder inside the backup directory (a rename when on the same
-//! volume, a recursive copy otherwise), which the user can simply move back.
+//! * `registry\*.reg`: keys exported with `reg.exe export` and validated
+//!   before the delete is allowed;
+//! * `files\<Drive>\<original path>`: quarantined files and folders, moved
+//!   there rather than deleted;
+//! * `tasks\*.xml`: scheduled task definitions;
+//! * `manifest.json`: what was removed and how to put it back, which is what
+//!   `oxidize restore` reads.
 
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
@@ -19,109 +17,225 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
-use crate::model::Hive;
+use crate::model::{Hive, LeftoverKind};
+use crate::system::{self, TaskInfo};
 
-/// A backup directory for one Oxidize operation. Created under
-/// `%LOCALAPPDATA%\Oxidize\backups\<timestamp>_<program>`.
+pub const MANIFEST: &str = "manifest.json";
+
+/// How to undo one removal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Undo {
+    /// `reg import` the file.
+    RegImport { file: PathBuf },
+    /// Move a quarantined path back to where it was.
+    MoveBack { from: PathBuf, to: PathBuf },
+    /// Re-create a task from its XML.
+    TaskImport { name: String, file: PathBuf },
+    /// Put an entry back on the `Path` variable.
+    PathAdd { hive: Hive, entry: String },
+    /// Write a string value back.
+    ValueWrite {
+        hive: Hive,
+        subpath: String,
+        name: String,
+        data: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub kind: LeftoverKind,
+    /// The display path shown at removal time.
+    pub path: String,
+    pub undo: Undo,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Manifest {
+    pub program: String,
+    pub created: String,
+    pub entries: Vec<ManifestEntry>,
+}
+
 pub struct BackupSession {
     root: PathBuf,
-    registry_dir: PathBuf,
-    files_dir: PathBuf,
+    manifest: Manifest,
 }
 
 impl BackupSession {
-    /// Create a new backup session directory for the given program label.
     pub fn new(program_label: &str) -> Result<BackupSession> {
         let base = backups_base()?;
-        let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let root = base.join(format!("{stamp}_{}", sanitize(program_label)));
-        fs::create_dir_all(&root)
-            .with_context(|| format!("creating backup directory {}", root.display()))?;
+        let now = chrono::Local::now();
+        let root = base.join(format!(
+            "{} {}",
+            now.format("%Y-%m-%d %H%M%S"),
+            sanitize(program_label)
+        ));
+        fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
         Ok(BackupSession {
-            registry_dir: root.join("registry"),
-            files_dir: root.join("files"),
             root,
+            manifest: Manifest {
+                program: program_label.to_string(),
+                created: now.to_rfc3339(),
+                entries: Vec::new(),
+            },
         })
     }
 
-    /// The backup root directory.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Back up a registry key (and its whole subtree) to a `.reg` file. For a
-    /// value-level leftover, pass the key that contains the value; the export
-    /// captures the value too. Returns the path of the validated backup file.
-    pub fn backup_registry_key(&self, hive: Hive, subpath: &str) -> Result<PathBuf> {
-        fs::create_dir_all(&self.registry_dir)
-            .with_context(|| format!("creating {}", self.registry_dir.display()))?;
+    /// The backup's name as shown by `oxidize backups`.
+    pub fn name(&self) -> String {
+        self.root
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    }
 
-        // The sanitized name can collide (truncation, char folding), so append a
-        // hash of the full key path to keep each backup distinct, and never
-        // overwrite an existing backup file.
+    fn record(&mut self, kind: LeftoverKind, path: &str, undo: Undo) -> Result<()> {
+        self.manifest.entries.push(ManifestEntry {
+            kind,
+            path: path.to_string(),
+            undo,
+        });
+        let json = serde_json::to_string_pretty(&self.manifest)?;
+        fs::write(self.root.join(MANIFEST), json).context("writing manifest")?;
+        Ok(())
+    }
+
+    /// Export a key (with its subtree) to a validated `.reg` file. For a
+    /// value-level leftover pass the containing key.
+    pub fn backup_registry_key(
+        &mut self,
+        kind: LeftoverKind,
+        display: &str,
+        hive: Hive,
+        subpath: &str,
+    ) -> Result<PathBuf> {
+        let dir = self.root.join("registry");
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+
         let key = format!("{}\\{}", hive.short_name(), subpath);
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        let out_file = self.registry_dir.join(format!(
-            "{}_{:016x}.reg",
+        let out_file = dir.join(format!(
+            "{}_{:08x}.reg",
             sanitize(&key),
-            hasher.finish()
+            hasher.finish() as u32
         ));
         if out_file.exists() {
-            bail!(
-                "backup target {} already exists; refusing to overwrite",
-                out_file.display()
-            );
+            // Same key backed up twice in one run (a key and one of its
+            // values, say): the first export already covers it.
+            return Ok(out_file);
         }
 
         export_registry_key(hive, subpath, &out_file)?;
         validate_reg_file(&out_file, hive, subpath)
             .with_context(|| format!("backup validation failed for {}", out_file.display()))?;
+        self.record(
+            kind,
+            display,
+            Undo::RegImport {
+                file: out_file.clone(),
+            },
+        )?;
         Ok(out_file)
     }
 
-    /// Move a file or directory into the quarantine area, preserving its
-    /// original path layout. Returns the new (quarantined) location.
-    pub fn quarantine(&self, original: &Path) -> Result<PathBuf> {
+    /// Record a single string value so it can be written back.
+    pub fn backup_value(
+        &mut self,
+        kind: LeftoverKind,
+        display: &str,
+        hive: Hive,
+        subpath: &str,
+        name: &str,
+        data: &str,
+    ) -> Result<()> {
+        self.record(
+            kind,
+            display,
+            Undo::ValueWrite {
+                hive,
+                subpath: subpath.to_string(),
+                name: name.to_string(),
+                data: data.to_string(),
+            },
+        )
+    }
+
+    pub fn backup_path_entry(&mut self, display: &str, hive: Hive, entry: &str) -> Result<()> {
+        self.record(
+            LeftoverKind::PathEntry,
+            display,
+            Undo::PathAdd {
+                hive,
+                entry: entry.to_string(),
+            },
+        )
+    }
+
+    pub fn backup_task(&mut self, display: &str, task: &TaskInfo) -> Result<()> {
+        let dir = self.root.join("tasks");
+        fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let out = dir.join(format!(
+            "{}.xml",
+            sanitize(task.name.trim_start_matches('\\'))
+        ));
+        system::export_task(task, &out)?;
+        self.record(
+            LeftoverKind::ScheduledTask,
+            display,
+            Undo::TaskImport {
+                name: task.name.clone(),
+                file: out,
+            },
+        )
+    }
+
+    /// Move a file or folder into quarantine, keeping its path layout.
+    pub fn quarantine(&mut self, kind: LeftoverKind, original: &Path) -> Result<PathBuf> {
         let dest = self.quarantine_dest(original);
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating quarantine path {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        // Fast path: rename works within the same volume.
         match fs::rename(original, &dest) {
-            Ok(()) => Ok(dest),
+            Ok(()) => {}
             Err(_) => {
-                // Cross-volume (or other) failure: copy then remove. If the
-                // remove fails (e.g. a locked file), roll back the copy so we
-                // don't leave a confusing duplicate and a half-done state.
+                // Another volume: copy, then remove. Roll the copy back if the
+                // remove fails so nothing is left half done.
                 copy_recursive(original, &dest)
                     .with_context(|| format!("copying {} to quarantine", original.display()))?;
                 if let Err(e) = remove_path(original) {
                     let _ = remove_path(&dest);
                     return Err(anyhow::Error::new(e)).with_context(|| {
-                        format!(
-                            "removing original {} (quarantine copy rolled back)",
-                            original.display()
-                        )
+                        format!("removing {} (copy rolled back)", original.display())
                     });
                 }
-                Ok(dest)
             }
         }
+        self.record(
+            kind,
+            &original.display().to_string(),
+            Undo::MoveBack {
+                from: dest.clone(),
+                to: original.to_path_buf(),
+            },
+        )?;
+        Ok(dest)
     }
 
-    /// Map an original path to its quarantine destination, e.g.
-    /// `C:\ProgramData\Foo` → `<backup>\files\C\ProgramData\Foo`.
+    /// `C:\ProgramData\Foo` becomes `<backup>\files\C\ProgramData\Foo`.
     fn quarantine_dest(&self, original: &Path) -> PathBuf {
-        let mut dest = self.files_dir.clone();
+        let mut dest = self.root.join("files");
         let s = original.to_string_lossy();
-        // Strip a leading drive specifier like `C:\`.
         let rel = if s.len() >= 2 && s.as_bytes()[1] == b':' {
-            let drive = &s[0..1];
-            dest.push(drive);
+            dest.push(&s[0..1]);
             s[2..].trim_start_matches(['\\', '/']).to_string()
         } else {
             s.trim_start_matches(['\\', '/']).to_string()
@@ -131,7 +245,7 @@ impl BackupSession {
     }
 }
 
-/// `%LOCALAPPDATA%\Oxidize\backups`, created if missing.
+/// `%LOCALAPPDATA%\Oxidize\backups`.
 pub fn backups_base() -> Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -140,15 +254,90 @@ pub fn backups_base() -> Result<PathBuf> {
     Ok(local.join("Oxidize").join("backups"))
 }
 
-/// Run `reg.exe export <ROOT\subpath> <out_file> /y /reg:64` with a watchdog.
+/// One existing backup folder.
+#[derive(Debug, Clone, Serialize)]
+pub struct BackupInfo {
+    pub name: String,
+    pub path: PathBuf,
+    pub program: String,
+    pub created: String,
+    pub items: usize,
+    pub size_bytes: u64,
+}
+
+/// Every backup, newest first.
+pub fn list_backups() -> Result<Vec<BackupInfo>> {
+    let base = backups_base()?;
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(&base) else {
+        return Ok(out);
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let manifest = read_manifest(&path).ok();
+        out.push(BackupInfo {
+            program: manifest
+                .as_ref()
+                .map(|m| m.program.clone())
+                .unwrap_or_default(),
+            created: manifest
+                .as_ref()
+                .map(|m| m.created.clone())
+                .unwrap_or_default(),
+            items: manifest.as_ref().map(|m| m.entries.len()).unwrap_or(0),
+            size_bytes: crate::scanner::dir_size(&path),
+            name,
+            path,
+        });
+    }
+    out.sort_by(|a, b| b.name.cmp(&a.name));
+    Ok(out)
+}
+
+pub fn read_manifest(dir: &Path) -> Result<Manifest> {
+    let text = fs::read_to_string(dir.join(MANIFEST))
+        .with_context(|| format!("no manifest in {}", dir.display()))?;
+    serde_json::from_str(&text).context("reading manifest")
+}
+
+/// Resolve a backup by exact name, or by a unique substring of its name or
+/// program.
+pub fn find_backup(name: &str) -> Result<BackupInfo> {
+    let all = list_backups()?;
+    if let Some(b) = all.iter().find(|b| b.name.eq_ignore_ascii_case(name)) {
+        return Ok(b.clone());
+    }
+    let needle = name.to_lowercase();
+    let hits: Vec<&BackupInfo> = all
+        .iter()
+        .filter(|b| {
+            b.name.to_lowercase().contains(&needle) || b.program.to_lowercase().contains(&needle)
+        })
+        .collect();
+    match hits.len() {
+        0 => bail!("no backup matches \"{name}\""),
+        1 => Ok(hits[0].clone()),
+        n => bail!("\"{name}\" matches {n} backups; use the full name from `oxidize backups`"),
+    }
+}
+
+pub fn delete_backup(info: &BackupInfo) -> Result<()> {
+    let base = backups_base()?;
+    if !info.path.starts_with(&base) {
+        bail!("refusing to delete outside the backups folder");
+    }
+    fs::remove_dir_all(&info.path).with_context(|| format!("deleting {}", info.path.display()))
+}
+
+/// `reg.exe export <ROOT\subpath> <out_file> /y /reg:64`, with a watchdog
+/// because `reg export` occasionally hangs.
 fn export_registry_key(hive: Hive, subpath: &str, out_file: &Path) -> Result<()> {
     let key_arg = format!("{}\\{}", hive.short_name(), subpath);
-    let reg = {
-        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-        format!(r"{root}\System32\reg.exe")
-    };
-
-    let mut cmd = Command::new(reg);
+    let mut cmd = Command::new(system::system32("reg.exe"));
     cmd.arg("export")
         .arg(&key_arg)
         .arg(out_file)
@@ -157,10 +346,9 @@ fn export_registry_key(hive: Hive, subpath: &str, out_file: &Path) -> Result<()>
 
     let status = run_with_timeout(cmd, Duration::from_secs(30))
         .with_context(|| format!("running reg export for {key_arg}"))?;
-
     if !status.success() {
         bail!(
-            "reg export of {key_arg} failed ({}). The key may be missing or unreadable.",
+            "reg export of {key_arg} failed ({}); the key may be missing or unreadable",
             status
                 .code()
                 .map(|c| c.to_string())
@@ -170,9 +358,24 @@ fn export_registry_key(hive: Hive, subpath: &str, out_file: &Path) -> Result<()>
     Ok(())
 }
 
-/// Spawn a command and wait, killing it if it exceeds `timeout`.
+/// `reg.exe import <file>`.
+pub fn import_registry_file(file: &Path) -> Result<()> {
+    let mut cmd = Command::new(system::system32("reg.exe"));
+    cmd.arg("import").arg(file).arg("/reg:64");
+    let status = run_with_timeout(cmd, Duration::from_secs(60))
+        .with_context(|| format!("running reg import for {}", file.display()))?;
+    if !status.success() {
+        bail!("reg import of {} failed", file.display());
+    }
+    Ok(())
+}
+
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process::ExitStatus> {
-    let mut child = cmd.spawn().context("spawning child process")?;
+    let mut child = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawning child process")?;
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
@@ -181,41 +384,35 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> Result<std::process:
         if start.elapsed() > timeout {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("process timed out after {:?}", timeout);
+            bail!("process timed out after {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
-/// Validate that `path` is a real `.reg` v5 backup of the expected key: it must
-/// have the UTF-16 LE BOM, the `Windows Registry Editor Version 5.00` header,
-/// and contain the `[HKEY_...\subpath]` section for the key we exported (so a
-/// truncated/empty/wrong-key file can never gate a deletion). The whole file is
-/// read because these backups are small.
+/// A real `.reg` v5 backup of the expected key: UTF-16 LE BOM, the version
+/// header, and the `[HKEY_...\subpath]` section.
 fn validate_reg_file(path: &Path, hive: Hive, subpath: &str) -> Result<()> {
     let bytes = fs::read(path).context("reading backup file")?;
     if bytes.len() < 2 || bytes[0] != 0xFF || bytes[1] != 0xFE {
         bail!("missing UTF-16 LE byte-order mark");
     }
-    let units: Vec<u16> = bytes[2..]
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    let text = String::from_utf16_lossy(&units).to_lowercase();
-
+    let text = system::decode_utf16_or_utf8(&bytes).to_lowercase();
     if !text.contains("windows registry editor version 5.00") {
         bail!("missing 'Windows Registry Editor Version 5.00' header");
     }
-    // reg.exe writes section headers with the full hive name, e.g.
-    // `[HKEY_LOCAL_MACHINE\SOFTWARE\...]`.
     let section = format!("[{}\\{}]", hive.full_name(), subpath).to_lowercase();
     if !text.contains(&section) {
-        bail!("backup does not contain the expected key section [{}\\{}]", hive.full_name(), subpath);
+        bail!(
+            "backup does not contain the section [{}\\{}]",
+            hive.full_name(),
+            subpath
+        );
     }
     Ok(())
 }
 
-fn remove_path(p: &Path) -> std::io::Result<()> {
+pub fn remove_path(p: &Path) -> std::io::Result<()> {
     if p.is_dir() {
         fs::remove_dir_all(p)
     } else {
@@ -223,7 +420,6 @@ fn remove_path(p: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Recursively copy a file or directory tree.
 fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
     if meta.is_dir() {
@@ -241,7 +437,7 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Replace characters that are invalid in Windows filenames, and bound length.
+/// Replace characters that are invalid in Windows file names, bound length.
 fn sanitize(s: &str) -> String {
     let mut out: String = s
         .chars()
@@ -252,9 +448,8 @@ fn sanitize(s: &str) -> String {
         })
         .collect();
     out = out.trim_matches([' ', '.']).to_string();
-    // Truncate by characters (not bytes) so we never split a multi-byte char.
-    if out.chars().count() > 120 {
-        out = out.chars().take(120).collect();
+    if out.chars().count() > 80 {
+        out = out.chars().take(80).collect();
     }
     if out.is_empty() {
         out.push_str("item");
@@ -274,7 +469,6 @@ mod tests {
 
     #[test]
     fn validates_a_real_reg_export() {
-        // Build a genuine UTF-16 LE .reg byte stream (BOM + header + section).
         let content =
             "Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\SOFTWARE\\OxidizeTest]\r\n\"x\"=\"y\"\r\n";
         let mut bytes = vec![0xFF, 0xFE];
@@ -284,10 +478,28 @@ mod tests {
         let path = std::env::temp_dir().join("oxidize_validate_test.reg");
         fs::write(&path, &bytes).unwrap();
 
-        // Correct hive + subpath validates; a different section is rejected.
         assert!(validate_reg_file(&path, Hive::CurrentUser, r"SOFTWARE\OxidizeTest").is_ok());
         assert!(validate_reg_file(&path, Hive::CurrentUser, r"SOFTWARE\Other").is_err());
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn manifest_round_trips() {
+        let m = Manifest {
+            program: "X".into(),
+            created: "now".into(),
+            entries: vec![ManifestEntry {
+                kind: LeftoverKind::PathEntry,
+                path: "PATH entry C:\\x".into(),
+                undo: Undo::PathAdd {
+                    hive: Hive::CurrentUser,
+                    entry: "C:\\x".into(),
+                },
+            }],
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Manifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 1);
     }
 }

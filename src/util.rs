@@ -8,20 +8,88 @@
 /// Generic words that carry no identifying signal and would cause false
 /// matches if used as search tokens (e.g. a folder literally named "Software").
 const STOPWORDS: &[&str] = &[
-    "the", "inc", "llc", "ltd", "corp", "corporation", "company", "limited",
-    "software", "technologies", "technology", "systems", "solutions", "group",
-    "version", "edition", "x64", "x86", "win32", "win64", "bit", "win",
-    "windows", "setup", "installer", "install", "app", "apps", "application",
-    "free", "pro", "professional", "plus", "premium", "update", "build",
-    "release", "gmbh", "srl", "sas", "incorporated", "and", "for", "com",
-    "net", "org", "program", "programs", "common", "files", "data", "tools",
+    "the",
+    "inc",
+    "llc",
+    "ltd",
+    "corp",
+    "corporation",
+    "company",
+    "limited",
+    "software",
+    "technologies",
+    "technology",
+    "systems",
+    "solutions",
+    "group",
+    "version",
+    "edition",
+    "x64",
+    "x86",
+    "win32",
+    "win64",
+    "bit",
+    "win",
+    "windows",
+    "setup",
+    "installer",
+    "install",
+    "app",
+    "apps",
+    "application",
+    "free",
+    "pro",
+    "professional",
+    "plus",
+    "premium",
+    "update",
+    "build",
+    "release",
+    "gmbh",
+    "srl",
+    "sas",
+    "incorporated",
+    "and",
+    "for",
+    "com",
+    "net",
+    "org",
+    "program",
+    "programs",
+    "common",
+    "files",
+    "data",
+    "tools",
     // High-collision generic words: too common to identify a product on their
     // own, so they never become match tokens (a single coincidental hit on one
     // of these must not flag an unrelated program's files).
-    "media", "player", "viewer", "editor", "manager", "helper", "updater",
-    "launcher", "driver", "drivers", "runtime", "redistributable", "redist",
-    "framework", "toolkit", "utility", "utilities", "assistant", "agent",
-    "host", "service", "services", "core", "bin", "lib", "resources", "client",
+    "media",
+    "player",
+    "viewer",
+    "editor",
+    "manager",
+    "helper",
+    "updater",
+    "launcher",
+    "driver",
+    "drivers",
+    "runtime",
+    "redistributable",
+    "redist",
+    "framework",
+    "toolkit",
+    "utility",
+    "utilities",
+    "assistant",
+    "agent",
+    "host",
+    "service",
+    "services",
+    "core",
+    "bin",
+    "lib",
+    "resources",
+    "client",
 ];
 
 /// True if `token` is a non-identifying stopword.
@@ -192,20 +260,30 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Normalise a raw `InstallDate` value (`YYYYMMDD`) to `YYYY-MM-DD`. If the
-/// value is not a sensible 8-digit date, return it trimmed and unchanged.
-pub fn format_install_date(raw: &str) -> String {
+/// Parse a raw `InstallDate` value into `YYYY-MM-DD`. Installers write the
+/// documented `YYYYMMDD`, but also ISO dates, `MM/DD/YYYY` and free text.
+/// Anything that is not a plausible date yields `None`.
+pub fn parse_install_date(raw: &str) -> Option<String> {
     let t = raw.trim();
-    if t.len() == 8 && t.chars().all(|c| c.is_ascii_digit()) {
-        let (y, rest) = t.split_at(4);
-        let (m, d) = rest.split_at(2);
-        let mm: u32 = m.parse().unwrap_or(0);
-        let dd: u32 = d.parse().unwrap_or(0);
-        if (1..=12).contains(&mm) && (1..=31).contains(&dd) {
-            return format!("{y}-{m}-{d}");
-        }
+    let digits: Vec<&str> = t
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (y, m, d) = match digits.as_slice() {
+        [ymd] if ymd.len() == 8 => (&ymd[0..4], &ymd[4..6], &ymd[6..8]),
+        [y, m, d] if y.len() == 4 => (*y, *m, *d),
+        [m, d, y] if y.len() == 4 => (*y, *m, *d),
+        _ => return None,
+    };
+    let (yy, mm, dd) = (
+        y.parse::<u32>().ok()?,
+        m.parse::<u32>().ok()?,
+        d.parse::<u32>().ok()?,
+    );
+    if !(1990..=2100).contains(&yy) || !(1..=12).contains(&mm) || !(1..=31).contains(&dd) {
+        return None;
     }
-    t.to_string()
+    Some(format!("{yy:04}-{mm:02}-{dd:02}"))
 }
 
 /// Lower-cased file name (no directory) of a path-like string. Handles both
@@ -259,7 +337,10 @@ mod tests {
     fn handles_escaped_quote() {
         // \" is a literal quote, not a delimiter.
         let v = split_command_line(r#"x \"y\" z"#);
-        assert_eq!(v, vec!["x".to_string(), "\"y\"".to_string(), "z".to_string()]);
+        assert_eq!(
+            v,
+            vec!["x".to_string(), "\"y\"".to_string(), "z".to_string()]
+        );
     }
 
     #[test]
@@ -305,9 +386,21 @@ mod tests {
 
     #[test]
     fn formats_install_date() {
-        assert_eq!(format_install_date("20240115"), "2024-01-15");
-        assert_eq!(format_install_date("notadate"), "notadate");
-        assert_eq!(format_install_date("20249999"), "20249999"); // invalid m/d kept raw
+        assert_eq!(
+            parse_install_date("20240115").as_deref(),
+            Some("2024-01-15")
+        );
+        assert_eq!(
+            parse_install_date("2026-09-11").as_deref(),
+            Some("2026-09-11")
+        );
+        assert_eq!(
+            parse_install_date("9/11/2026").as_deref(),
+            Some("2026-09-11")
+        );
+        assert_eq!(parse_install_date("20265714"), None);
+        assert_eq!(parse_install_date("Wed Jan 21 2026"), None);
+        assert_eq!(parse_install_date("notadate"), None);
     }
 
     #[test]
@@ -316,6 +409,9 @@ mod tests {
             file_basename_lower(r#""C:\Program Files\App\App.EXE""#),
             Some("app.exe".to_string())
         );
-        assert_eq!(file_basename_lower("App.exe,0"), Some("app.exe,0".to_string()));
+        assert_eq!(
+            file_basename_lower("App.exe,0"),
+            Some("app.exe,0".to_string())
+        );
     }
 }

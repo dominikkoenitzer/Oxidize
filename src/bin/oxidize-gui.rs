@@ -15,26 +15,16 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui::{self, Color32, RichText};
 
-use oxidize::model::{Confidence, Leftover, Program, ScanReport};
-use oxidize::safety::{self, DeletionOutcome, SafetyContext};
+use oxidize::model::{Confidence, Group, Leftover, Program, ScanReport};
+use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
 use oxidize::{registry, scanner, uninstall, util};
-
-/// Raw 64×64 RGBA window icon (generated into `assets/` alongside the .ico).
-const ICON_RGBA: &[u8] = include_bytes!("../../assets/icon-64.rgba");
-/// Raw 64×64 RGBA generic icon shown for programs that expose no icon.
-const PLACEHOLDER_RGBA: &[u8] = include_bytes!("../../assets/placeholder-64.rgba");
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1040.0, 700.0])
             .with_min_inner_size([720.0, 480.0])
-            .with_title("Oxidize - thorough uninstaller")
-            .with_icon(egui::IconData {
-                rgba: ICON_RGBA.to_vec(),
-                width: 64,
-                height: 64,
-            }),
+            .with_title("Oxidize"),
         ..Default::default()
     };
     eframe::run_native(
@@ -47,11 +37,22 @@ fn main() -> eframe::Result {
 /// Messages sent from background worker threads back to the UI thread.
 enum Msg {
     Programs(Vec<Program>),
-    Scan { program: String, report: ScanReport },
-    Uninstalled { message: String, still_installed: bool },
+    Scan {
+        id: String,
+        report: ScanReport,
+    },
+    Uninstalled {
+        message: String,
+        still_installed: bool,
+    },
     Removed(DeletionOutcome),
     /// An extracted program icon (raw RGBA), keyed by the program's id.
-    Icon { id: String, rgba: Vec<u8>, w: u32, h: u32 },
+    Icon {
+        id: String,
+        rgba: Vec<u8>,
+        w: u32,
+        h: u32,
+    },
     Error(String),
 }
 
@@ -78,9 +79,8 @@ struct OxidizeApp {
     programs: Vec<Program>,
     /// Per-program icon textures, keyed by program id (loaded progressively).
     icons: HashMap<String, egui::TextureHandle>,
-    /// Generic icon shown for programs with no extractable icon.
-    placeholder: egui::TextureHandle,
     scan: Option<ScanReport>,
+    /// Id of the program the scan belongs to.
     scan_for: Option<String>,
     checked: Vec<bool>,
 
@@ -109,15 +109,9 @@ struct OxidizeApp {
 impl OxidizeApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let (tx, rx) = channel();
-        let placeholder = cc.egui_ctx.load_texture(
-            "placeholder-icon",
-            egui::ColorImage::from_rgba_unmultiplied([64, 64], PLACEHOLDER_RGBA),
-            egui::TextureOptions::LINEAR,
-        );
         let app = OxidizeApp {
             programs: Vec::new(),
             icons: HashMap::new(),
-            placeholder,
             scan: None,
             scan_for: None,
             checked: Vec::new(),
@@ -181,7 +175,13 @@ impl OxidizeApp {
             .programs
             .iter()
             .filter(|p| !self.icons.contains_key(p.id()))
-            .map(|p| (p.id().to_string(), p.display_icon.clone(), p.install_location.clone()))
+            .map(|p| {
+                (
+                    p.id().to_string(),
+                    p.display_icon.clone(),
+                    p.install_location.clone(),
+                )
+            })
             .collect();
         if items.is_empty() {
             return;
@@ -207,9 +207,10 @@ impl OxidizeApp {
         self.status = format!("Scanning for leftovers of {}…", program.display_name);
         self.spawn(ctx, move || {
             let target = scanner::build_target(&program);
-            let report = scanner::scan(&target);
+            let installed = uninstall::still_installed(&program);
+            let report = scanner::scan(&target, installed);
             Msg::Scan {
-                program: program.display_name.clone(),
+                id: program.id().to_string(),
                 report,
             }
         });
@@ -271,11 +272,24 @@ impl OxidizeApp {
                     }
                     self.spawn_icon_load(ctx);
                 }
-                Msg::Scan { program, report } => {
-                    // Default-check the High-confidence items (as the CLI does).
-                    self.checked = report.all().map(|l| l.confidence == Confidence::High).collect();
-                    self.status = format!("{} leftover(s) found for {program}.", report.total());
-                    self.scan_for = Some(program);
+                Msg::Scan { id, report } => {
+                    // High-confidence items start checked, as on the command line.
+                    // A program that is still installed shows its footprint with
+                    // nothing checked.
+                    self.checked = report
+                        .all()
+                        .map(|l| !report.installed && l.confidence == Confidence::High)
+                        .collect();
+                    self.status = if report.installed {
+                        format!(
+                            "{} items make up {}. It is still installed.",
+                            report.total(),
+                            report.program_name
+                        )
+                    } else {
+                        format!("{} leftovers of {}.", report.total(), report.program_name)
+                    };
+                    self.scan_for = Some(id);
                     self.scan = Some(report);
                     self.busy = false;
                 }
@@ -293,8 +307,19 @@ impl OxidizeApp {
                     self.load_programs(ctx);
                 }
                 Msg::Removed(outcome) => {
+                    for item in &outcome.items {
+                        match &item.status {
+                            ItemStatus::Removed => self.log.push(format!("removed {}", item.path)),
+                            ItemStatus::AlreadyGone => {
+                                self.log.push(format!("already gone {}", item.path))
+                            }
+                            ItemStatus::Failed(e) => {
+                                self.log.push(format!("failed {}: {e}", item.path))
+                            }
+                        }
+                    }
                     let line = if self.dry_run {
-                        format!("[dry-run] {} item(s) would be removed", outcome.attempted)
+                        format!("dry run: {} items would be removed", outcome.attempted)
                     } else {
                         let mut parts = vec![format!("{} removed", outcome.deleted)];
                         if outcome.skipped > 0 {
@@ -306,12 +331,16 @@ impl OxidizeApp {
                         parts.join(", ")
                     };
                     self.log.push(line.clone());
-                    if let Some(dir) = &outcome.backup_dir {
-                        self.log.push(format!("Backups & quarantine: {}", dir.display()));
+                    if let Some(name) = &outcome.backup_name {
+                        self.log.push(format!(
+                            "Undo from the command line: oxidize restore \"{name}\""
+                        ));
                     }
                     if outcome.failed > 0 {
-                        self.log
-                            .push("Some removals failed, likely missing admin rights.".to_string());
+                        self.log.push(
+                            "Some removals failed, usually missing administrator rights."
+                                .to_string(),
+                        );
                     }
                     self.status = line;
                     self.busy = false;
@@ -328,7 +357,8 @@ impl OxidizeApp {
                 Msg::Icon { id, rgba, w, h } => {
                     let image =
                         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
-                    let tex = ctx.load_texture(format!("ico-{id}"), image, egui::TextureOptions::LINEAR);
+                    let tex =
+                        ctx.load_texture(format!("ico-{id}"), image, egui::TextureOptions::LINEAR);
                     self.icons.insert(id, tex);
                 }
                 Msg::Error(e) => {
@@ -386,18 +416,21 @@ impl OxidizeApp {
             return;
         }
         let message = match self.confirm.as_ref().unwrap() {
-            Confirm::Uninstall(p) => {
-                format!("Run the uninstaller for \"{}\"?", p.display_name)
+            Confirm::Uninstall(p) => format!("Run the uninstaller for {}?", p.display_name),
+            Confirm::Remove(items, _) => {
+                if self.make_backups {
+                    format!(
+                        "Remove {} items? A backup is kept, so this can be undone.",
+                        items.len()
+                    )
+                } else {
+                    format!("Remove {} items permanently?", items.len())
+                }
             }
-            Confirm::Remove(items, _) => format!(
-                "Remove {} selected leftover(s)?\n\nRegistry keys are exported to .reg and files \
-                 are moved to a quarantine folder first, so this is reversible.",
-                items.len()
-            ),
         };
 
         let mut decision: Option<bool> = None;
-        egui::Window::new("Please confirm")
+        egui::Window::new("Confirm")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -405,7 +438,7 @@ impl OxidizeApp {
                 ui.label(message);
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Yes, proceed").strong()).clicked() {
+                    if ui.button(RichText::new("Yes").strong()).clicked() {
                         decision = Some(true);
                     }
                     if ui.button("Cancel").clicked() {
@@ -435,9 +468,9 @@ fn conf_color(conf: Confidence) -> Color32 {
 
 fn conf_tag(conf: Confidence) -> &'static str {
     match conf {
-        Confidence::High => "HIGH",
-        Confidence::Medium => "MED",
-        Confidence::Low => "LOW",
+        Confidence::High => "high",
+        Confidence::Medium => "med",
+        Confidence::Low => "low",
     }
 }
 
@@ -461,15 +494,15 @@ impl eframe::App for OxidizeApp {
                 ui.heading("Oxidize");
                 ui.separator();
                 if self.elevated {
-                    ui.colored_label(conf_color(Confidence::High), "● Administrator");
+                    ui.colored_label(conf_color(Confidence::High), "Administrator");
                 } else {
-                    ui.colored_label(Color32::from_rgb(210, 70, 70), "● Not elevated");
+                    ui.colored_label(Color32::from_rgb(210, 70, 70), "Not elevated");
                     if ui.button("Restart as admin").clicked() {
                         action = Some(Action::RestartAdmin);
                     }
                 }
                 ui.separator();
-                if ui.button("⟳ Refresh").clicked() {
+                if ui.button("Refresh").clicked() {
                     action = Some(Action::Refresh);
                 }
                 if self.busy {
@@ -480,9 +513,13 @@ impl eframe::App for OxidizeApp {
                 ui.checkbox(&mut self.dry_run, "Dry run")
                     .on_hover_text("Show what would happen without changing anything");
                 ui.checkbox(&mut self.make_backups, "Create backups")
-                    .on_hover_text("Export registry keys to .reg and quarantine files before deleting");
+                    .on_hover_text(
+                        "Export registry keys to .reg and quarantine files before deleting",
+                    );
                 ui.checkbox(&mut self.silent, "Silent uninstall")
-                    .on_hover_text("Use the program's unattended uninstall switches where available");
+                    .on_hover_text(
+                        "Use the program's unattended uninstall switches where available",
+                    );
                 if ui
                     .checkbox(&mut self.include_system, "Show system components")
                     .changed()
@@ -542,9 +579,18 @@ impl eframe::App for OxidizeApp {
                                 )
                             };
                             ui.horizontal(|ui| {
-                                // Program icon, falling back to the generic placeholder.
-                                let tex = self.icons.get(&id).unwrap_or(&self.placeholder);
-                                ui.image(egui::load::SizedTexture::new(tex.id(), icon_size));
+                                // The program's own icon, or a blank of the same size.
+                                match self.icons.get(&id) {
+                                    Some(tex) => {
+                                        ui.image(egui::load::SizedTexture::new(
+                                            tex.id(),
+                                            icon_size,
+                                        ));
+                                    }
+                                    None => {
+                                        ui.allocate_space(icon_size);
+                                    }
+                                }
                                 if ui.selectable_label(is_selected, label).clicked() {
                                     self.selected = Some(id);
                                     self.scan = None;
@@ -573,8 +619,9 @@ impl eframe::App for OxidizeApp {
 
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                let tex = self.icons.get(program.id()).unwrap_or(&self.placeholder);
-                ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(32.0, 32.0)));
+                if let Some(tex) = self.icons.get(program.id()) {
+                    ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(32.0, 32.0)));
+                }
                 ui.heading(&program.display_name);
             });
             egui::Grid::new("details").num_columns(2).show(ui, |ui| {
@@ -611,18 +658,23 @@ impl eframe::App for OxidizeApp {
 
             ui.separator();
 
-            // Scan results (only when they belong to the selected program).
-            let belongs = scan_for.as_deref() == Some(program.display_name.as_str());
+            // Scan results, only when they belong to the selected program.
+            let belongs = scan_for.as_deref() == Some(program.id());
             match (&scan, belongs) {
                 (Some(report), true) => {
+                    if report.installed {
+                        ui.label(
+                            RichText::new("Still installed. These items are its current footprint, not leftovers.")
+                                .color(conf_color(Confidence::Medium)),
+                        );
+                    }
                     ui.horizontal_wrapped(|ui| {
                         let reclaim = report.reclaimable_bytes();
                         ui.label(format!(
-                            "{} registry · {} files{}",
-                            report.registry.len(),
-                            report.filesystem.len(),
+                            "{} items{}",
+                            report.total(),
                             if reclaim > 0 {
-                                format!(" · ~{} reclaimable", util::human_size(reclaim))
+                                format!(", {} in files", util::human_size(reclaim))
                             } else {
                                 String::new()
                             }
@@ -647,7 +699,7 @@ impl eframe::App for OxidizeApp {
                     } else {
                         format!("Remove {n_checked} checked item(s)")
                     };
-                    ui.add_enabled_ui(n_checked > 0, |ui| {
+                    ui.add_enabled_ui(n_checked > 0 && !report.installed, |ui| {
                         if ui
                             .button(RichText::new(remove_label).color(Color32::from_rgb(210, 80, 80)))
                             .clicked()
@@ -667,15 +719,23 @@ impl eframe::App for OxidizeApp {
                         .id_salt("scan_scroll")
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let mut idx = 0;
-                            render_group(ui, "Registry leftovers", &report.registry, &mut checked, &mut idx);
-                            ui.add_space(6.0);
-                            render_group(ui, "Files & folders", &report.filesystem, &mut checked, &mut idx);
+                            // `checked` is indexed like `report.all()`, so walk the
+                            // items in that order and pick the group per item.
+                            for group in Group::ALL {
+                                let indices: Vec<usize> = report
+                                    .all()
+                                    .enumerate()
+                                    .filter(|(_, l)| l.kind.group() == group)
+                                    .map(|(i, _)| i)
+                                    .collect();
+                                if indices.is_empty() {
+                                    continue;
+                                }
+                                render_group(ui, group.title(), &report.items, &indices, &mut checked);
+                                ui.add_space(6.0);
+                            }
                             if report.is_empty() {
-                                ui.label(
-                                    RichText::new("No leftovers found. Clean uninstall.")
-                                        .color(conf_color(Confidence::High)),
-                                );
+                                ui.label(RichText::new("Nothing found.").color(conf_color(Confidence::High)));
                             }
                         });
                 }
@@ -726,20 +786,18 @@ impl eframe::App for OxidizeApp {
     }
 }
 
-/// Render one group (registry or filesystem) of leftovers with checkboxes.
-/// `idx` is the running index into the flat `checked` vector: registry first,
-/// then filesystem, matching `ScanReport::all()`.
+/// Render one group of leftovers with checkboxes. `indices` are positions
+/// into `items` and into `checked`.
 fn render_group(
     ui: &mut egui::Ui,
     title: &str,
     items: &[Leftover],
+    indices: &[usize],
     checked: &mut [bool],
-    idx: &mut usize,
 ) {
-    ui.label(RichText::new(format!("{title} ({})", items.len())).strong());
-    for item in items {
-        let i = *idx;
-        *idx += 1;
+    ui.label(RichText::new(format!("{title} ({})", indices.len())).strong());
+    for &i in indices {
+        let item = &items[i];
         ui.horizontal(|ui| {
             if i < checked.len() {
                 ui.checkbox(&mut checked[i], "");
@@ -849,7 +907,10 @@ unsafe fn icon_from_file(path: &str, index: i32) -> Option<(Vec<u8>, u32, u32)> 
     };
     use windows::Win32::UI::WindowsAndMessaging::{DestroyIcon, HICON};
 
-    let wide: Vec<u16> = OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = OsStr::new(path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
     // ExtractIconExW honours the icon index.
     let mut hicon = HICON::default();

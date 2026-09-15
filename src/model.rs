@@ -1,25 +1,21 @@
-//! Shared data model.
-//!
-//! Nothing here touches Windows. `serde` is the only dependency, and only for
-//! `--json` output; the winreg and `windows` calls stay in the modules that
-//! need them. That keeps the matching and formatting logic unit-testable
-//! without a real registry to point it at.
+//! Shared data model. Nothing here touches Windows, so the matching and
+//! formatting logic can be unit-tested without a real registry.
 
 use std::path::PathBuf;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Which registry hive an entry came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Hive {
-    /// `HKEY_LOCAL_MACHINE`, for machine-wide installs. Needs admin to modify.
+    /// `HKEY_LOCAL_MACHINE`, machine-wide. Needs admin to modify.
     LocalMachine,
-    /// `HKEY_CURRENT_USER`, for per-user installs. Writable without elevation.
+    /// `HKEY_CURRENT_USER`, per-user. Writable without elevation.
     CurrentUser,
 }
 
 impl Hive {
-    /// The full name used inside a `.reg` file, e.g. `HKEY_LOCAL_MACHINE`.
+    /// The full name used inside a `.reg` file.
     pub fn full_name(self) -> &'static str {
         match self {
             Hive::LocalMachine => "HKEY_LOCAL_MACHINE",
@@ -27,7 +23,7 @@ impl Hive {
         }
     }
 
-    /// The short name accepted by `reg.exe`, e.g. `HKLM`.
+    /// The short name accepted by `reg.exe`.
     pub fn short_name(self) -> &'static str {
         match self {
             Hive::LocalMachine => "HKLM",
@@ -36,23 +32,18 @@ impl Hive {
     }
 }
 
-/// Which WOW64 view an `HKLM\SOFTWARE` entry lives in.
-///
-/// On 64-bit Windows the registry is split. 64-bit programs register under the
-/// native `SOFTWARE\...` path; 32-bit programs are physically stored under
-/// `SOFTWARE\WOW6432Node\...`. We always address keys by their physical path,
-/// spelling out `WOW6432Node`, so backup, export and delete all land on the
-/// same key with no redirection in between.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+/// Which WOW64 view an `HKLM\SOFTWARE` entry lives in. 64-bit programs
+/// register under `SOFTWARE\...`, 32-bit ones physically under
+/// `SOFTWARE\WOW6432Node\...`. Keys are always addressed by their physical
+/// path so backup, export and delete land on the same key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RegistryView {
-    /// Native 64-bit view (also the only view that exists on 32-bit Windows).
     Native64,
-    /// 32-bit-on-64-bit view, physically under `SOFTWARE\WOW6432Node`.
     Wow6432,
 }
 
 impl RegistryView {
-    /// The `Uninstall` key base path for this view (relative to the hive root).
+    /// The `Uninstall` key for this view, relative to the hive root.
     pub fn uninstall_base(self) -> &'static str {
         match self {
             RegistryView::Native64 => r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -62,7 +53,6 @@ impl RegistryView {
         }
     }
 
-    /// Human label for display.
     pub fn label(self) -> &'static str {
         match self {
             RegistryView::Native64 => "64-bit",
@@ -72,7 +62,7 @@ impl RegistryView {
 }
 
 /// Where (hive + view) a program's uninstall entry was found.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegistrySource {
     pub hive: Hive,
     pub view: RegistryView,
@@ -83,25 +73,24 @@ impl RegistrySource {
         Self { hive, view }
     }
 
-    /// Short human description, e.g. `HKLM/64-bit`.
+    /// Short description, e.g. `HKLM 64-bit`.
     pub fn label(self) -> String {
-        format!("{}/{}", self.hive.short_name(), self.view.label())
+        format!("{} {}", self.hive.short_name(), self.view.label())
     }
 }
 
-/// A single installed program, as read from one Uninstall registry subkey.
+/// One installed program, as read from one Uninstall registry subkey.
 #[derive(Debug, Clone, Serialize)]
 pub struct Program {
-    /// The Uninstall subkey name. For MSI products this is the ProductCode GUID;
-    /// otherwise it is an app-chosen string. Used as the stable selection id.
+    /// The Uninstall subkey name. For MSI products the ProductCode GUID,
+    /// otherwise an app-chosen string. Used as the stable selection id.
     pub registry_key: String,
-    /// Which hive/view this entry came from.
     pub source: RegistrySource,
 
     pub display_name: String,
     pub display_version: Option<String>,
     pub publisher: Option<String>,
-    /// Install date, normalised to `YYYY-MM-DD` when the raw value parses.
+    /// Install date as `YYYY-MM-DD`, when the raw value was a real date.
     pub install_date: Option<String>,
     pub install_location: Option<String>,
     pub display_icon: Option<String>,
@@ -110,54 +99,116 @@ pub struct Program {
     pub uninstall_string: Option<String>,
     pub quiet_uninstall_string: Option<String>,
     pub url_info_about: Option<String>,
-    /// True when `WindowsInstaller == 1` (an MSI product).
+    /// `WindowsInstaller == 1`: an MSI product.
     pub is_windows_installer: bool,
-    /// True when `SystemComponent == 1` (hidden OS component).
+    /// `SystemComponent == 1`: hidden OS component.
     pub is_system_component: bool,
 }
 
 impl Program {
-    /// The selection id (the Uninstall subkey name).
     pub fn id(&self) -> &str {
         &self.registry_key
     }
 
     /// Path of the program's own Uninstall key, relative to its hive root.
     pub fn uninstall_subpath(&self) -> String {
-        format!("{}\\{}", self.source.view.uninstall_base(), self.registry_key)
+        format!(
+            "{}\\{}",
+            self.source.view.uninstall_base(),
+            self.registry_key
+        )
     }
 
-    /// Estimated on-disk size in bytes (from `EstimatedSize`, KiB → bytes).
     pub fn size_bytes(&self) -> Option<u64> {
         self.estimated_size_kb.map(|kb| kb as u64 * 1024)
     }
 }
 
-/// How confident the scanner is that an item is a genuine leftover of the
-/// target program.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+/// How sure the scanner is that an item belongs to the target program.
+/// Ordered `High < Medium < Low` so "act on everything up to this level"
+/// is a plain comparison.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Confidence {
-    /// Strong evidence (under the install folder, the program's own orphaned
-    /// Uninstall key, an exact name match, a GUID/CLSID key). Safe to remove.
+    /// Strong evidence: inside the install folder, the program's own key,
+    /// an exact name match. Removed by default.
     High,
-    /// Plausible but could belong to something else (publisher folder that may
-    /// hold sibling products, partial name match). Review before removing.
+    /// Plausible but could belong to something else. Review first.
     Medium,
-    /// Weak signal, shown for context only. Off by default.
+    /// Weak signal, shown for context.
     Low,
 }
 
+impl Confidence {
+    pub fn label(self) -> &'static str {
+        match self {
+            Confidence::High => "high",
+            Confidence::Medium => "medium",
+            Confidence::Low => "low",
+        }
+    }
+}
+
 /// The kind of thing a leftover is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LeftoverKind {
-    /// A whole registry key (and its subtree).
     RegistryKey,
-    /// A single named value under a registry key.
     RegistryValue,
-    /// A file.
     File,
-    /// A directory (and its contents).
     Directory,
+    /// A Windows service (registered under `SYSTEM\CurrentControlSet\Services`).
+    Service,
+    /// A Task Scheduler task.
+    ScheduledTask,
+    /// One entry of the user or machine `Path` variable.
+    PathEntry,
+    /// A Windows Firewall rule.
+    FirewallRule,
+}
+
+/// Rendering group for a leftover kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    Registry,
+    Files,
+    System,
+}
+
+impl Group {
+    pub const ALL: [Group; 3] = [Group::Registry, Group::Files, Group::System];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Group::Registry => "registry",
+            Group::Files => "files",
+            Group::System => "system",
+        }
+    }
+}
+
+impl LeftoverKind {
+    pub fn group(self) -> Group {
+        match self {
+            LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => Group::Registry,
+            LeftoverKind::File | LeftoverKind::Directory => Group::Files,
+            LeftoverKind::Service
+            | LeftoverKind::ScheduledTask
+            | LeftoverKind::PathEntry
+            | LeftoverKind::FirewallRule => Group::System,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            LeftoverKind::RegistryKey => "key",
+            LeftoverKind::RegistryValue => "value",
+            LeftoverKind::File => "file",
+            LeftoverKind::Directory => "folder",
+            LeftoverKind::Service => "service",
+            LeftoverKind::ScheduledTask => "task",
+            LeftoverKind::PathEntry => "path",
+            LeftoverKind::FirewallRule => "firewall",
+        }
+    }
 }
 
 /// One leftover discovered by the scanner.
@@ -165,25 +216,46 @@ pub enum LeftoverKind {
 pub struct Leftover {
     pub kind: LeftoverKind,
     pub confidence: Confidence,
-    /// Human-readable reason this was flagged (drives trust + the report).
+    /// Short reason it was flagged.
     pub reason: String,
-    /// Display path: a filesystem path, or a full `HKEY_...\...` registry path.
+    /// Display string: a filesystem path, a short registry path, or a
+    /// description for services, tasks, PATH entries and firewall rules.
     pub path: String,
-    /// Size in bytes for files/directories (best-effort).
+    /// Size in bytes for files and folders.
     pub size_bytes: Option<u64>,
-    /// True if this is an empty directory.
     pub is_empty_dir: bool,
 
-    // Registry-only addressing. None for filesystem leftovers.
+    /// Registry addressing. `None` for filesystem leftovers and tasks.
     pub hive: Option<Hive>,
-    /// Path under the hive root (no `HKEY_...` prefix), for delete/export.
+    /// Path under the hive root, for export and delete.
     pub subpath: Option<String>,
-    /// When set, this leftover is one value, not the whole key.
+    /// Set when the leftover is one value, not the whole key.
     pub value_name: Option<String>,
+    /// Service name, task path, or the PATH entry text.
+    pub name: Option<String>,
 }
 
 impl Leftover {
-    /// Construct a filesystem leftover (file or directory).
+    fn base(
+        kind: LeftoverKind,
+        confidence: Confidence,
+        reason: impl Into<String>,
+        path: String,
+    ) -> Self {
+        Leftover {
+            kind,
+            confidence,
+            reason: reason.into(),
+            path,
+            size_bytes: None,
+            is_empty_dir: false,
+            hive: None,
+            subpath: None,
+            value_name: None,
+            name: None,
+        }
+    }
+
     pub fn fs(
         kind: LeftoverKind,
         path: PathBuf,
@@ -192,20 +264,12 @@ impl Leftover {
         size_bytes: Option<u64>,
         is_empty_dir: bool,
     ) -> Self {
-        Leftover {
-            kind,
-            confidence,
-            reason: reason.into(),
-            path: path.display().to_string(),
-            size_bytes,
-            is_empty_dir,
-            hive: None,
-            subpath: None,
-            value_name: None,
-        }
+        let mut l = Self::base(kind, confidence, reason, path.display().to_string());
+        l.size_bytes = size_bytes;
+        l.is_empty_dir = is_empty_dir;
+        l
     }
 
-    /// Construct a whole-registry-key leftover.
     pub fn reg_key(
         hive: Hive,
         subpath: impl Into<String>,
@@ -213,21 +277,13 @@ impl Leftover {
         reason: impl Into<String>,
     ) -> Self {
         let subpath = subpath.into();
-        let path = format!("{}\\{}", hive.full_name(), subpath);
-        Leftover {
-            kind: LeftoverKind::RegistryKey,
-            confidence,
-            reason: reason.into(),
-            path,
-            size_bytes: None,
-            is_empty_dir: false,
-            hive: Some(hive),
-            subpath: Some(subpath),
-            value_name: None,
-        }
+        let path = format!("{}\\{}", hive.short_name(), subpath);
+        let mut l = Self::base(LeftoverKind::RegistryKey, confidence, reason, path);
+        l.hive = Some(hive);
+        l.subpath = Some(subpath);
+        l
     }
 
-    /// Construct a single-registry-value leftover.
     pub fn reg_value(
         hive: Hive,
         subpath: impl Into<String>,
@@ -237,66 +293,159 @@ impl Leftover {
     ) -> Self {
         let subpath = subpath.into();
         let value_name = value_name.into();
-        let path = format!("{}\\{} :: {}", hive.full_name(), subpath, value_name);
-        Leftover {
-            kind: LeftoverKind::RegistryValue,
-            confidence,
-            reason: reason.into(),
-            path,
-            size_bytes: None,
-            is_empty_dir: false,
-            hive: Some(hive),
-            subpath: Some(subpath),
-            value_name: Some(value_name),
-        }
+        let path = format!("{}\\{} : {}", hive.short_name(), subpath, value_name);
+        let mut l = Self::base(LeftoverKind::RegistryValue, confidence, reason, path);
+        l.hive = Some(hive);
+        l.subpath = Some(subpath);
+        l.value_name = Some(value_name);
+        l
+    }
+
+    /// A Windows service. `image` is the executable it runs, for display.
+    pub fn service(
+        name: impl Into<String>,
+        image: &str,
+        confidence: Confidence,
+        reason: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let path = if image.is_empty() {
+            format!("service {name}")
+        } else {
+            format!("service {name}  ({image})")
+        };
+        let mut l = Self::base(LeftoverKind::Service, confidence, reason, path);
+        l.hive = Some(Hive::LocalMachine);
+        l.subpath = Some(format!(r"SYSTEM\CurrentControlSet\Services\{name}"));
+        l.name = Some(name);
+        l
+    }
+
+    /// A scheduled task. `task_path` is the full task name including folders,
+    /// e.g. `\Vendor\Updater`.
+    pub fn task(
+        task_path: impl Into<String>,
+        command: &str,
+        confidence: Confidence,
+        reason: impl Into<String>,
+    ) -> Self {
+        let task_path = task_path.into();
+        let path = if command.is_empty() {
+            format!("task {task_path}")
+        } else {
+            format!("task {task_path}  ({command})")
+        };
+        let mut l = Self::base(LeftoverKind::ScheduledTask, confidence, reason, path);
+        l.name = Some(task_path);
+        l
+    }
+
+    /// One entry of a `Path` variable. `hive` says whether it is the user or
+    /// the machine variable.
+    pub fn path_entry(
+        hive: Hive,
+        entry: impl Into<String>,
+        confidence: Confidence,
+        reason: impl Into<String>,
+    ) -> Self {
+        let entry = entry.into();
+        let scope = match hive {
+            Hive::CurrentUser => "user",
+            Hive::LocalMachine => "machine",
+        };
+        let path = format!("PATH entry {entry}  ({scope})");
+        let mut l = Self::base(LeftoverKind::PathEntry, confidence, reason, path);
+        l.hive = Some(hive);
+        l.subpath = Some(environment_key(hive).to_string());
+        l.value_name = Some("Path".to_string());
+        l.name = Some(entry);
+        l
+    }
+
+    /// A firewall rule stored under the `FirewallRules` key. `value_name` is
+    /// the rule id, `rule_name` its display name, `app` the program it covers.
+    pub fn firewall_rule(
+        value_name: impl Into<String>,
+        rule_name: &str,
+        kind: &str,
+        app: &str,
+        confidence: Confidence,
+        reason: impl Into<String>,
+    ) -> Self {
+        let value_name = value_name.into();
+        let path = if kind.is_empty() {
+            format!("firewall rule \"{rule_name}\"  ({app})")
+        } else {
+            format!("firewall rule \"{rule_name}\" {kind}  ({app})")
+        };
+        let mut l = Self::base(LeftoverKind::FirewallRule, confidence, reason, path);
+        l.hive = Some(Hive::LocalMachine);
+        l.subpath = Some(FIREWALL_RULES_KEY.to_string());
+        l.value_name = Some(value_name);
+        l.name = Some(rule_name.to_string());
+        l
     }
 }
 
-/// The result of a leftover scan, grouped registry vs. filesystem.
+/// The registry key holding the `Path` variable for a hive.
+pub fn environment_key(hive: Hive) -> &'static str {
+    match hive {
+        Hive::CurrentUser => "Environment",
+        Hive::LocalMachine => r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+    }
+}
+
+/// Where Windows Firewall keeps its rules.
+pub const FIREWALL_RULES_KEY: &str =
+    r"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules";
+
+/// The result of a leftover scan.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ScanReport {
     pub program_name: String,
-    pub registry: Vec<Leftover>,
-    pub filesystem: Vec<Leftover>,
+    /// True when the program is still registered, so the items are its
+    /// current footprint rather than leftovers.
+    pub installed: bool,
+    pub items: Vec<Leftover>,
 }
 
 impl ScanReport {
     pub fn total(&self) -> usize {
-        self.registry.len() + self.filesystem.len()
+        self.items.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.total() == 0
+        self.items.is_empty()
     }
 
-    /// All leftovers, registry first then filesystem.
     pub fn all(&self) -> impl Iterator<Item = &Leftover> {
-        self.registry.iter().chain(self.filesystem.iter())
+        self.items.iter()
     }
 
-    /// Sum of `size_bytes` across all filesystem leftovers.
+    pub fn group(&self, group: Group) -> impl Iterator<Item = &Leftover> {
+        self.items.iter().filter(move |l| l.kind.group() == group)
+    }
+
+    /// Sum of `size_bytes` across file and folder leftovers.
     pub fn reclaimable_bytes(&self) -> u64 {
-        self.filesystem
-            .iter()
-            .filter_map(|l| l.size_bytes)
-            .sum()
+        self.group(Group::Files).filter_map(|l| l.size_bytes).sum()
     }
 }
 
-/// The "seed" describing the program we are scanning leftovers for. Captured
-/// before the uninstaller runs, as a snapshot of the footprint, so we can still
-/// recognise leftovers once the entry itself is gone.
+/// The identity of the program being scanned for. Captured before the
+/// uninstaller runs so leftovers are still recognised once the entry is gone,
+/// or built from a bare name when the program is no longer registered.
 #[derive(Debug, Clone)]
 pub struct ScanTarget {
     pub display_name: String,
     pub publisher: Option<String>,
     pub install_location: Option<PathBuf>,
-    /// Lower-cased executable basenames seen in DisplayIcon / install dir.
+    /// Lower-cased executable basenames seen in DisplayIcon / UninstallString.
     pub exe_names: Vec<String>,
     /// Significant lower-cased tokens of the display name.
     pub name_tokens: Vec<String>,
     /// Significant lower-cased tokens of the publisher.
     pub publisher_tokens: Vec<String>,
-    pub registry_key: String,
-    pub source: RegistrySource,
+    /// The Uninstall subkey and its source. `None` for name-only targets.
+    pub registry: Option<(String, RegistrySource)>,
 }

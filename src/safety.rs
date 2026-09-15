@@ -1,10 +1,10 @@
-//! Administrator-privilege detection, optional self-elevation, and the one
-//! function every destructive action has to pass through.
+//! Administrator detection, self-elevation, and the one function every
+//! destructive action goes through.
 //!
-//! Nothing in Oxidize deletes a registry key or a file except via
-//! [`remove_leftovers`]. It guarantees three things: a dry run shows without
-//! touching, registry keys are exported to a `.reg` before deletion, and files
-//! are moved to a reversible quarantine instead of being destroyed.
+//! Nothing in Oxidize deletes anything except via [`remove_leftovers`]. A dry
+//! run changes nothing, registry keys are exported before deletion, files are
+//! quarantined rather than destroyed, and everything removed is written to a
+//! manifest that `oxidize restore` can replay.
 
 use std::path::{Path, PathBuf};
 
@@ -12,33 +12,46 @@ use anyhow::{bail, Context, Result};
 
 use crate::backup::BackupSession;
 use crate::model::{Leftover, LeftoverKind};
-use crate::registry;
-use crate::term;
+use crate::scanner;
+use crate::{registry, system};
 
-/// User-controlled safety switches, threaded through every destructive call.
 #[derive(Debug, Clone, Copy)]
 pub struct SafetyContext {
-    /// Show what would happen, change nothing.
     pub dry_run: bool,
-    /// Create backups before deleting (true unless `--no-backup`).
+    /// True unless `--no-backup`.
     pub make_backups: bool,
 }
 
-/// Tally of a removal pass.
+#[derive(Debug, Clone)]
+pub enum ItemStatus {
+    Removed,
+    AlreadyGone,
+    Failed(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct ItemOutcome {
+    pub path: String,
+    pub kind: LeftoverKind,
+    pub status: ItemStatus,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct DeletionOutcome {
     pub attempted: usize,
     pub deleted: usize,
-    /// Already gone, or skipped in dry-run.
     pub skipped: usize,
     pub failed: usize,
     pub backup_dir: Option<PathBuf>,
+    pub backup_name: Option<String>,
+    pub items: Vec<ItemOutcome>,
+    /// Vendor folders that were left empty and removed too.
+    pub emptied_parents: Vec<PathBuf>,
 }
 
 // Elevation
 // ---------
 
-/// Is this process running with an elevated (Administrator) token?
 #[cfg(windows)]
 pub fn is_elevated() -> bool {
     use std::ffi::c_void;
@@ -73,9 +86,8 @@ pub fn is_elevated() -> bool {
     false
 }
 
-/// Relaunch the current process elevated via the shell "runas" verb (triggers a
-/// UAC prompt), forwarding our command-line arguments. The caller should exit
-/// after this returns `Ok`.
+/// Relaunch the current process through the shell "runas" verb (UAC prompt),
+/// forwarding our arguments. Exit after this returns `Ok`.
 #[cfg(windows)]
 pub fn relaunch_elevated() -> Result<()> {
     use std::ffi::OsStr;
@@ -85,16 +97,21 @@ pub fn relaunch_elevated() -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::SW_NORMAL;
 
     let exe = std::env::current_exe().context("resolving current executable path")?;
-    let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let exe_w: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
-    // Forward our own arguments (everything after argv[0]), quoted with the same
-    // rules the elevated instance will use to parse them (see util::split_command_line).
     let joined = std::env::args()
         .skip(1)
         .map(|a| quote_arg(&a))
         .collect::<Vec<_>>()
         .join(" ");
-    let params_w: Vec<u16> = OsStr::new(&joined).encode_wide().chain(std::iter::once(0)).collect();
+    let params_w: Vec<u16> = OsStr::new(&joined)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
 
     unsafe {
         let result = ShellExecuteW(
@@ -109,18 +126,14 @@ pub fn relaunch_elevated() -> Result<()> {
             PCWSTR::null(),
             SW_NORMAL,
         );
-        // ShellExecuteW returns an HINSTANCE; a value <= 32 indicates failure.
         if (result.0 as isize) <= 32 {
-            bail!("could not relaunch elevated (the UAC prompt may have been declined)");
+            bail!("could not relaunch elevated; the UAC prompt may have been declined");
         }
     }
     Ok(())
 }
 
-/// Quote a single argument for a Windows command line so that
-/// `CommandLineToArgvW` (and our [`crate::util::split_command_line`]) parses it
-/// back to the original string. This is the standard MSDN round-trip algorithm
-/// (double backslashes that precede a quote, and any trailing backslashes).
+/// Quote one argument so `CommandLineToArgvW` parses it back unchanged.
 #[cfg(windows)]
 fn quote_arg(arg: &str) -> String {
     let needs_quotes = arg.is_empty()
@@ -130,7 +143,6 @@ fn quote_arg(arg: &str) -> String {
     if !needs_quotes {
         return arg.to_string();
     }
-
     let mut out = String::with_capacity(arg.len() + 2);
     out.push('"');
     let mut backslashes = 0usize;
@@ -138,7 +150,6 @@ fn quote_arg(arg: &str) -> String {
         match c {
             '\\' => backslashes += 1,
             '"' => {
-                // Escape the run of backslashes (doubled) plus the quote.
                 for _ in 0..backslashes * 2 + 1 {
                     out.push('\\');
                 }
@@ -154,7 +165,6 @@ fn quote_arg(arg: &str) -> String {
             }
         }
     }
-    // Double any trailing backslashes so they don't escape the closing quote.
     for _ in 0..backslashes * 2 {
         out.push('\\');
     }
@@ -167,23 +177,28 @@ pub fn relaunch_elevated() -> Result<()> {
     bail!("elevation is only supported on Windows")
 }
 
-/// Warn (on stderr) when not elevated, since registry/system-folder writes need
-/// Administrator rights.
-pub fn warn_if_not_elevated() {
-    if !is_elevated() {
-        term::warn(
-            "Oxidize is not running as Administrator. Reading is fine, but removing \
-             HKLM keys or files under Program Files/ProgramData will fail. Re-run from \
-             an elevated terminal, or use `oxidize ... --elevate` to trigger a UAC prompt.",
-        );
-    }
+/// Does any of these items need administrator rights to remove?
+pub fn needs_elevation(items: &[Leftover]) -> bool {
+    items.iter().any(|l| match l.kind {
+        LeftoverKind::RegistryKey | LeftoverKind::RegistryValue | LeftoverKind::PathEntry => {
+            l.hive == Some(crate::model::Hive::LocalMachine)
+        }
+        LeftoverKind::Service | LeftoverKind::FirewallRule => true,
+        LeftoverKind::ScheduledTask => true,
+        LeftoverKind::File | LeftoverKind::Directory => {
+            let p = Path::new(&l.path);
+            ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"]
+                .iter()
+                .filter_map(|v| scanner::env_dir(v))
+                .any(|root| system::path_under(p, &root))
+        }
+    })
 }
 
 // The one destructive choke point
 // -------------------------------
 
-/// Remove the given leftovers, honouring the safety context. Prints per-item
-/// progress and returns a tally.
+/// Remove the given leftovers under the safety context.
 pub fn remove_leftovers(
     items: &[Leftover],
     program_label: &str,
@@ -194,96 +209,127 @@ pub fn remove_leftovers(
         return Ok(outcome);
     }
 
-    // Dry-run: describe and stop.
     if ctx.dry_run {
-        for item in items {
-            println!(
-                "  {} {} {}",
-                term::dim("would remove"),
-                kind_tag(item.kind),
-                item.path
-            );
-        }
         outcome.attempted = items.len();
         outcome.skipped = items.len();
         return Ok(outcome);
     }
 
-    // Set up the backup session (unless backups are disabled).
-    // When backups are on (the default) the user is relying on them, so failing
-    // to create the backup directory has to abort. We never fall through to an
-    // unbacked deletion, not even with --yes. --no-backup is the way to opt out.
-    let session = if ctx.make_backups {
+    // With backups on, failing to create the backup folder aborts. There is
+    // no fall-through to an unbacked deletion; --no-backup is the opt out.
+    let mut session = if ctx.make_backups {
         match BackupSession::new(program_label) {
-            Ok(session) => {
-                term::info(&format!("Backups in {}", session.root().display()));
-                Some(session)
-            }
+            Ok(session) => Some(session),
             Err(e) => bail!(
-                "could not create backup directory ({e:#}); refusing to delete without a backup. \
-                 Pass --no-backup to delete without backups."
+                "could not create the backup folder ({e:#}); refusing to delete without a backup. \
+                 Pass --no-backup to delete anyway."
             ),
         }
     } else {
         None
     };
 
+    // Tasks are looked up once so their XML can be copied before deletion.
+    let tasks = if items.iter().any(|l| l.kind == LeftoverKind::ScheduledTask) {
+        system::scheduled_tasks()
+    } else {
+        Vec::new()
+    };
+
+    let mut removed_fs: Vec<PathBuf> = Vec::new();
     for item in items {
         outcome.attempted += 1;
-        match remove_one(item, session.as_ref(), ctx.make_backups) {
+        let status = match remove_one(item, session.as_mut(), &tasks) {
             Ok(true) => {
                 outcome.deleted += 1;
-                term::success(&format!("removed {} {}", kind_tag(item.kind), item.path));
+                if matches!(item.kind, LeftoverKind::File | LeftoverKind::Directory) {
+                    removed_fs.push(PathBuf::from(&item.path));
+                }
+                ItemStatus::Removed
             }
             Ok(false) => {
                 outcome.skipped += 1;
-                term::info(&format!("already gone: {}", item.path));
+                ItemStatus::AlreadyGone
             }
             Err(e) => {
                 outcome.failed += 1;
-                term::error(&format!("failed to remove {}: {e:#}", item.path));
+                ItemStatus::Failed(format!("{e:#}"))
+            }
+        };
+        outcome.items.push(ItemOutcome {
+            path: item.path.clone(),
+            kind: item.kind,
+            status,
+        });
+    }
+
+    // A vendor folder that only held this product is now empty. Removing an
+    // empty folder needs no backup; it is recorded so restore recreates it.
+    for p in removed_fs {
+        if let Some(parent) = p.parent() {
+            if !scanner::is_protected_path(parent)
+                && !scanner::path_within_shared_dir(parent)
+                && scanner::is_dir_empty(parent)
+                && std::fs::remove_dir(parent).is_ok()
+            {
+                outcome.emptied_parents.push(parent.to_path_buf());
             }
         }
     }
 
-    outcome.backup_dir = session.as_ref().map(|s| s.root().to_path_buf());
+    if let Some(s) = &session {
+        outcome.backup_dir = Some(s.root().to_path_buf());
+        outcome.backup_name = Some(s.name());
+    }
     Ok(outcome)
 }
 
-/// Remove a single leftover. Returns `Ok(true)` if removed, `Ok(false)` if it
-/// was already gone.
-fn remove_one(item: &Leftover, session: Option<&BackupSession>, make_backups: bool) -> Result<bool> {
+/// `Ok(true)` removed, `Ok(false)` already gone.
+fn remove_one(
+    item: &Leftover,
+    session: Option<&mut BackupSession>,
+    tasks: &[system::TaskInfo],
+) -> Result<bool> {
     match item.kind {
         LeftoverKind::RegistryKey => {
             let hive = item.hive.context("registry leftover missing hive")?;
-            let subpath = item.subpath.as_deref().context("registry leftover missing path")?;
+            let subpath = item
+                .subpath
+                .as_deref()
+                .context("registry leftover missing path")?;
             if !registry::key_exists(hive, subpath) {
                 return Ok(false);
             }
-            if make_backups {
-                if let Some(session) = session {
-                    session
-                        .backup_registry_key(hive, subpath)
-                        .context("backing up registry key before deletion")?;
-                }
+            if let Some(s) = session {
+                s.backup_registry_key(item.kind, &item.path, hive, subpath)
+                    .context("backing up registry key")?;
             }
             registry::delete_key_tree(hive, subpath).context("deleting registry key")?;
             Ok(true)
         }
-        LeftoverKind::RegistryValue => {
+        LeftoverKind::RegistryValue | LeftoverKind::FirewallRule => {
             let hive = item.hive.context("registry leftover missing hive")?;
-            let subpath = item.subpath.as_deref().context("registry leftover missing path")?;
-            let value = item.value_name.as_deref().context("value leftover missing name")?;
-            if !registry::value_exists(hive, subpath, value) {
-                return Ok(false);
-            }
-            if make_backups {
-                if let Some(session) = session {
-                    // Exporting the containing key captures the value too.
-                    session
-                        .backup_registry_key(hive, subpath)
-                        .context("backing up registry key before value deletion")?;
-                }
+            let subpath = item
+                .subpath
+                .as_deref()
+                .context("registry leftover missing path")?;
+            let value = item
+                .value_name
+                .as_deref()
+                .context("value leftover missing name")?;
+            let Some(data) = registry::read_string(hive, subpath, value) else {
+                return Ok(if registry::value_exists(hive, subpath, value) {
+                    // Not a string value; still remove it, but nothing to record.
+                    registry::delete_value(hive, subpath, value)
+                        .context("deleting registry value")?;
+                    true
+                } else {
+                    false
+                });
+            };
+            if let Some(s) = session {
+                s.backup_value(item.kind, &item.path, hive, subpath, value, &data)
+                    .context("recording registry value")?;
             }
             registry::delete_value(hive, subpath, value).context("deleting registry value")?;
             Ok(true)
@@ -293,33 +339,71 @@ fn remove_one(item: &Leftover, session: Option<&BackupSession>, make_backups: bo
             if !path.exists() {
                 return Ok(false);
             }
-            if make_backups {
-                if let Some(session) = session {
-                    session
-                        .quarantine(&path)
-                        .context("moving to quarantine")?;
-                    return Ok(true);
-                }
+            if scanner::is_protected_path(&path) {
+                bail!("protected path");
             }
-            delete_path_permanently(&path).context("deleting path")?;
+            match session {
+                Some(s) => {
+                    s.quarantine(item.kind, &path)
+                        .context("moving to quarantine")?;
+                }
+                None => crate::backup::remove_path(&path).context("deleting")?,
+            }
             Ok(true)
         }
-    }
-}
-
-fn delete_path_permanently(p: &Path) -> std::io::Result<()> {
-    if p.is_dir() {
-        std::fs::remove_dir_all(p)
-    } else {
-        std::fs::remove_file(p)
-    }
-}
-
-fn kind_tag(kind: LeftoverKind) -> &'static str {
-    match kind {
-        LeftoverKind::RegistryKey => "[reg key]",
-        LeftoverKind::RegistryValue => "[reg val]",
-        LeftoverKind::File => "[file]   ",
-        LeftoverKind::Directory => "[dir]    ",
+        LeftoverKind::Service => {
+            let name = item
+                .name
+                .as_deref()
+                .context("service leftover missing name")?;
+            let subpath = item
+                .subpath
+                .as_deref()
+                .context("service leftover missing key")?;
+            if !registry::key_exists(crate::model::Hive::LocalMachine, subpath) {
+                return Ok(false);
+            }
+            if let Some(s) = session {
+                s.backup_registry_key(
+                    item.kind,
+                    &item.path,
+                    crate::model::Hive::LocalMachine,
+                    subpath,
+                )
+                .context("backing up service key")?;
+            }
+            system::delete_service(name)?;
+            Ok(true)
+        }
+        LeftoverKind::ScheduledTask => {
+            let name = item.name.as_deref().context("task leftover missing name")?;
+            let Some(task) = tasks.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else {
+                return Ok(false);
+            };
+            if let Some(s) = session {
+                s.backup_task(&item.path, task).context("backing up task")?;
+            }
+            system::delete_task(name)?;
+            Ok(true)
+        }
+        LeftoverKind::PathEntry => {
+            let hive = item.hive.context("path leftover missing hive")?;
+            let entry = item
+                .name
+                .as_deref()
+                .context("path leftover missing entry")?;
+            let present = system::path_entries(hive)
+                .iter()
+                .any(|e| e.eq_ignore_ascii_case(entry));
+            if !present {
+                return Ok(false);
+            }
+            if let Some(s) = session {
+                s.backup_path_entry(&item.path, hive, entry)
+                    .context("recording PATH entry")?;
+            }
+            system::remove_path_entry(hive, entry)?;
+            Ok(true)
+        }
     }
 }

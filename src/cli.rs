@@ -1,162 +1,186 @@
-//! Command-line interface definition (clap derive).
+//! Command-line definition (clap derive).
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::model::Confidence;
 
-/// A thorough Windows uninstaller.
-///
-/// Runs a program's own uninstaller, then finds and removes the registry and
-/// filesystem leftovers it leaves behind. Always backs up registry keys (to
-/// `.reg`) and quarantines files before deleting; supports `--dry-run`.
+/// Uninstall Windows programs and remove what they leave behind.
 #[derive(Parser, Debug)]
 #[command(name = "oxidize", version, about, long_about = None, propagate_version = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
 
-    /// Show what would happen without changing anything.
+    /// Show what would happen, change nothing.
     #[arg(long, global = true)]
     pub dry_run: bool,
 
-    /// Assume "yes" to all confirmation prompts.
+    /// Answer yes to every prompt.
     #[arg(short = 'y', long = "yes", global = true)]
     pub yes: bool,
 
-    /// Emit machine-readable JSON instead of formatted text.
+    /// Print JSON instead of text.
     #[arg(long, global = true)]
     pub json: bool,
 
-    /// Disable coloured output.
+    /// Plain output without colour.
     #[arg(long, global = true)]
     pub no_color: bool,
 
-    /// Do NOT back up registry keys / quarantine files before deleting
-    /// (dangerous; deletions become irreversible).
+    /// Delete without backups. Removals become permanent.
     #[arg(long, global = true)]
     pub no_backup: bool,
 
-    /// Relaunch with Administrator rights (UAC prompt) before running.
+    /// Relaunch as administrator (UAC prompt) first.
     #[arg(long, global = true)]
     pub elevate: bool,
-
-    /// Increase verbosity (-v, -vv).
-    #[arg(short, long, global = true, action = ArgAction::Count)]
-    pub verbose: u8,
 }
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// List installed programs (read-only).
+    /// List installed programs.
     List(ListArgs),
-    /// Run a program's uninstaller, then optionally scan/remove leftovers.
+    /// Uninstall a program, then remove its leftovers.
     Uninstall(UninstallArgs),
-    /// Scan for a program's leftovers, and optionally remove them.
+    /// Find a program's leftovers. Works for programs that are already gone.
     Scan(ScanArgs),
-    /// Trace a running process / executable back to its installed program.
-    Hunter(HunterArgs),
+    /// Find folders, PATH entries, services and tasks no program owns.
+    Orphans(OrphansArgs),
+    /// Find the program behind a running process or an executable.
+    Trace(TraceArgs),
+    /// List backups made by earlier removals.
+    Backups(BackupsArgs),
+    /// Put back everything a backup holds.
+    Restore(RestoreArgs),
 }
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    /// Only show programs whose name or publisher contains this text.
+    /// Only programs whose name or publisher contains this text.
     pub filter: Option<String>,
 
     /// Include hidden system components.
     #[arg(long)]
-    pub all: bool,
+    pub system: bool,
 
-    /// Sort order.
     #[arg(long, value_enum, default_value_t = SortKey::Name)]
     pub sort: SortKey,
 }
 
 #[derive(Args, Debug)]
 pub struct UninstallArgs {
-    /// Program display name (or unique substring) or registry id.
-    #[arg(value_name = "NAME_OR_ID")]
+    /// Program name, a unique part of it, or its registry id.
+    #[arg(value_name = "PROGRAM")]
     pub target: String,
 
-    /// Run the uninstaller unattended/silently where the program supports it.
+    /// Use the program's unattended uninstall switches where it has them.
     #[arg(long)]
     pub silent: bool,
 
-    /// After uninstalling, scan for leftovers.
+    /// Show leftovers afterwards but do not remove them.
     #[arg(long)]
-    pub scan: bool,
-
-    /// After scanning, remove the leftovers (implies --scan).
-    #[arg(long)]
-    pub remove: bool,
+    pub keep: bool,
 
     #[command(flatten)]
-    pub leftovers: LeftoverOpts,
+    pub levels: LevelOpts,
 }
 
 #[derive(Args, Debug)]
 pub struct ScanArgs {
-    /// Program display name (or unique substring) or registry id.
-    #[arg(value_name = "NAME_OR_ID")]
+    /// Program name, a unique part of it, or its registry id. A program that
+    /// is no longer installed is scanned by name.
+    #[arg(value_name = "PROGRAM")]
     pub target: String,
 
-    /// Remove the discovered leftovers (after confirmation).
+    /// Publisher, to tell vendor folders apart when scanning by name.
+    #[arg(long)]
+    pub publisher: Option<String>,
+
+    /// Remove what was found, after confirmation.
     #[arg(long)]
     pub remove: bool,
 
     #[command(flatten)]
-    pub leftovers: LeftoverOpts,
+    pub levels: LevelOpts,
 }
 
 #[derive(Args, Debug)]
-pub struct HunterArgs {
+pub struct OrphansArgs {
+    /// Remove PATH entries, autostart values, services and tasks that point
+    /// to files that no longer exist. Folders are listed only.
+    #[arg(long)]
+    pub remove: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct TraceArgs {
     /// Path to an .exe or folder, or the name of a running process.
-    #[arg(value_name = "EXE_PATH_OR_PROCESS")]
+    #[arg(value_name = "EXE_OR_PROCESS")]
     pub query: String,
 
-    /// If a program is identified, run its uninstaller.
+    /// Uninstall the program found, then remove its leftovers.
     #[arg(long)]
     pub uninstall: bool,
 
-    /// Uninstall silently (with --uninstall).
+    /// With --uninstall: use unattended switches where available.
     #[arg(long)]
     pub silent: bool,
 
-    /// Scan for leftovers after uninstalling (with --uninstall).
+    /// With --uninstall: show leftovers but do not remove them.
     #[arg(long)]
-    pub scan: bool,
-
-    /// Remove leftovers after scanning (with --uninstall; implies --scan).
-    #[arg(long)]
-    pub remove: bool,
+    pub keep: bool,
 
     #[command(flatten)]
-    pub leftovers: LeftoverOpts,
+    pub levels: LevelOpts,
 }
 
-/// Which confidence levels a removal acts on.
-#[derive(Args, Debug, Clone, Copy)]
-pub struct LeftoverOpts {
-    /// Also act on medium-confidence leftovers (default: high-confidence only).
-    #[arg(long)]
-    pub include_medium: bool,
+#[derive(Args, Debug)]
+pub struct BackupsArgs {
+    /// Delete one backup by name.
+    #[arg(long, value_name = "NAME")]
+    pub delete: Option<String>,
 
-    /// Act on all leftovers, including low-confidence ones (implies
-    /// --include-medium).
+    /// Delete every backup.
     #[arg(long)]
-    pub include_all: bool,
+    pub clear: bool,
 }
 
-impl LeftoverOpts {
-    /// The lowest confidence to act on. Because `Confidence` orders
-    /// `High < Medium < Low`, "act on items whose confidence `<=` this" yields
-    /// the expected nested behaviour.
+#[derive(Args, Debug)]
+pub struct RestoreArgs {
+    /// Backup name as shown by `oxidize backups`.
+    pub name: String,
+}
+
+/// Which confidence levels a removal acts on. High is always included.
+#[derive(Args, Debug, Clone, Copy, Default)]
+pub struct LevelOpts {
+    /// Also remove medium-confidence items.
+    #[arg(long)]
+    pub medium: bool,
+
+    /// Remove everything found, low-confidence items included.
+    #[arg(long)]
+    pub all: bool,
+}
+
+impl LevelOpts {
     pub fn threshold(&self) -> Confidence {
-        if self.include_all {
+        if self.all {
             Confidence::Low
-        } else if self.include_medium {
+        } else if self.medium {
             Confidence::Medium
         } else {
             Confidence::High
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        if self.all {
+            "all"
+        } else if self.medium {
+            "high and medium confidence"
+        } else {
+            "high confidence"
         }
     }
 }

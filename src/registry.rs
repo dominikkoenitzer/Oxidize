@@ -1,31 +1,27 @@
-//! Windows registry mechanics: enumerating installed programs from the Uninstall
-//! keys, and the low-level read/exists/delete primitives used by the scanner and
-//! the safety layer.
+//! Registry access: enumerating installed programs from the Uninstall keys,
+//! plus the read, exists and delete primitives the scanner and the safety
+//! layer use.
 //!
 //! Every key is addressed by its physical path, with WOW6432Node spelled out,
-//! and opened with `KEY_WOW64_64KEY`. A 64-bit `oxidize` therefore always sees
-//! the key it means to back up or delete, with no WOW64 redirection in play.
+//! and opened with `KEY_WOW64_64KEY`, so the key we read is the key we later
+//! back up and delete.
 
 use std::io;
 
 use winreg::enums::*;
 use winreg::types::FromRegValue;
-use winreg::RegKey;
+use winreg::{RegKey, RegValue};
 
 use crate::model::{Hive, Program, RegistrySource, RegistryView};
 use crate::util;
 
-/// The three registry locations that hold uninstall entries:
-///   * HKLM 64-bit (native),
-///   * HKLM 32-bit (physically under WOW6432Node),
-///   * HKCU (per-user installs).
+/// The three locations that hold uninstall entries.
 const SOURCES: [RegistrySource; 3] = [
     RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
     RegistrySource::new(Hive::LocalMachine, RegistryView::Wow6432),
     RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
 ];
 
-/// Wrap a predefined hive (no handle to close).
 fn predef(hive: Hive) -> RegKey {
     match hive {
         Hive::LocalMachine => RegKey::predef(HKEY_LOCAL_MACHINE),
@@ -33,15 +29,13 @@ fn predef(hive: Hive) -> RegKey {
     }
 }
 
-/// Open a key for reading in the 64-bit physical view. Returns `None` if it does
-/// not exist or cannot be opened.
+/// Open a key for reading in the 64-bit view. `None` if missing or unreadable.
 pub fn open_read(hive: Hive, subpath: &str) -> Option<RegKey> {
     predef(hive)
         .open_subkey_with_flags(subpath, KEY_READ | KEY_WOW64_64KEY)
         .ok()
 }
 
-/// Does this key exist (and is it readable)?
 pub fn key_exists(hive: Hive, subpath: &str) -> bool {
     open_read(hive, subpath).is_some()
 }
@@ -54,9 +48,8 @@ pub fn enum_subkeys(hive: Hive, subpath: &str) -> Vec<String> {
     }
 }
 
-/// `(name, data)` pairs for the string-typed values directly under `subpath`
-/// (REG_SZ / REG_EXPAND_SZ). Non-string values are skipped. Used to inspect
-/// autostart (`Run`) entries.
+/// `(name, data)` pairs for the string values directly under `subpath`
+/// (REG_SZ and REG_EXPAND_SZ). Other types are skipped.
 pub fn enum_string_values(hive: Hive, subpath: &str) -> Vec<(String, String)> {
     let Some(key) = open_read(hive, subpath) else {
         return Vec::new();
@@ -67,7 +60,29 @@ pub fn enum_string_values(hive: Hive, subpath: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Read an optional string value, treating "missing" and "empty" as `None`.
+/// Read one string value (REG_SZ or REG_EXPAND_SZ, unexpanded).
+pub fn read_string(hive: Hive, subpath: &str, name: &str) -> Option<String> {
+    let key = open_read(hive, subpath)?;
+    opt_string(&key, name)
+}
+
+/// Read one DWORD value.
+pub fn read_u32(hive: Hive, subpath: &str, name: &str) -> Option<u32> {
+    let key = open_read(hive, subpath)?;
+    opt_u32(&key, name)
+}
+
+/// Read a value with its raw type, so it can be written back unchanged.
+pub fn read_raw(hive: Hive, subpath: &str, name: &str) -> Option<RegValue<'static>> {
+    open_read(hive, subpath)?.get_raw_value(name).ok()
+}
+
+/// Write a raw value (type preserved). Needs `KEY_SET_VALUE`.
+pub fn write_raw(hive: Hive, subpath: &str, name: &str, value: &RegValue) -> io::Result<()> {
+    let key = predef(hive).open_subkey_with_flags(subpath, KEY_SET_VALUE | KEY_WOW64_64KEY)?;
+    key.set_raw_value(name, value)
+}
+
 fn opt_string(key: &RegKey, name: &str) -> Option<String> {
     match key.get_value::<String, _>(name) {
         Ok(s) => {
@@ -82,19 +97,14 @@ fn opt_string(key: &RegKey, name: &str) -> Option<String> {
     }
 }
 
-/// Read an optional `REG_DWORD` value as `u32`.
 fn opt_u32(key: &RegKey, name: &str) -> Option<u32> {
     key.get_value::<u32, _>(name).ok()
 }
 
-/// Build a [`Program`] from one Uninstall subkey. Returns `None` for entries
-/// without a `DisplayName` (patches, components, stubs).
+/// Build a [`Program`] from one Uninstall subkey. `None` for entries without
+/// a `DisplayName` (patches, components, stubs).
 fn read_program(source: RegistrySource, key_name: String, sub: &RegKey) -> Option<Program> {
     let display_name = opt_string(sub, "DisplayName")?;
-
-    let is_system_component = opt_u32(sub, "SystemComponent").unwrap_or(0) == 1;
-    let is_windows_installer = opt_u32(sub, "WindowsInstaller").unwrap_or(0) == 1;
-    let install_date = opt_string(sub, "InstallDate").map(|d| util::format_install_date(&d));
 
     Some(Program {
         registry_key: key_name,
@@ -102,23 +112,21 @@ fn read_program(source: RegistrySource, key_name: String, sub: &RegKey) -> Optio
         display_name,
         display_version: opt_string(sub, "DisplayVersion"),
         publisher: opt_string(sub, "Publisher"),
-        install_date,
+        install_date: opt_string(sub, "InstallDate").and_then(|d| util::parse_install_date(&d)),
         install_location: opt_string(sub, "InstallLocation"),
         display_icon: opt_string(sub, "DisplayIcon"),
         estimated_size_kb: opt_u32(sub, "EstimatedSize"),
         uninstall_string: opt_string(sub, "UninstallString"),
         quiet_uninstall_string: opt_string(sub, "QuietUninstallString"),
         url_info_about: opt_string(sub, "URLInfoAbout"),
-        is_windows_installer,
-        is_system_component,
+        is_windows_installer: opt_u32(sub, "WindowsInstaller").unwrap_or(0) == 1,
+        is_system_component: opt_u32(sub, "SystemComponent").unwrap_or(0) == 1,
     })
 }
 
-/// Enumerate every installed program across all three registry sources.
-///
-/// `include_system` controls whether entries flagged `SystemComponent == 1`
-/// (hidden OS components) are included; by default they are filtered out, as in
-/// the Windows "Apps & features" list.
+/// Every installed program across the three sources, sorted by name.
+/// `include_system` also returns entries flagged `SystemComponent`, which the
+/// Windows "Apps" list hides.
 pub fn enumerate_installed_programs(include_system: bool) -> Vec<Program> {
     let mut programs = Vec::new();
 
@@ -148,21 +156,17 @@ pub fn enumerate_installed_programs(include_system: bool) -> Vec<Program> {
     programs
 }
 
-/// Delete a registry key and everything beneath it. Requires `DELETE` access
-/// (HKLM keys need elevation). The literal subpath is used, so WOW6432Node keys
-/// are removed exactly.
+/// Delete a key and everything beneath it. HKLM keys need elevation.
 pub fn delete_key_tree(hive: Hive, subpath: &str) -> io::Result<()> {
     predef(hive).delete_subkey_all(subpath)
 }
 
-/// Delete a single named value under `subpath`.
+/// Delete a single value under `subpath`.
 pub fn delete_value(hive: Hive, subpath: &str, value_name: &str) -> io::Result<()> {
-    // RegDeleteValue needs only KEY_SET_VALUE (least privilege).
     let key = predef(hive).open_subkey_with_flags(subpath, KEY_SET_VALUE | KEY_WOW64_64KEY)?;
     key.delete_value(value_name)
 }
 
-/// Whether a value of the given name exists under `subpath`.
 pub fn value_exists(hive: Hive, subpath: &str, value_name: &str) -> bool {
     open_read(hive, subpath)
         .map(|k| k.get_raw_value(value_name).is_ok())
