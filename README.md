@@ -1,229 +1,91 @@
-<div align="center">
+# Oxidize
 
-<img src="docs/banner.png" alt="Oxidize" width="820" />
+Uninstall Windows programs and remove what they leave behind.
 
-[![CI](https://github.com/dominikkoenitzer/Oxidize/actions/workflows/ci.yml/badge.svg)](https://github.com/dominikkoenitzer/Oxidize/actions/workflows/ci.yml)
-![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6?logo=windows&logoColor=white)
-![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-CE412B?logo=rust&logoColor=white)
+Windows' own uninstall leaves things around: registry keys, folders under
+AppData and ProgramData, services, scheduled tasks, firewall rules, PATH
+entries that point nowhere. Oxidize runs a program's own uninstaller, then
+finds those leftovers and removes them. Everything removed is backed up first
+and can be put back with one command.
 
-</div>
+```
+oxidize list                     installed programs
+oxidize uninstall <program>      uninstall, then remove the leftovers
+oxidize scan <program>           leftovers of a program, installed or not
+oxidize orphans                  folders and references nothing owns anymore
+oxidize trace <exe or process>   which program does this belong to
+oxidize backups                  what earlier removals backed up
+oxidize restore <backup>         put a backup back
+```
 
-A thorough Windows uninstaller, written in Rust.
+`oxidize-gui.exe` is the same engine as a window.
 
-Windows' built-in uninstaller tends to leave junk behind: orphaned registry
-keys, leftover files, empty folders under `AppData`, `ProgramData` and
-`Program Files`. **Oxidize** runs a program's own uninstaller and then scans for
-and removes what it left behind, always backing up first.
+## Install
 
-> **This tool deletes registry keys and files.** Test it in a throwaway VM.
-> Every destructive action supports `--dry-run`, backs up registry keys to a
-> `.reg` file, and quarantines deleted files so they can be restored. Treat it
-> with the same caution you would any cleanup tool.
+Download `oxidize.exe` from the latest release and put it on your PATH, or
+build it yourself:
 
----
-
-## Features
-
-| Capability | Command | Notes |
-|---|---|---|
-| **List installed programs** | `oxidize-cli list` | Reads HKLM (64-bit), HKLM\WOW6432Node (32-bit) and HKCU uninstall keys. Name, version, publisher, size, install date, source. System components filtered out (`--all` to include). |
-| **Standard uninstall** | `oxidize-cli uninstall <name>` | Runs the program's registered `UninstallString` (or a synchronous `msiexec /x{GUID}` for MSI products), then verifies removal. |
-| **Leftover scan** | `oxidize-cli scan <name>` | Finds orphaned registry keys/values and leftover files/folders, grouped registry-vs-filesystem, each with a confidence level. |
-| **Safety / backup** | `--dry-run`, automatic `.reg` backup + file quarantine, elevation detection | Nothing is destroyed without a verified backup. |
-| **Hunter mode** | `oxidize-cli hunter <exe-path \| process-name>` | Traces a running process or an executable/folder back to its installed program. |
-
-Deliberately out of scope: junk/temp cleaners, browser-trace cleaning, startup
-manager, Windows tools shortcuts.
-
----
-
-## Two front-ends, one engine
-
-Oxidize ships as **two binaries** that share the same engine (`src/lib.rs`):
-
-* **`oxidize-cli.exe`**, the command-line interface (scriptable, JSON output).
-* **`oxidize-gui.exe`**, a native desktop window (egui), if you'd rather click.
-
-## Building
-
-Requires the Rust toolchain (stable) on Windows with the MSVC build tools.
-
-```powershell
+```
 cargo build --release
-# CLI:  target\release\oxidize-cli.exe
-# GUI:  target\release\oxidize-gui.exe
 ```
 
-Run the GUI:
+Windows only. Rust 1.95 or newer with the MSVC toolchain.
 
-```powershell
-.\target\release\oxidize-gui.exe
-```
+## Using it
 
-Run the tests and linter:
-
-```powershell
-cargo test
-cargo clippy --all-targets
-```
-
-### The GUI
-
-The window has a searchable program list on the left and, for the selected
-program, its details plus **Run uninstaller** and **Scan for leftovers**
-buttons. Scan results show registry and filesystem leftovers with per-item
-checkboxes and colour-coded confidence (HIGH/MED/LOW); the HIGH items are
-checked by default. The toolbar mirrors the CLI flags (**Dry run**, **Create
-backups**, **Silent uninstall**, **Show system components**) and shows whether
-you're elevated, with a *Restart as admin* button. Destructive actions ask for
-confirmation, back up to `.reg` and quarantine first, and run on a background
-thread so the window never freezes.
-
----
-
-## Usage
-
-```text
-oxidize-cli <COMMAND> [OPTIONS]
-
-Commands:
-  list       List installed programs (read-only)
-  uninstall  Run a program's uninstaller, then optionally scan/remove leftovers
-  scan       Scan for a program's leftovers, and optionally remove them
-  hunter     Trace a running process / executable back to its installed program
-
-Global options:
-  --dry-run         Show what would happen without changing anything
-  -y, --yes         Assume "yes" to all confirmation prompts
-  --json            Emit machine-readable JSON
-  --no-color        Disable coloured output
-  --no-backup       Do NOT back up before deleting (dangerous)
-  --elevate         Relaunch with Administrator rights (UAC prompt)
-  -v, --verbose     Increase verbosity
-```
-
-### Examples
-
-```powershell
-# Browse what's installed, biggest first
-oxidize-cli list --sort size
-
-# Find a specific publisher's apps
-oxidize-cli list intel
-
-# See what an uninstall + cleanup WOULD do, touching nothing
-oxidize-cli --dry-run uninstall "Some App" --scan --remove
-
-# The full flow: uninstall, then find and remove leftovers
-oxidize-cli uninstall "Some App" --remove
-
-# Just scan for leftovers (e.g. after a manual uninstall) and review them
-oxidize-cli scan "Some App"
-
-# Scan and also act on medium-confidence items
-oxidize-cli scan "Some App" --remove --include-medium
-
-# Trace a process back to its program and uninstall it
-oxidize-cli hunter "C:\Program Files\Some App\app.exe" --uninstall --remove
-```
-
-### A note on confidence levels
-
-The scanner labels each leftover:
-
-* **HIGH**: strong evidence it belongs to the program (inside the install
-  folder, the program's own orphaned uninstall key, an exact name match, an
-  App Paths entry for its executable). Removed by default.
-* **MED**: plausible, but could belong to a sibling product or be a partial
-  match. Only removed with `--include-medium`.
-* **LOW**: weak signal, shown for context. Only removed with `--include-all`.
-
-A publisher folder or key can hold several products (`Program Files\Some
-Vendor`, say), so Oxidize descends into those to find the specific product and
-never deletes one wholesale. OS and shared locations such as `C:\Windows`,
-`SOFTWARE\Microsoft` and driver-vendor roots are excluded entirely.
-
----
-
-## Safety model
-
-Oxidize layers its safety:
-
-1. **Dry-run** (`--dry-run`) prints every action and changes nothing.
-2. **Registry backup.** Before any key or value is deleted, the key is exported
-   to a `.reg` file using Windows' own `reg.exe export`, and the file is
-   validated (UTF-16 BOM, `Windows Registry Editor Version 5.00` header) before
-   the delete is allowed. Restore with `reg import <file>.reg`, or double-click
-   it.
-3. **File quarantine.** Files and folders are moved into the backup directory
-   with their original path preserved, not destroyed, so you can move them back.
-   `--no-backup` deletes permanently, which is not recommended.
-4. **Confirmation.** Interactive prompts before destructive steps. Skip with
-   `-y`.
-5. **Elevation detection.** Oxidize checks whether it is running as
-   Administrator and warns you, since HKLM and `Program Files` changes require
-   it. `--elevate` relaunches via a UAC prompt.
-
-Backups live under:
+Names can be partial. `oxidize uninstall brave` is enough if only one program
+matches.
 
 ```
-%LOCALAPPDATA%\Oxidize\backups\<timestamp>_<program>\
-    registry\   *.reg exports
-    files\      quarantined files/folders (original path preserved)
+oxidize uninstall brave
+oxidize scan "Google Chrome"          works after the program is gone
+oxidize scan Docker --remove
+oxidize orphans --remove              drops PATH entries, autostart values, services
+                                      and tasks whose files no longer exist
 ```
 
----
+Every leftover has a confidence. `--remove` takes the high-confidence ones;
+`--medium` adds the plausible ones, `--all` takes everything listed.
 
-## Architecture
-
-A single-binary CLI. Modules:
-
-| Module | Responsibility |
+| flag | |
 |---|---|
-| `model` | Shared, dependency-free data types (`Program`, `Leftover`, `ScanReport` and friends). |
-| `util` | Pure helpers: Windows command-line splitting, `%VAR%` expansion, name tokenisation, formatting. Unit-tested. |
-| `registry` | Enumerate installed programs; read/exists/delete registry primitives (64-bit physical-path addressing, WOW64-aware). |
-| `uninstall` | Build and run a program's registered uninstaller; verify completion. |
-| `scanner` | The leftover scanner: registry and filesystem, with the matching/confidence logic and safety denylists. |
-| `backup` | `.reg` export (validated) and file quarantine. |
-| `safety` | Elevation detection/relaunch and the one destructive choke point. |
-| `hunter` | Map a process/exe/folder back to an installed program. |
-| `cli` / `commands` | clap definitions and orchestration/rendering. |
-| `term` | Colour, VT enabling, prompts. |
+| `--dry-run` | show what would happen, change nothing |
+| `-y` | answer yes to every prompt |
+| `--json` | machine-readable output |
+| `--elevate` | relaunch as administrator |
+| `--no-backup` | delete permanently instead of quarantining |
 
-### Key Windows details handled
+## What gets checked
 
-* **Registry views.** 64-bit installers register under `SOFTWARE\...`, 32-bit
-  under `SOFTWARE\WOW6432Node\...`. Oxidize reads both, plus HKCU, and always
-  addresses keys by their physical path with `KEY_WOW64_64KEY`.
-* **MSI vs EXE uninstallers.** MSI products are uninstalled with a synchronous
-  `msiexec /x{GUID}`, which returns a reliable exit code. EXE uninstallers use
-  `QuietUninstallString` or `UninstallString`, parsed with the real
-  `CommandLineToArgvW` rules. Some EXE uninstallers relaunch a copy from
-  `%TEMP%` and exit early, so completion is confirmed by re-checking the
-  registry.
-* **Elevation.** Read from the `TOKEN_ELEVATION` token-information class, not a
-  fragile write-probe.
+Registry keys and values under `SOFTWARE` in HKCU and HKLM, both 32- and
+64-bit views, App Paths and autostart entries. Folders under Program Files,
+ProgramData, AppData, the Start Menu, Startup and the Desktop. Services,
+scheduled tasks, firewall rules and PATH entries. Windows' own locations are
+never touched, and a vendor folder that also holds other products is never
+removed as a whole.
 
----
+Store apps are not covered.
 
-## Status / roadmap
+## Backups
 
-All planned milestones are implemented:
+Removals go to `%LOCALAPPDATA%\Oxidize\backups\<date> <program>\`. Registry
+keys are exported to `.reg` files and validated before anything is deleted.
+Files and folders are moved there, not deleted. Task definitions are copied.
+A manifest records every step, and `oxidize restore` replays it in reverse.
 
-1. Read-only installed-programs lister
-2. Standard uninstall invocation
-3. Leftover scanner (registry and filesystem, including autostart entries)
-4. Safety layer (dry-run, `.reg` backup, file quarantine, elevation)
-5. Hunter mode
+## Building and testing
 
-Possible future work: a `restore` subcommand that re-imports a backup directory,
-reading the file version-info (CompanyName) to strengthen hunter matching, and a
-deeper "Advanced" scan mode that walks more registry surface.
+```
+cargo build --release
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
+```
 
----
+The engine is a library (`src/lib.rs`); `src/main.rs` and
+`src/bin/oxidize-gui.rs` are the two front-ends. Nothing deletes anything
+except `safety::remove_leftovers`.
 
-## Author
+## License
 
-Built and written by [@dominikkoenitzer](https://github.com/dominikkoenitzer).
-
+MIT.

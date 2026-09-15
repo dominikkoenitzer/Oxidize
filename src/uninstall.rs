@@ -1,33 +1,30 @@
 //! Running a program's own registered uninstaller.
 //!
-//! We build an explicit argument vector (never shelling through `cmd.exe`, which
-//! would lose the child's exit code and re-interpret metacharacters), prefer the
-//! synchronous, reliable MSI path when the product is a Windows Installer
-//! package, and verify completion by re-checking the registry afterwards (EXE
-//! uninstallers often relaunch a copy of themselves from `%TEMP%` and the first
-//! process exits before the real work is done).
+//! The command is built as an explicit argument vector, never through
+//! `cmd.exe`. MSI products go through a synchronous `msiexec /x`, which has a
+//! reliable exit code. EXE uninstallers often copy themselves to `%TEMP%` and
+//! exit early, so completion is confirmed by watching the registry and the
+//! process list afterwards.
 
+use std::path::Path;
 use std::process::{Command, ExitStatus};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 
 use crate::model::Program;
-use crate::registry;
-use crate::util;
+use crate::{registry, system, util};
 
-/// A concrete, ready-to-run uninstall command.
 #[derive(Debug, Clone)]
 pub struct UninstallPlan {
-    /// `argv[0]` = executable, the rest = arguments.
+    /// `argv[0]` is the executable.
     pub argv: Vec<String>,
-    /// True if this is an `msiexec` invocation (synchronous, reliable code).
     pub is_msi: bool,
-    /// Human description of where the command came from.
+    /// Where the command came from.
     pub source: String,
 }
 
 impl UninstallPlan {
-    /// The command rendered as a readable string (for dry-run / logging).
     pub fn display(&self) -> String {
         self.argv
             .iter()
@@ -43,7 +40,6 @@ impl UninstallPlan {
     }
 }
 
-/// Does `s` look like an MSI ProductCode GUID, e.g. `{0F1B...-...}`?
 fn looks_like_guid(s: &str) -> bool {
     let s = s.trim();
     s.len() == 38
@@ -54,19 +50,14 @@ fn looks_like_guid(s: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-/// Absolute path to a System32 executable, avoiding PATH hijacking.
-fn system32(exe: &str) -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    format!(r"{root}\System32\{exe}")
-}
-
-/// Decide how to uninstall `program`. `silent` requests an unattended run.
+/// Decide how to uninstall `program`.
 pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
-    // MSI products: build the command from the ProductCode instead of trusting
-    // the stored string's UI level. `msiexec /x` is synchronous and returns a
-    // meaningful exit code.
     if program.is_windows_installer && looks_like_guid(&program.registry_key) {
-        let mut argv = vec![system32("msiexec.exe"), "/x".to_string(), program.registry_key.clone()];
+        let mut argv = vec![
+            system::system32("msiexec.exe"),
+            "/x".to_string(),
+            program.registry_key.clone(),
+        ];
         if silent {
             argv.push("/qn".to_string());
             argv.push("/norestart".to_string());
@@ -74,22 +65,21 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
         return Ok(UninstallPlan {
             argv,
             is_msi: true,
-            source: "MSI ProductCode".to_string(),
+            source: "MSI product code".to_string(),
         });
     }
 
-    // EXE uninstallers: prefer the publisher-provided silent command when asked.
     let (raw, source) = if silent {
         match (&program.quiet_uninstall_string, &program.uninstall_string) {
             (Some(q), _) => (q.clone(), "QuietUninstallString".to_string()),
-            (None, Some(u)) => (u.clone(), "UninstallString (no quiet variant)".to_string()),
+            (None, Some(u)) => (u.clone(), "UninstallString, no quiet variant".to_string()),
             (None, None) => bail!("no uninstall command recorded for this program"),
         }
     } else {
         let u = program
             .uninstall_string
             .clone()
-            .context("no UninstallString recorded for this program")?;
+            .context("no uninstall command recorded for this program")?;
         (u, "UninstallString".to_string())
     };
 
@@ -97,7 +87,6 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
     if argv.is_empty() {
         bail!("uninstall command parsed to nothing: {raw:?}");
     }
-
     Ok(UninstallPlan {
         argv,
         is_msi: false,
@@ -106,48 +95,89 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
 }
 
 /// Launch the plan and wait for the spawned process to exit.
-///
-/// Note: for non-MSI uninstallers this is necessary but not always sufficient.
-/// See [`still_installed`] for the post-run verification.
 pub fn run(plan: &UninstallPlan) -> Result<ExitStatus> {
-    let (exe, args) = plan
-        .argv
-        .split_first()
-        .expect("plan argv is never empty (checked in plan())");
+    let (exe, args) = plan.argv.split_first().expect("plan argv is never empty");
 
-    let status = Command::new(exe).args(args).status().map_err(|e| {
-        // CreateProcess returns 740 when the target needs elevation.
+    Command::new(exe).args(args).status().map_err(|e| {
         if e.raw_os_error() == Some(740) {
-            anyhow::anyhow!(
-                "the uninstaller requires Administrator rights (error 740). \
-                 Re-run Oxidize from an elevated prompt."
-            )
+            anyhow::anyhow!("the uninstaller needs administrator rights. Add --elevate or use an elevated terminal.")
         } else {
-            anyhow::Error::new(e).context(format!("failed to launch uninstaller: {exe}"))
+            anyhow::Error::new(e).context(format!("failed to launch {exe}"))
         }
-    })?;
-
-    Ok(status)
+    })
 }
 
-/// Re-check whether the program's Uninstall key still exists. After a genuine
-/// uninstall it disappears; if it is still there the uninstall may have been
-/// cancelled, failed, or detached into a background process.
+/// Is the program's Uninstall key still there?
 pub fn still_installed(program: &Program) -> bool {
     registry::key_exists(program.source.hive, &program.uninstall_subpath())
 }
 
-/// Interpret an MSI/EXE uninstaller exit code for display.
+/// After the launched process exits, an EXE uninstaller may still be running
+/// as a detached copy. Wait while the registry entry exists and a process
+/// that looks like the uninstaller is alive, up to `max`. Returns true if the
+/// entry is gone.
+pub fn wait_for_completion(program: &Program, plan: &UninstallPlan, max: Duration) -> bool {
+    if plan.is_msi || !still_installed(program) {
+        return !still_installed(program);
+    }
+    let uninstaller = util::file_basename_lower(&plan.argv[0]);
+    let install_dir = program
+        .install_location
+        .as_deref()
+        .map(util::expand_env_vars)
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+
+    let start = Instant::now();
+    while start.elapsed() < max {
+        if !still_installed(program) {
+            return true;
+        }
+        let alive = system::running_exes().into_iter().any(|exe| {
+            let base = util::file_basename_lower(&exe.to_string_lossy());
+            base.is_some() && base == uninstaller
+                || install_dir
+                    .as_deref()
+                    .map(|d| system::path_under(&exe, d))
+                    .unwrap_or(false)
+                || is_temp_uninstaller(&exe)
+        });
+        if !alive {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    !still_installed(program)
+}
+
+/// Inno Setup and friends run from `%TEMP%\<random>\_iu14D2N.tmp` or similar.
+fn is_temp_uninstaller(exe: &Path) -> bool {
+    let Some(temp) = std::env::var_os("TEMP").map(std::path::PathBuf::from) else {
+        return false;
+    };
+    if !system::path_under(exe, &temp) {
+        return false;
+    }
+    let name = exe
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    name.contains("unins")
+        || name.ends_with(".tmp")
+        || name.contains("setup")
+        || name.contains("install")
+}
+
 pub fn describe_exit(status: ExitStatus, is_msi: bool) -> String {
     match status.code() {
-        Some(0) => "completed successfully".to_string(),
-        Some(3010) => "completed; a reboot is required".to_string(),
-        Some(1641) => "completed; a reboot has been initiated".to_string(),
-        Some(1605) if is_msi => "product was not installed (1605)".to_string(),
-        Some(1602) if is_msi => "cancelled by the user (1602)".to_string(),
-        Some(1618) if is_msi => "another installation is already in progress (1618)".to_string(),
+        Some(0) => "finished".to_string(),
+        Some(3010) => "finished, a reboot is required".to_string(),
+        Some(1641) => "finished, a reboot has been started".to_string(),
+        Some(1605) if is_msi => "reported the product as not installed (1605)".to_string(),
+        Some(1602) if is_msi => "was cancelled (1602)".to_string(),
+        Some(1618) if is_msi => "found another installation in progress (1618)".to_string(),
         Some(code) => format!("exited with code {code}"),
-        None => "terminated without an exit code".to_string(),
+        None => "ended without an exit code".to_string(),
     }
 }
 

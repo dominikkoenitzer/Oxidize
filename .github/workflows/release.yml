@@ -1,0 +1,43 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/oxidize.exe dist/
+          Copy-Item target/release/oxidize-gui.exe dist/
+          Compress-Archive -Path dist/* -DestinationPath "oxidize-${{ github.ref_name }}-windows-x64.zip"
+          Get-FileHash "oxidize-${{ github.ref_name }}-windows-x64.zip" -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  oxidize-${{ github.ref_name }}-windows-x64.zip" } |
+            Set-Content "oxidize-${{ github.ref_name }}-windows-x64.zip.sha256"
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            oxidize-${{ github.ref_name }}-windows-x64.zip
+            oxidize-${{ github.ref_name }}-windows-x64.zip.sha256
+          generate_release_notes: true

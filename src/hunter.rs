@@ -1,4 +1,4 @@
-//! Hunter mode: point it at a binary or process to find its program. Given a path
+//! Trace a binary or process back to its program. Given a path
 //! to an executable/folder, or the name of a running process, trace it back to
 //! the installed-program entry it belongs to so the user can uninstall it.
 //!

@@ -10,18 +10,21 @@ env:
 
 jobs:
   build-test:
-    name: Build, test & lint (Windows)
+    name: Build, test and lint
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust (stable)
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
 
       - name: Build
         run: cargo build --release --all-targets
@@ -37,6 +40,6 @@ jobs:
         with:
           name: oxidize-windows
           path: |
-            target/release/oxidize-cli.exe
+            target/release/oxidize.exe
             target/release/oxidize-gui.exe
           if-no-files-found: error
