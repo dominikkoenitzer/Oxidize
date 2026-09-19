@@ -465,7 +465,10 @@ mod tests {
     #[test]
     fn a_bare_msiexec_command_is_unchanged() {
         let v = split_uninstall_command("MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}");
-        assert_eq!(v, ["MsiExec.exe", "/X{2D7E0D49-0001-0000-0000-000000000000}"]);
+        assert_eq!(
+            v,
+            ["MsiExec.exe", "/X{2D7E0D49-0001-0000-0000-000000000000}"]
+        );
     }
 
     #[test]
