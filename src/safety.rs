@@ -318,14 +318,20 @@ fn remove_one(
                 .as_deref()
                 .context("value leftover missing name")?;
             let Some(data) = registry::read_string(hive, subpath, value) else {
-                return Ok(if registry::value_exists(hive, subpath, value) {
-                    // Not a string value; still remove it, but nothing to record.
-                    registry::delete_value(hive, subpath, value)
-                        .context("deleting registry value")?;
-                    true
-                } else {
-                    false
-                });
+                if !registry::value_exists(hive, subpath, value) {
+                    return Ok(false);
+                }
+                // Record the raw type and bytes. Exporting the containing key
+                // instead would carry every other program in it, and a Run key
+                // belongs to the whole machine.
+                if let Some(s) = session {
+                    let raw = registry::read_raw(hive, subpath, value)
+                        .context("reading registry value")?;
+                    s.backup_raw_value(item.kind, &item.path, hive, subpath, value, &raw)
+                        .context("backing up registry value")?;
+                }
+                registry::delete_value(hive, subpath, value).context("deleting registry value")?;
+                return Ok(true);
             };
             if let Some(s) = session {
                 s.backup_value(item.kind, &item.path, hive, subpath, value, &data)
