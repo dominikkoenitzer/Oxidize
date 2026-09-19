@@ -176,6 +176,38 @@ pub fn expand_env_vars(s: &str) -> String {
 /// Note: the real API treats `argv[0]` slightly specially, but program paths in
 /// uninstall strings are either quoted or contain no embedded quotes, so the
 /// general rules produce the correct result for our inputs.
+/// Split a registry uninstall command into argv.
+///
+/// `CommandLineToArgvW` splits an unquoted program path on its spaces, but
+/// that is not how Windows resolves one: it tries ever longer prefixes, so
+/// `C:\Program Files\Foo\uninst.exe /S` runs `uninst.exe`, not `C:\Program`.
+/// Splitting it the other way both fails to run the uninstaller and, because
+/// `Command` appends `.exe` to an extensionless program, can launch a planted
+/// `C:\Program.exe` instead, while the confirmation prompt still renders the
+/// original command. Quoted commands follow the ordinary rules.
+pub fn split_uninstall_command(cmd: &str) -> Vec<String> {
+    let trimmed = cmd.trim();
+    if trimmed.starts_with('"') {
+        return split_command_line(trimmed);
+    }
+    // Byte scan rather than `to_lowercase().find()`, so a non-ASCII path
+    // cannot shift the index and panic the slice.
+    let end = trimmed
+        .as_bytes()
+        .windows(4)
+        .position(|w| w.eq_ignore_ascii_case(b".exe"))
+        .map(|i| i + 4);
+    match end {
+        Some(i) if trimmed.is_char_boundary(i) => {
+            let (exe, rest) = trimmed.split_at(i);
+            let mut argv = vec![exe.to_string()];
+            argv.extend(split_command_line(rest));
+            argv
+        }
+        _ => split_command_line(trimmed),
+    }
+}
+
 pub fn split_command_line(cmd: &str) -> Vec<String> {
     let chars: Vec<char> = cmd.chars().collect();
     let n = chars.len();
@@ -413,5 +445,34 @@ mod tests {
             file_basename_lower("App.exe,0"),
             Some("app.exe,0".to_string())
         );
+    }
+
+    #[test]
+    fn an_unquoted_program_path_with_spaces_is_not_split_on_them() {
+        // The whole point: Windows runs `uninst.exe`, not `C:\Program`.
+        let v = split_uninstall_command(r"C:\Program Files\Foo\uninst.exe /S");
+        assert_eq!(v[0], r"C:\Program Files\Foo\uninst.exe");
+        assert_eq!(&v[1..], ["/S"]);
+    }
+
+    #[test]
+    fn a_quoted_program_path_still_follows_the_ordinary_rules() {
+        let v = split_uninstall_command(r#""C:\Program Files\App\unins000.exe" /SILENT"#);
+        assert_eq!(v[0], r"C:\Program Files\App\unins000.exe");
+        assert_eq!(&v[1..], ["/SILENT"]);
+    }
+
+    #[test]
+    fn a_bare_msiexec_command_is_unchanged() {
+        let v = split_uninstall_command("MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}");
+        assert_eq!(v, ["MsiExec.exe", "/X{2D7E0D49-0001-0000-0000-000000000000}"]);
+    }
+
+    #[test]
+    fn an_empty_uninstall_command_yields_nothing_usable() {
+        assert_eq!(split_uninstall_command("setup.msi /x"), ["setup.msi", "/x"]);
+        assert!(split_uninstall_command(r#""""#)
+            .iter()
+            .all(|a| a.trim().is_empty()));
     }
 }
