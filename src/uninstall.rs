@@ -83,8 +83,8 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
         (u, "UninstallString".to_string())
     };
 
-    let argv = util::split_command_line(&util::expand_env_vars(&raw));
-    if argv.is_empty() {
+    let argv = util::split_uninstall_command(&util::expand_env_vars(&raw));
+    if argv.first().is_none_or(|exe| exe.trim().is_empty()) {
         bail!("uninstall command parsed to nothing: {raw:?}");
     }
     Ok(UninstallPlan {
