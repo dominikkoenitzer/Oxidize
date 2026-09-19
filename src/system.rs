@@ -222,10 +222,8 @@ fn unescape_xml(s: &str) -> String {
 
 pub fn decode_utf16_or_utf8(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        let units: Vec<u16> = bytes[2..]
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
+        let (pairs, _) = bytes[2..].as_chunks::<2>();
+        let units: Vec<u16> = pairs.iter().copied().map(u16::from_le_bytes).collect();
         String::from_utf16_lossy(&units)
     } else {
         String::from_utf8_lossy(bytes).to_string()
