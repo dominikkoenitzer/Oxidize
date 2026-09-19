@@ -65,9 +65,48 @@ fn undo(action: &Undo) -> Result<()> {
             )
             .with_context(|| format!("writing {}\\{subpath} : {name}", hive.short_name()))
         }
+        Undo::RawValueWrite {
+            hive,
+            subpath,
+            name,
+            vtype,
+            bytes,
+        } => {
+            let vtype =
+                reg_type(*vtype).with_context(|| format!("unknown registry value type {vtype}"))?;
+            registry::write_raw(
+                *hive,
+                subpath,
+                name,
+                &RegValue {
+                    bytes: bytes.clone().into(),
+                    vtype,
+                },
+            )
+            .with_context(|| format!("writing {}\\{subpath} : {name}", hive.short_name()))
+        }
     }
 }
 
+/// The registry type discriminants, as stored in the manifest.
+fn reg_type(vtype: u32) -> Option<winreg::enums::RegType> {
+    use winreg::enums::RegType::*;
+    Some(match vtype {
+        0 => REG_NONE,
+        1 => REG_SZ,
+        2 => REG_EXPAND_SZ,
+        3 => REG_BINARY,
+        4 => REG_DWORD,
+        5 => REG_DWORD_BIG_ENDIAN,
+        6 => REG_LINK,
+        7 => REG_MULTI_SZ,
+        8 => REG_RESOURCE_LIST,
+        9 => REG_FULL_RESOURCE_DESCRIPTOR,
+        10 => REG_RESOURCE_REQUIREMENTS_LIST,
+        11 => REG_QWORD,
+        _ => return None,
+    })
+}
 fn move_back(from: &Path, to: &Path) -> Result<()> {
     if !from.exists() {
         anyhow::bail!("quarantined copy is missing: {}", from.display());

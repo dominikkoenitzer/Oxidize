@@ -42,6 +42,14 @@ pub enum Undo {
         name: String,
         data: String,
     },
+    /// Write a value back with its original type and bytes.
+    RawValueWrite {
+        hive: Hive,
+        subpath: String,
+        name: String,
+        vtype: u32,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +172,29 @@ impl BackupSession {
                 subpath: subpath.to_string(),
                 name: name.to_string(),
                 data: data.to_string(),
+            },
+        )
+    }
+
+    /// Record a value that is not a readable string, keeping its type and bytes.
+    pub fn backup_raw_value(
+        &mut self,
+        kind: LeftoverKind,
+        display: &str,
+        hive: Hive,
+        subpath: &str,
+        name: &str,
+        value: &winreg::RegValue,
+    ) -> Result<()> {
+        self.record(
+            kind,
+            display,
+            Undo::RawValueWrite {
+                hive,
+                subpath: subpath.to_string(),
+                name: name.to_string(),
+                vtype: value.vtype.clone() as u32,
+                bytes: value.bytes.to_vec(),
             },
         )
     }
