@@ -1000,12 +1000,13 @@ unsafe fn hicon_to_rgba(
     }
 
     // GDI gives BGRA; egui wants RGBA.
-    for px in buf.chunks_exact_mut(4) {
+    let (pixels, _) = buf.as_chunks_mut::<4>();
+    for px in pixels.iter_mut() {
         px.swap(0, 2);
     }
     // Some icons report no alpha at all (all zero); treat those as opaque.
-    if buf.chunks_exact(4).all(|p| p[3] == 0) {
-        for px in buf.chunks_exact_mut(4) {
+    if pixels.iter().all(|p| p[3] == 0) {
+        for px in pixels.iter_mut() {
             px[3] = 255;
         }
     }
