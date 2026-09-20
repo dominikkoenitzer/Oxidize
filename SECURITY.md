@@ -2,33 +2,42 @@
 
 ## Reporting a vulnerability
 
-Please report security issues **privately**. Don't open a public GitHub issue for anything security-sensitive.
+Report security issues privately. Please don't open a public issue for anything
+security-sensitive. Use a
+[private security advisory](https://github.com/dominikkoenitzer/Oxidize/security/advisories/new)
+on this repository.
 
-Open a [private security advisory](https://github.com/dominikkoenitzer/Oxidize/security/advisories/new) on this repository.
+Include what happened and what it affects, the program you were uninstalling and
+the exact command line, the `--json` output or the console log if you still have
+it, and your Windows version.
 
-Please include:
-
-- a description of the issue and its impact,
-- the program you were uninstalling and the exact command line,
-- the `--json` output or the console log if you still have it, and
-- your Windows version.
-
-## What to expect
-
-- An acknowledgement of your report, typically within a few days.
-- An assessment and, where applicable, a fix in the next release.
-- Credit for the report if you would like it, once the issue is resolved.
+I answer as soon as I can, usually within a few days, and fix what needs fixing
+in the next release. Say so if you want credit once it is resolved.
 
 ## Scope
 
-Oxidize deletes registry keys and files, and it asks to run **as Administrator** to do it. Correctness and safety are the same question here. If Oxidize removes the wrong thing, that is a security issue, and I would rather hear about it that way.
+Oxidize deletes registry keys and files and asks for administrator rights to do
+it, so correctness and safety are the same question here. If it removes the
+wrong thing, that is a security issue and I would rather hear about it that way.
 
-The reports that matter most:
+What matters most:
 
-- **Anything deleted that should not have been.** Every destructive action passes through a single choke point (`remove_leftovers` in `src/safety.rs`), and `is_protected_path` / `path_within_shared_dir` in `src/scanner.rs` are what stand between a match and a Windows directory or a folder shared with another program. A path that gets past them is the highest-severity bug in this repository.
-- **A deletion that is not reversible.** Registry keys are exported with `reg.exe export` and the file is validated (BOM, header, non-empty) before the key is touched; files are moved into quarantine instead of being destroyed. Any path that deletes without a verified backup, or that silently loses the quarantine, is in scope.
-- **`--dry-run` that is not dry.** It must show and never touch.
-- **Elevation problems.** An unnecessary elevation, a privilege that outlives its use, or a way to get Oxidize to run something else elevated.
-- **Anything influenced by the uninstalled program.** Uninstall strings, display names and install locations come from the registry and are attacker-controlled if the program was malicious; command injection or a path escape through one of those values is in scope.
+- Anything deleted that should not have been. Every destructive action goes
+  through one choke point, `remove_leftovers` in `src/safety.rs`, and
+  `is_protected_path` and `path_within_shared_dir` in `src/scanner.rs` are what
+  stand between a match and a Windows directory or a folder shared with another
+  program. A path that gets past them is the worst bug this repository can have.
+- A deletion that cannot be undone. Registry keys are exported with
+  `reg.exe export` and the file is checked for its BOM, its header and the key
+  it should contain before anything is touched; files are moved to quarantine
+  instead of deleted. Anything that deletes without a verified backup, or loses
+  the quarantine, is in scope.
+- A `--dry-run` that is not dry. It shows and never touches.
+- Elevation problems: an elevation that was not needed, a privilege that
+  outlives its use, or a way to make Oxidize run something else elevated.
+- Anything the uninstalled program controls. Uninstall strings, display names
+  and install locations come out of the registry, so a malicious program picks
+  them. Command injection or a path escape through one of those is in scope.
 
-Out of scope: a leftover Oxidize fails to find. That is a coverage gap, so open a normal issue with the program name.
+Out of scope: a leftover Oxidize does not find. That is a coverage gap, so open
+a normal issue with the program name.

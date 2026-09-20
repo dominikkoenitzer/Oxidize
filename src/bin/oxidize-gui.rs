@@ -1,11 +1,9 @@
 //! `oxidize-gui`, the graphical front-end, built on egui/eframe.
 //!
-//! A thin window over the same engine the CLI uses: pick a program, scan for
-//! leftovers, review them with per-item checkboxes and confidence colours, then
-//! uninstall or remove. Slow work runs on a background thread and reports back
-//! over a channel so the UI never freezes, and every destructive action honours
-//! the dry-run and backup toggles and asks for confirmation, the same way the
-//! CLI does.
+//! A window over the same engine the CLI uses: pick a program, scan for
+//! leftovers, tick the ones to remove, then uninstall or remove. Slow work runs
+//! on a worker thread and reports back over a channel. The dry-run and backup
+//! toggles and the confirmation work as they do on the command line.
 
 // Hide the console window in release builds (keep it in debug for logs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
