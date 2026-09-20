@@ -22,6 +22,12 @@ pub fn system32(exe: &str) -> String {
     format!(r"{root}\System32\{exe}")
 }
 
+/// `%SystemRoot%`, falling back to the usual place when the variable is gone:
+/// a guard that disappears with an environment variable is no guard.
+pub fn windows_dir() -> PathBuf {
+    windir()
+}
+
 fn windir() -> PathBuf {
     std::env::var_os("SystemRoot")
         .map(PathBuf::from)
@@ -63,10 +69,11 @@ pub fn command_exe(command: &str) -> Option<PathBuf> {
         util::split_command_line(&expanded).into_iter().next()?
     } else {
         // Unquoted: Windows tries ever longer prefixes, so a path with
-        // spaces runs up to and including the first `.exe`.
-        let lower = expanded.to_lowercase();
-        match lower.find(".exe") {
-            Some(i) => expanded[..i + 4].to_string(),
+        // spaces runs up to and including the first `.exe` that ends a token.
+        // The scan runs over the original bytes, not a lower-cased copy, whose
+        // length can differ and shift the index.
+        match util::exe_token_end(&expanded) {
+            Some(i) => expanded[..i].to_string(),
             None => util::split_command_line(&expanded).into_iter().next()?,
         }
     };
@@ -116,12 +123,22 @@ pub fn services() -> Vec<ServiceInfo> {
         if ty & 0x30 == 0 {
             continue;
         }
+        // 0x80 marks a per-session copy of a user service (`CDPUserSvc_4a1f2`).
+        // Windows makes and drops those itself, so one is never a leftover.
+        if ty & 0x80 != 0 {
+            continue;
+        }
         let Some(image_path) = registry::read_string(Hive::LocalMachine, &sub, "ImagePath") else {
             continue;
         };
         let exe = command_exe(&image_path);
+        // Most services name themselves through a resource string
+        // (`@%SystemRoot%\\system32\\qmgr.dll,-1000`). Shown raw that is noise,
+        // and matched raw it is worse, so the service's own name stands in.
+        let display_name = registry::read_string(Hive::LocalMachine, &sub, "DisplayName")
+            .filter(|d| !d.starts_with('@'));
         out.push(ServiceInfo {
-            display_name: registry::read_string(Hive::LocalMachine, &sub, "DisplayName"),
+            display_name,
             name,
             image_path,
             exe,
@@ -297,21 +314,35 @@ pub fn path_entries(hive: Hive) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The same `Path` entry, give or take case and a trailing slash?
+pub fn same_path_entry(a: &str, b: &str) -> bool {
+    a.trim()
+        .trim_end_matches('\\')
+        .eq_ignore_ascii_case(b.trim().trim_end_matches('\\'))
+}
+
+/// Every entry `remove_path_entry` would take out, with its position in the
+/// list. A near-duplicate that differs only by a trailing slash goes with it,
+/// so the backup has to know about that one too.
+pub fn matching_path_entries(hive: Hive, entry: &str) -> Vec<(usize, String)> {
+    path_entries(hive)
+        .into_iter()
+        .enumerate()
+        .filter(|(_, e)| same_path_entry(e, entry))
+        .collect()
+}
+
 /// Drop one entry (case-insensitive, trailing slashes ignored) from the
-/// `Path` variable, keeping the value's registry type.
+/// `Path` variable, keeping the value's registry type. Everything else in the
+/// value is written back as it was, an empty segment included.
 pub fn remove_path_entry(hive: Hive, entry: &str) -> Result<()> {
     let key = environment_key(hive);
     let raw = registry::read_raw(hive, key, "Path").context("reading Path")?;
     let current =
         <String as winreg::types::FromRegValue>::from_reg_value(&raw).context("decoding Path")?;
-    let same = |a: &str, b: &str| {
-        a.trim()
-            .trim_end_matches('\\')
-            .eq_ignore_ascii_case(b.trim().trim_end_matches('\\'))
-    };
     let kept: Vec<&str> = current
         .split(';')
-        .filter(|e| !e.trim().is_empty() && !same(e, entry))
+        .filter(|e| !same_path_entry(e, entry))
         .collect();
     let joined = kept.join(";");
     let bytes: Vec<u8> = joined
@@ -335,7 +366,7 @@ pub fn remove_path_entry(hive: Hive, entry: &str) -> Result<()> {
 
 /// Tell open windows the environment changed, so new shells pick up PATH.
 #[cfg(windows)]
-fn broadcast_environment_change() {
+pub(crate) fn broadcast_environment_change() {
     use windows::core::w;
     use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -355,7 +386,7 @@ fn broadcast_environment_change() {
 }
 
 #[cfg(not(windows))]
-fn broadcast_environment_change() {}
+pub(crate) fn broadcast_environment_change() {}
 
 // Firewall
 // --------

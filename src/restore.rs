@@ -25,16 +25,42 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
     let mut out = Vec::new();
     for entry in manifest.entries.iter().rev() {
         let result = if dry_run {
-            Ok(())
+            check(&entry.undo)
         } else {
-            undo(&entry.undo).map_err(|e| format!("{e:#}"))
+            undo(&entry.undo)
         };
         out.push(RestoreItem {
             path: entry.path.clone(),
-            result,
+            result: result.map_err(|e| format!("{e:#}")),
         });
     }
     Ok(out)
+}
+
+/// What a dry run can say without writing anything: the pieces the undo needs
+/// are still there. A dry run that reports "would restore" for an entry whose
+/// quarantined copy is gone is worse than no dry run at all.
+fn check(action: &Undo) -> Result<()> {
+    match action {
+        Undo::RegImport { file } | Undo::TaskImport { file, .. } => {
+            if file.exists() {
+                Ok(())
+            } else {
+                anyhow::bail!("the backup file is missing: {}", file.display())
+            }
+        }
+        Undo::MoveBack { from, to } => {
+            if from.exists() || to.exists() {
+                Ok(())
+            } else {
+                anyhow::bail!("the quarantined copy is missing: {}", from.display())
+            }
+        }
+        Undo::PathAdd { .. } | Undo::ValueWrite { .. } => Ok(()),
+        Undo::RawValueWrite { vtype, .. } => reg_type(*vtype)
+            .map(|_| ())
+            .with_context(|| format!("unknown registry value type {vtype}")),
+    }
 }
 
 fn undo(action: &Undo) -> Result<()> {
@@ -42,7 +68,7 @@ fn undo(action: &Undo) -> Result<()> {
         Undo::RegImport { file } => backup::import_registry_file(file),
         Undo::MoveBack { from, to } => move_back(from, to),
         Undo::TaskImport { name, file } => system::import_task(name, file),
-        Undo::PathAdd { hive, entry } => path_add(*hive, entry),
+        Undo::PathAdd { hive, entry, index } => path_add(*hive, entry, *index),
         Undo::ValueWrite {
             hive,
             subpath,
@@ -112,6 +138,11 @@ fn reg_type(vtype: u32) -> Option<winreg::enums::RegType> {
 }
 fn move_back(from: &Path, to: &Path) -> Result<()> {
     if !from.exists() {
+        // Restoring the same backup twice: the first run already moved this
+        // one home, which is the state the caller wanted either way.
+        if to.exists() {
+            return Ok(());
+        }
         anyhow::bail!("quarantined copy is missing: {}", from.display());
     }
     if to.exists() {
@@ -124,22 +155,33 @@ fn move_back(from: &Path, to: &Path) -> Result<()> {
         .with_context(|| format!("moving {} back to {}", from.display(), to.display()))
 }
 
-fn path_add(hive: Hive, entry: &str) -> Result<()> {
+fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
     let key = environment_key(hive);
-    if system::path_entries(hive)
-        .iter()
-        .any(|e| e.eq_ignore_ascii_case(entry))
-    {
+    // Exactly as it was recorded: the backup holds the strings the removal
+    // actually took out, and two entries for one folder that differ only by a
+    // trailing slash are two entries, both of which belong back.
+    let entries = system::path_entries(hive);
+    if entries.iter().any(|e| e.eq_ignore_ascii_case(entry)) {
         return Ok(());
     }
-    let raw = registry::read_raw(hive, key, "Path").context("reading Path")?;
-    let current =
-        <String as winreg::types::FromRegValue>::from_reg_value(&raw).context("decoding Path")?;
-    let joined = if current.trim_end_matches(';').is_empty() {
-        entry.to_string()
-    } else {
-        format!("{};{entry}", current.trim_end_matches(';'))
+    // A Path that is gone entirely still gets its entry back, as the type the
+    // entry itself calls for.
+    let (current, vtype) = match registry::read_raw(hive, key, "Path") {
+        Some(raw) => {
+            let text = <String as winreg::types::FromRegValue>::from_reg_value(&raw)
+                .context("decoding Path")?;
+            let vtype = raw.vtype;
+            (text, vtype)
+        }
+        None if entry.contains('%') => (String::new(), winreg::enums::RegType::REG_EXPAND_SZ),
+        None => (String::new(), winreg::enums::RegType::REG_SZ),
     };
+    // Back where it was, not at the end: the order of Path decides which of
+    // two programs of the same name runs.
+    let mut parts: Vec<&str> = current.split(';').filter(|e| !e.is_empty()).collect();
+    let at = index.unwrap_or(parts.len()).min(parts.len());
+    parts.insert(at, entry);
+    let joined = parts.join(";");
     let bytes: Vec<u8> = joined
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -151,8 +193,11 @@ fn path_add(hive: Hive, entry: &str) -> Result<()> {
         "Path",
         &RegValue {
             bytes: bytes.into(),
-            vtype: raw.vtype,
+            vtype,
         },
     )
-    .context("writing Path")
+    .context("writing Path")?;
+    // Without this, running shells keep the Path that is missing the entry.
+    system::broadcast_environment_change();
+    Ok(())
 }

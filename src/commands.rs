@@ -200,7 +200,10 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
 
     if args.remove && installed && !g.dry_run {
         if g.json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "report": report, "removal": null }))?
+            );
         } else {
             render_report(&report);
         }
@@ -300,7 +303,10 @@ fn uninstall_program(
         }
     } else {
         if !g.confirm("Run the uninstaller?", true) {
-            if !g.json {
+            if g.json {
+                json_out["cancelled"] = json!(true);
+                println!("{}", serde_json::to_string_pretty(&json_out)?);
+            } else {
                 term::info("Cancelled.");
             }
             return Ok(());
@@ -420,6 +426,14 @@ fn cmd_trace(args: &TraceArgs, g: &Global) -> Result<()> {
         if matches.len() >= 2 && matches[1].score == best.score {
             bail!("several programs match equally well; uninstall by name instead");
         }
+        // A shared word in a folder name is not enough to uninstall something.
+        if best.score < 80 {
+            bail!(
+                "\"{}\" only matches {} by name; uninstall it by name if that is what you mean",
+                args.query,
+                best.program.display_name
+            );
+        }
         if !g.json {
             println!();
         }
@@ -532,10 +546,7 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
                 false,
             )
         {
-            if !g.json {
-                term::info("Cancelled.");
-            }
-            return report_deleted(&[], g);
+            return report_cancelled(g);
         }
         let mut done = Vec::new();
         for b in &all {
@@ -559,10 +570,7 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
                 false,
             )
         {
-            if !g.json {
-                term::info("Cancelled.");
-            }
-            return report_deleted(&[], g);
+            return report_cancelled(g);
         }
         if !g.dry_run {
             backup::delete_backup(&b)?;
@@ -601,9 +609,28 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
 
 /// Say which backups went, as JSON or as one line each.
 fn report_deleted(names: &[String], g: &Global) -> Result<()> {
+    report_deleted_or_cancelled(names, false, g)
+}
+
+/// The same, for a run that asked and got no answer: a script has to be able
+/// to tell "nothing to delete" from "nobody confirmed".
+fn report_cancelled(g: &Global) -> Result<()> {
+    if !g.json {
+        term::info("Cancelled.");
+    }
+    report_deleted_or_cancelled(&[], true, g)
+}
+
+fn report_deleted_or_cancelled(names: &[String], cancelled: bool, g: &Global) -> Result<()> {
     if g.json {
         let key = if g.dry_run { "would_delete" } else { "deleted" };
-        println!("{}", serde_json::to_string_pretty(&json!({ key: names }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ key: names, "cancelled": cancelled }))?
+        );
+        return Ok(());
+    }
+    if cancelled {
         return Ok(());
     }
     if names.is_empty() {
@@ -664,6 +691,7 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
             "{}",
             term::dim(&format!("{} items would be restored", items.len()))
         );
+        return Ok(());
     } else {
         let mut parts = vec![format!("{ok} restored")];
         if failed > 0 {
@@ -678,6 +706,9 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
                     info.name
                 ))
             );
+        }
+        if failed > 0 {
+            bail!("{failed} of {} items could not be restored", items.len());
         }
     }
     Ok(())
@@ -805,6 +836,12 @@ fn remove_from_report(
 fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<DeletionOutcome> {
     let ctx = g.safety();
 
+    if !g.json && safety::needs_elevation(selected) && !safety::is_elevated() {
+        term::warn(
+            "some items need administrator rights; run from an elevated terminal or add --elevate",
+        );
+    }
+
     if ctx.dry_run {
         if !g.json {
             println!();
@@ -819,12 +856,6 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
         return safety::remove_leftovers(selected, label, &ctx);
     }
 
-    if !g.json && safety::needs_elevation(selected) && !safety::is_elevated() {
-        term::warn(
-            "some items need administrator rights; run from an elevated terminal or add --elevate",
-        );
-    }
-
     if !g.json {
         println!();
     }
@@ -836,7 +867,8 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
     } else {
         format!("Remove {} items permanently?", selected.len())
     };
-    if !g.confirm(&question, true) {
+    // Enter means yes while a backup is kept, and no when it is not.
+    if !g.confirm(&question, ctx.make_backups) {
         if !g.json {
             term::info("Skipped.");
         }
@@ -880,7 +912,8 @@ fn print_outcome(outcome: &DeletionOutcome) {
         );
     }
     println!();
-    let mut parts = vec![format!("{} removed", outcome.deleted)];
+    let emptied = outcome.emptied_parents.len() + outcome.emptied_keys.len();
+    let mut parts = vec![format!("{} removed", outcome.deleted + emptied)];
     if outcome.skipped > 0 {
         parts.push(format!("{} already gone", outcome.skipped));
     }

@@ -141,7 +141,7 @@ pub struct BackupsArgs {
     pub delete: Option<String>,
 
     /// Delete every backup.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "delete")]
     pub clear: bool,
 }
 
