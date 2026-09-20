@@ -304,17 +304,20 @@ pub fn remove_leftovers(
     Ok(outcome)
 }
 
-/// The vendor key above a removed product key, if that is all it held. Only
-/// `SOFTWARE\<vendor>` in either view qualifies, never a root, a denied name,
-/// or a key with anything of its own left in it.
-fn empty_vendor_key(hive: crate::model::Hive, subpath: &str) -> Option<String> {
+/// The vendor key a removed product key sat under, by name alone. Only
+/// `SOFTWARE\<vendor>` in either view qualifies, never a root and never a
+/// denied name.
+fn vendor_key_above(subpath: &str) -> Option<&str> {
     let (parent, _) = subpath.rsplit_once('\\')?;
     let (root, vendor) = parent.rsplit_once('\\')?;
     let is_software_root =
         root.eq_ignore_ascii_case("SOFTWARE") || root.eq_ignore_ascii_case(r"SOFTWARE\WOW6432Node");
-    if !is_software_root || scanner::reg_denied(vendor) {
-        return None;
-    }
+    (is_software_root && !scanner::reg_denied(vendor)).then_some(parent)
+}
+
+/// That same vendor key, if the product was all it held.
+fn empty_vendor_key(hive: crate::model::Hive, subpath: &str) -> Option<String> {
+    let parent = vendor_key_above(subpath)?;
     registry::key_is_empty(hive, parent).then(|| parent.to_string())
 }
 
@@ -437,5 +440,56 @@ fn remove_one(
             system::remove_path_entry(hive, entry)?;
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Confidence, Hive};
+
+    #[test]
+    fn only_a_vendor_key_under_software_can_be_emptied() {
+        // A product key two levels down names the vendor key above it.
+        assert_eq!(
+            vendor_key_above(r"SOFTWARE\Frobnic Labs\Frobnicator"),
+            Some(r"SOFTWARE\Frobnic Labs")
+        );
+        assert_eq!(
+            vendor_key_above(r"SOFTWARE\WOW6432Node\Frobnic Labs\Frobnicator"),
+            Some(r"SOFTWARE\WOW6432Node\Frobnic Labs")
+        );
+        // Never a root, a top-level product key, or a denied vendor name.
+        assert!(vendor_key_above(r"SOFTWARE\Frobnicator").is_none());
+        assert!(vendor_key_above("SOFTWARE").is_none());
+        assert!(vendor_key_above(r"SOFTWARE\Microsoft\Office").is_none());
+        assert!(vendor_key_above(r"SOFTWARE\NVIDIA Corporation\Global").is_none());
+        // A key that does not exist is not empty, so nothing is proposed.
+        assert!(empty_vendor_key(Hive::CurrentUser, r"SOFTWARE\NoSuchVendor\NoSuchApp").is_none());
+    }
+
+    #[test]
+    fn hklm_items_need_administrator_rights() {
+        let hklm = Leftover::reg_key(
+            Hive::LocalMachine,
+            r"SOFTWARE\Vendor",
+            Confidence::High,
+            "test",
+        );
+        let hkcu = Leftover::reg_key(
+            Hive::CurrentUser,
+            r"SOFTWARE\Vendor",
+            Confidence::High,
+            "test",
+        );
+        assert!(needs_elevation(&[hklm]));
+        assert!(!needs_elevation(&[hkcu]));
+    }
+
+    #[test]
+    fn an_argument_survives_being_quoted_for_relaunch() {
+        assert_eq!(quote_arg("plain"), "plain");
+        assert_eq!(quote_arg("two words"), "\"two words\"");
+        assert_eq!(quote_arg(r"C:\Program Files\"), r#""C:\Program Files\\""#);
     }
 }

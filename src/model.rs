@@ -449,3 +449,37 @@ pub struct ScanTarget {
     /// The Uninstall subkey and its source. `None` for name-only targets.
     pub registry: Option<(String, RegistrySource)>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confidence_orders_high_first() {
+        // Removal selects everything at or above a threshold with `<=`, so the
+        // order of this enum is what makes `--medium` include high.
+        assert!(Confidence::High < Confidence::Medium);
+        assert!(Confidence::Medium < Confidence::Low);
+        let mut levels = [Confidence::Low, Confidence::High, Confidence::Medium];
+        levels.sort();
+        assert_eq!(
+            levels,
+            [Confidence::High, Confidence::Medium, Confidence::Low]
+        );
+    }
+
+    #[test]
+    fn a_value_leftover_carries_what_removal_needs() {
+        let l = Leftover::reg_value(
+            Hive::CurrentUser,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+            "Vendor",
+            Confidence::High,
+            "autostart",
+        );
+        assert_eq!(l.hive, Some(Hive::CurrentUser));
+        assert_eq!(l.value_name.as_deref(), Some("Vendor"));
+        assert!(l.path.ends_with(" : Vendor"));
+        assert_eq!(l.kind.group(), Group::Registry);
+    }
+}
