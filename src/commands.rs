@@ -519,8 +519,7 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
 
     if args.clear {
         if all.is_empty() {
-            term::info("No backups.");
-            return Ok(());
+            return report_deleted(&[], g);
         }
         let total: u64 = all.iter().map(|b| b.size_bytes).sum();
         if !g.dry_run
@@ -533,38 +532,42 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
                 false,
             )
         {
-            term::info("Cancelled.");
-            return Ok(());
-        }
-        for b in &all {
-            if g.dry_run {
-                println!("would delete {}", b.name);
-            } else {
-                backup::delete_backup(b)?;
-                println!("deleted {}", b.name);
+            if !g.json {
+                term::info("Cancelled.");
             }
+            return report_deleted(&[], g);
         }
-        return Ok(());
+        let mut done = Vec::new();
+        for b in &all {
+            if !g.dry_run {
+                backup::delete_backup(b)?;
+            }
+            done.push(b.name.clone());
+        }
+        return report_deleted(&done, g);
     }
 
     if let Some(name) = &args.delete {
         let b = backup::find_backup(name)?;
-        if g.dry_run {
-            println!("would delete {}", b.name);
-        } else if g.confirm(
-            &format!(
-                "Delete backup {} ({})?",
-                b.name,
-                util::human_size(b.size_bytes)
-            ),
-            false,
-        ) {
-            backup::delete_backup(&b)?;
-            println!("deleted {}", b.name);
-        } else {
-            term::info("Cancelled.");
+        if !g.dry_run
+            && !g.confirm(
+                &format!(
+                    "Delete backup {} ({})?",
+                    b.name,
+                    util::human_size(b.size_bytes)
+                ),
+                false,
+            )
+        {
+            if !g.json {
+                term::info("Cancelled.");
+            }
+            return report_deleted(&[], g);
         }
-        return Ok(());
+        if !g.dry_run {
+            backup::delete_backup(&b)?;
+        }
+        return report_deleted(std::slice::from_ref(&b.name), g);
     }
 
     if g.json {
@@ -593,6 +596,27 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
             backup::backups_base()?.display()
         ))
     );
+    Ok(())
+}
+
+/// Say which backups went, as JSON or as one line each.
+fn report_deleted(names: &[String], g: &Global) -> Result<()> {
+    if g.json {
+        let key = if g.dry_run { "would_delete" } else { "deleted" };
+        println!("{}", serde_json::to_string_pretty(&json!({ key: names }))?);
+        return Ok(());
+    }
+    if names.is_empty() {
+        term::info("No backups.");
+        return Ok(());
+    }
+    for name in names {
+        if g.dry_run {
+            println!("would delete {name}");
+        } else {
+            println!("deleted {name}");
+        }
+    }
     Ok(())
 }
 
