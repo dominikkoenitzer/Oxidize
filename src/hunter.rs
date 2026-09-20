@@ -235,3 +235,56 @@ pub fn hunt(query: &str, programs: &[Program]) -> Vec<HunterMatch> {
     });
     matches
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Hive, RegistrySource, RegistryView};
+
+    fn program(name: &str, install: Option<&str>) -> Program {
+        Program {
+            registry_key: name.to_string(),
+            source: RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: install.map(str::to_string),
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    #[test]
+    fn the_install_folder_outranks_a_name_that_merely_matches() {
+        let programs = vec![
+            program("Vendor Player", Some(r"C:\Program Files\VendorPlayer")),
+            program("Player Tools", None),
+        ];
+        let matches = hunt(r"C:\Program Files\VendorPlayer\player.exe", &programs);
+        assert_eq!(matches[0].program.display_name, "Vendor Player");
+        assert!(matches[0].score >= 1000);
+        assert!(matches[0].reason.contains("install folder"));
+    }
+
+    #[test]
+    fn a_query_that_belongs_to_nothing_matches_nothing() {
+        let programs = vec![program(
+            "Vendor Player",
+            Some(r"C:\Program Files\VendorPlayer"),
+        )];
+        assert!(hunt(r"D:\Games\Something\game.exe", &programs).is_empty());
+    }
+
+    #[test]
+    fn a_path_query_is_told_from_a_process_name() {
+        assert!(looks_like_path(r"C:\Program Files\App"));
+        assert!(looks_like_path("folder/app.exe"));
+        assert!(!looks_like_path("chrome.exe"));
+    }
+}
