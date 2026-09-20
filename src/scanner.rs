@@ -109,9 +109,15 @@ pub fn build_target(program: &Program) -> ScanTarget {
         .install_location
         .as_deref()
         .map(util::expand_env_vars)
-        // Recorded with or without a trailing separator; keep one form so the
-        // folder is not reported twice.
-        .map(|s| s.trim_end_matches(['\\', '/']).to_string())
+        // Installers write this with quotes around it, with a trailing
+        // separator, or neither. Keep one form, or the folder is missed or
+        // reported twice.
+        .map(|s| {
+            s.trim()
+                .trim_matches('"')
+                .trim_end_matches(['\\', '/'])
+                .to_string()
+        })
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty());
 
@@ -423,6 +429,7 @@ fn other_program_install_dirs(target: &ScanTarget) -> Vec<PathBuf> {
         })
         .filter_map(|p| p.install_location)
         .map(|s| util::expand_env_vars(&s))
+        .map(|s| s.trim().trim_matches('"').to_string())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .collect()
@@ -598,6 +605,13 @@ fn scan_dir_children(
                 push_dir_leftover(out, path, Confidence::High, "exact name".to_string());
             } else if matches_publisher(&name, target) {
                 flag_product_children(&path, target, out, &format!("in vendor folder {name}"));
+            } else if houses_other || contains_install {
+                // Another program is installed inside, and the folder is not
+                // the vendor's, so it is shared whatever its name says:
+                // Visual Studio's folder holds the Build Tools, Steam's holds
+                // the games. The one folder in there we know is ours, the
+                // recorded install folder, is listed on its own.
+                continue;
             } else if let Some((conf, reason)) = score_product(&name, target) {
                 push_dir_leftover(out, path, conf, reason);
             }
@@ -1196,6 +1210,33 @@ mod tests {
         assert!(!windows_hosted_service(Path::new(
             r"C:\WINDOWS\SysWOW64\wallpaperservice32.exe"
         )));
+    }
+
+    #[test]
+    fn a_folder_that_holds_another_install_is_left_alone() {
+        let root = std::env::temp_dir().join("oxidize_shared_test");
+        let _ = fs::remove_dir_all(&root);
+        let game = root
+            .join("Steam")
+            .join("steamapps")
+            .join("common")
+            .join("game");
+        fs::create_dir_all(&game).unwrap();
+
+        let steam = name_target("Steam", Some("Valve Corporation"));
+
+        // On its own the folder is Steam's, by name.
+        let mut out = Vec::new();
+        scan_dir_children(&root, &steam, &[], &mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].confidence, Confidence::High);
+
+        // With another program installed inside it, it is shared and stays.
+        let mut out = Vec::new();
+        scan_dir_children(&root, &steam, std::slice::from_ref(&game), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
