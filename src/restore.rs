@@ -48,7 +48,10 @@ fn undo(action: &Undo) -> Result<()> {
             subpath,
             name,
             data,
+            vtype,
         } => {
+            let vtype =
+                reg_type(*vtype).with_context(|| format!("unknown registry value type {vtype}"))?;
             let bytes: Vec<u8> = data
                 .encode_utf16()
                 .chain(std::iter::once(0))
@@ -60,7 +63,7 @@ fn undo(action: &Undo) -> Result<()> {
                 name,
                 &RegValue {
                     bytes: bytes.into(),
-                    vtype: winreg::enums::RegType::REG_SZ,
+                    vtype,
                 },
             )
             .with_context(|| format!("writing {}\\{subpath} : {name}", hive.short_name()))
@@ -117,7 +120,7 @@ fn move_back(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    fs::rename(from, to)
+    backup::move_path(from, to)
         .with_context(|| format!("moving {} back to {}", from.display(), to.display()))
 }
 

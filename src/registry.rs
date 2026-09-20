@@ -56,7 +56,11 @@ pub fn enum_string_values(hive: Hive, subpath: &str) -> Vec<(String, String)> {
     };
     key.enum_values()
         .filter_map(Result::ok)
-        .filter_map(|(name, value)| String::from_reg_value(&value).ok().map(|s| (name, s)))
+        .filter_map(|(name, value)| {
+            String::from_reg_value(&value)
+                .ok()
+                .map(|s| (name, clean_string(s)))
+        })
         .collect()
 }
 
@@ -77,16 +81,36 @@ pub fn read_raw(hive: Hive, subpath: &str, name: &str) -> Option<RegValue<'stati
     open_read(hive, subpath)?.get_raw_value(name).ok()
 }
 
+/// The value as text, for the two string types only. `REG_MULTI_SZ` keeps
+/// its entries apart with NUL bytes, which no string round-trips, so it goes
+/// back as raw bytes.
+pub fn as_text(value: &RegValue) -> Option<String> {
+    match value.vtype {
+        REG_SZ | REG_EXPAND_SZ => String::from_reg_value(value).ok(),
+        _ => None,
+    }
+}
+
 /// Write a raw value (type preserved). Needs `KEY_SET_VALUE`.
 pub fn write_raw(hive: Hive, subpath: &str, name: &str, value: &RegValue) -> io::Result<()> {
     let key = predef(hive).open_subkey_with_flags(subpath, KEY_SET_VALUE | KEY_WOW64_64KEY)?;
     key.set_raw_value(name, value)
 }
 
+/// A registry string the way Windows reads it: up to the first NUL, then
+/// trimmed. Installers do write a NUL in the middle, Roblox's `DisplayName`
+/// among them, and the list and `--json` would carry it through.
+fn clean_string(s: String) -> String {
+    match s.find('\0') {
+        Some(i) => s[..i].trim().to_string(),
+        None => s.trim().to_string(),
+    }
+}
+
 fn opt_string(key: &RegKey, name: &str) -> Option<String> {
     match key.get_value::<String, _>(name) {
         Ok(s) => {
-            let s = s.trim().to_string();
+            let s = clean_string(s);
             if s.is_empty() {
                 None
             } else {
@@ -165,6 +189,14 @@ pub fn delete_key_tree(hive: Hive, subpath: &str) -> io::Result<()> {
 pub fn delete_value(hive: Hive, subpath: &str, value_name: &str) -> io::Result<()> {
     let key = predef(hive).open_subkey_with_flags(subpath, KEY_SET_VALUE | KEY_WOW64_64KEY)?;
     key.delete_value(value_name)
+}
+
+/// True if the key is there and holds neither subkeys nor values.
+pub fn key_is_empty(hive: Hive, subpath: &str) -> bool {
+    match open_read(hive, subpath) {
+        Some(key) => key.enum_keys().next().is_none() && key.enum_values().next().is_none(),
+        None => false,
+    }
 }
 
 pub fn value_exists(hive: Hive, subpath: &str, value_name: &str) -> bool {

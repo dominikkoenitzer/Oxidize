@@ -847,6 +847,14 @@ fn print_outcome(outcome: &DeletionOutcome) {
             term::dim("emptied folder")
         );
     }
+    for k in &outcome.emptied_keys {
+        println!(
+            "  {}  {}  {}",
+            term::green("removed"),
+            k,
+            term::dim("emptied key")
+        );
+    }
     println!();
     let mut parts = vec![format!("{} removed", outcome.deleted)];
     if outcome.skipped > 0 {

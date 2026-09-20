@@ -19,8 +19,11 @@ const FS_DENY: &[&str] = &[
     "windows",
     "windowsapps",
     "windows defender",
+    "windows mail",
+    "windows media player",
     "windows nt",
     "windows photo viewer",
+    "windows sidebar",
     "windowspowershell",
     "common files",
     "internet explorer",
@@ -28,7 +31,10 @@ const FS_DENY: &[&str] = &[
     "modifiablewindowsapps",
     "packages",
     "package cache",
+    "softwaredistribution",
+    "usoprivate",
     "usoshared",
+    "virtualstore",
     "temp",
     "programs",
     "comms",
@@ -90,7 +96,7 @@ pub fn path_within_shared_dir(p: &Path) -> bool {
     })
 }
 
-fn reg_denied(name: &str) -> bool {
+pub fn reg_denied(name: &str) -> bool {
     REG_DENY.contains(&name.to_lowercase().as_str())
 }
 
@@ -103,6 +109,9 @@ pub fn build_target(program: &Program) -> ScanTarget {
         .install_location
         .as_deref()
         .map(util::expand_env_vars)
+        // Recorded with or without a trailing separator; keep one form so the
+        // folder is not reported twice.
+        .map(|s| s.trim_end_matches(['\\', '/']).to_string())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty());
 
@@ -136,7 +145,7 @@ pub fn build_target(program: &Program) -> ScanTarget {
     // The install folder's own name is often the most distinctive token.
     if let Some(loc) = &install_location {
         if let Some(folder) = loc.file_name().and_then(|s| s.to_str()) {
-            for t in significant_tokens(folder) {
+            for t in folder_tokens(loc, folder) {
                 if !target.name_tokens.contains(&t) && !target.publisher_tokens.contains(&t) {
                     target.name_tokens.push(t);
                 }
@@ -147,6 +156,27 @@ pub fn build_target(program: &Program) -> ScanTarget {
     target.exe_names = exe_names;
     target.registry = Some((program.registry_key.clone(), program.source));
     target
+}
+
+/// Match tokens from the install folder's own name. A word the folder shares
+/// with the path above it belongs to the container, not to the product. A
+/// winget package sits under `Microsoft\WinGet\Packages` and repeats both
+/// words in its own folder name, and "microsoft" as a token matches every
+/// folder Microsoft ever installed.
+fn folder_tokens(location: &Path, folder: &str) -> Vec<String> {
+    let container: Vec<String> = location
+        .parent()
+        .map(|p| {
+            p.components()
+                .filter_map(|c| c.as_os_str().to_str())
+                .flat_map(significant_tokens)
+                .collect()
+        })
+        .unwrap_or_default();
+    significant_tokens(folder)
+        .into_iter()
+        .filter(|t| !container.contains(t) && !fs_denied(t) && !reg_denied(t))
+        .collect()
 }
 
 /// A target for a program that is no longer registered: all we have is what
@@ -196,6 +226,20 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
 // Matching
 // --------
 
+/// Is this name the product itself: the display name, or its product words
+/// joined ("GoogleChrome" for "Google Chrome")?
+fn is_exact_product(name: &str, target: &ScanTarget) -> bool {
+    let norm = normalize(name);
+    if norm.len() < 3 {
+        return false;
+    }
+    if !target.display_name.is_empty() && norm == normalize(&target.display_name) {
+        return true;
+    }
+    let product_joined: String = target.name_tokens.concat();
+    product_joined.len() >= 4 && norm == product_joined
+}
+
 /// Score a folder or key name against the product. Word-aware, so "ZoomIt"
 /// does not match "Zoom"; a single coincidental keyword is capped at Medium.
 fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
@@ -203,12 +247,7 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     if norm.len() < 3 {
         return None;
     }
-    if !target.display_name.is_empty() && norm == normalize(&target.display_name) {
-        return Some((Confidence::High, "exact name".to_string()));
-    }
-    // The product tokens joined, e.g. folder "GoogleChrome" for "Google Chrome".
-    let product_joined: String = target.name_tokens.concat();
-    if product_joined.len() >= 4 && norm == product_joined {
+    if is_exact_product(name, target) {
         return Some((Confidence::High, "exact name".to_string()));
     }
 
@@ -448,6 +487,31 @@ fn push_dir_leftover(out: &mut Vec<Leftover>, path: PathBuf, conf: Confidence, r
     ));
 }
 
+/// Does the folder hold a longer namesake, the way `Programs\Python` holds
+/// `Python313`? Then it is a family folder. It can hold versions another
+/// program still uses, so only its matching children count.
+fn holds_namesake_child(dir: &Path, target: &ScanTarget) -> bool {
+    let joined: String = target.name_tokens.concat();
+    let product = if joined.len() >= 4 {
+        joined
+    } else {
+        normalize(&target.display_name)
+    };
+    if product.len() < 4 {
+        return false;
+    }
+    let Ok(children) = fs::read_dir(dir) else {
+        return false;
+    };
+    children.flatten().any(|child| {
+        if !child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            return false;
+        }
+        let name = normalize(&child.file_name().to_string_lossy());
+        name.len() > product.len() && name.starts_with(&product)
+    })
+}
+
 /// Flag product-matching children of `parent`, never `parent` itself.
 fn flag_product_children(parent: &Path, target: &ScanTarget, out: &mut Vec<Leftover>, note: &str) {
     let Ok(children) = fs::read_dir(parent) else {
@@ -466,7 +530,12 @@ fn flag_product_children(parent: &Path, target: &ScanTarget, out: &mut Vec<Lefto
     }
 }
 
-fn scan_dir_children(root: &Path, target: &ScanTarget, out: &mut Vec<Leftover>) {
+fn scan_dir_children(
+    root: &Path,
+    target: &ScanTarget,
+    other_installs: &[PathBuf],
+    out: &mut Vec<Leftover>,
+) {
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
@@ -479,7 +548,27 @@ fn scan_dir_children(root: &Path, target: &ScanTarget, out: &mut Vec<Leftover>) 
         let Ok(ft) = entry.file_type() else { continue };
 
         if ft.is_dir() {
-            if matches_publisher(&name, target) {
+            // A folder named exactly like the product is the product's own,
+            // even where the publisher name carries the product word ("Git"
+            // by "The Git Development Community"). Two exceptions: another
+            // program installs inside it, or our own install folder is
+            // further down, which makes it a container.
+            let key = norm_path_key(&path);
+            let contains_install = target
+                .install_location
+                .as_deref()
+                .map(|loc| dir_contains(&key, &norm_path_key(loc)))
+                .unwrap_or(false);
+            let houses_other = other_installs
+                .iter()
+                .any(|o| dir_contains(&key, &norm_path_key(o)));
+            if is_exact_product(&name, target)
+                && !houses_other
+                && !contains_install
+                && !holds_namesake_child(&path, target)
+            {
+                push_dir_leftover(out, path, Confidence::High, "exact name".to_string());
+            } else if matches_publisher(&name, target) {
                 flag_product_children(&path, target, out, &format!("in vendor folder {name}"));
             } else if let Some((conf, reason)) = score_product(&name, target) {
                 push_dir_leftover(out, path, conf, reason);
@@ -507,6 +596,7 @@ fn scan_dir_children(root: &Path, target: &ScanTarget, out: &mut Vec<Leftover>) 
 
 fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
     let mut out: Vec<Leftover> = Vec::new();
+    let other_installs = other_program_install_dirs(target);
 
     // The install folder itself. Its recorded path can be a shared parent
     // (two products under one vendor folder), so it is only flagged whole
@@ -515,16 +605,16 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
         if loc.is_dir() && !is_protected_path(loc) {
             let leaf = loc.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             let note = format!("in install folder {leaf}");
+            let loc_key = norm_path_key(loc);
+            let houses_other = other_installs
+                .iter()
+                .any(|other| dir_contains(&loc_key, &norm_path_key(other)));
+            // A folder named exactly like the product is the product's own,
+            // even if the publisher name contains that word.
+            let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
 
-            if matches_publisher(leaf, target) {
-                flag_product_children(loc, target, &mut out, &note);
-            } else {
-                let loc_key = norm_path_key(loc);
-                let houses_other = other_program_install_dirs(target)
-                    .iter()
-                    .any(|other| dir_contains(&loc_key, &norm_path_key(other)));
-
-                if houses_other {
+            {
+                if houses_other || vendor_root {
                     flag_product_children(loc, target, &mut out, &note);
                 } else if score_product(leaf, target).is_some() {
                     push_dir_leftover(
@@ -546,7 +636,7 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
     }
 
     for root in fs_roots() {
-        scan_dir_children(&root, target, &mut out);
+        scan_dir_children(&root, target, &other_installs, &mut out);
     }
 
     dedupe_by_path(&mut out);
@@ -843,9 +933,11 @@ fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
     out
 }
 
+/// Drop repeats. Paths compare normalised, so an install folder recorded
+/// with a trailing separator is the entry the walk already found.
 fn dedupe_by_path(items: &mut Vec<Leftover>) {
     let mut seen = std::collections::HashSet::new();
-    items.retain(|l| seen.insert(l.path.to_lowercase()));
+    items.retain(|l| seen.insert(norm_path_str(&l.path)));
 }
 
 // Entry point
@@ -890,6 +982,53 @@ mod tests {
         ));
         // A shared vendor folder is not.
         assert!(score_product("Mozilla-1de4eec8", &t).is_none());
+    }
+
+    #[test]
+    fn install_folder_tokens_leave_out_the_container() {
+        // A winget package: the folder repeats the words of the path above it.
+        let loc = Path::new(
+            r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe",
+        );
+        let tokens = folder_tokens(loc, loc.file_name().unwrap().to_str().unwrap());
+        assert!(tokens.contains(&"fastfetch".to_string()));
+        assert!(!tokens.contains(&"microsoft".to_string()));
+        assert!(!tokens.contains(&"winget".to_string()));
+
+        // A plain install folder still gives up its name.
+        let loc = Path::new(r"C:\Program Files\Obsidian");
+        assert_eq!(
+            folder_tokens(loc, loc.file_name().unwrap().to_str().unwrap()),
+            vec!["obsidian".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_product_named_folder_wins_over_the_vendor_reading() {
+        // "Git" by "The Git Development Community": the publisher carries
+        // the product word, and the folder is still Git's own.
+        let git = name_target("Git", Some("The Git Development Community"));
+        assert!(matches_publisher("Git", &git));
+        assert!(is_exact_product("Git", &git));
+        // A real vendor folder still is one.
+        let brave = name_target("Brave", Some("Brave Software Inc"));
+        assert!(matches_publisher("BraveSoftware", &brave));
+        assert!(!is_exact_product("BraveSoftware", &brave));
+    }
+
+    #[test]
+    fn a_folder_holding_a_longer_namesake_is_a_family_folder() {
+        let root = std::env::temp_dir().join("oxidize_namesake_test");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("Python").join("Python313")).unwrap();
+        fs::create_dir_all(root.join("Git").join("bin")).unwrap();
+
+        let python = name_target("Python 3.13.7 (64-bit)", Some("Python Software Foundation"));
+        assert!(holds_namesake_child(&root.join("Python"), &python));
+        let git = name_target("Git", Some("The Git Development Community"));
+        assert!(!holds_namesake_child(&root.join("Git"), &git));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

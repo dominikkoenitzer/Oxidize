@@ -47,6 +47,8 @@ pub struct DeletionOutcome {
     pub items: Vec<ItemOutcome>,
     /// Vendor folders that were left empty and removed too.
     pub emptied_parents: Vec<PathBuf>,
+    /// Vendor registry keys that were left empty and removed too.
+    pub emptied_keys: Vec<String>,
 }
 
 // Elevation
@@ -237,6 +239,7 @@ pub fn remove_leftovers(
     };
 
     let mut removed_fs: Vec<PathBuf> = Vec::new();
+    let mut removed_keys: Vec<(crate::model::Hive, String)> = Vec::new();
     for item in items {
         outcome.attempted += 1;
         let status = match remove_one(item, session.as_mut(), &tasks) {
@@ -244,6 +247,11 @@ pub fn remove_leftovers(
                 outcome.deleted += 1;
                 if matches!(item.kind, LeftoverKind::File | LeftoverKind::Directory) {
                     removed_fs.push(PathBuf::from(&item.path));
+                }
+                if item.kind == LeftoverKind::RegistryKey {
+                    if let (Some(hive), Some(subpath)) = (item.hive, item.subpath.as_deref()) {
+                        removed_keys.push((hive, subpath.to_string()));
+                    }
                 }
                 ItemStatus::Removed
             }
@@ -277,11 +285,37 @@ pub fn remove_leftovers(
         }
     }
 
+    // The same for a vendor key that held nothing but this product. The
+    // product's own .reg backup recreates the parent on restore.
+    for (hive, subpath) in removed_keys {
+        if let Some(parent) = empty_vendor_key(hive, &subpath) {
+            if registry::delete_key_tree(hive, &parent).is_ok() {
+                outcome
+                    .emptied_keys
+                    .push(format!("{}\\{}", hive.short_name(), parent));
+            }
+        }
+    }
+
     if let Some(s) = &session {
         outcome.backup_dir = Some(s.root().to_path_buf());
         outcome.backup_name = Some(s.name());
     }
     Ok(outcome)
+}
+
+/// The vendor key above a removed product key, if that is all it held. Only
+/// `SOFTWARE\<vendor>` in either view qualifies, never a root, a denied name,
+/// or a key with anything of its own left in it.
+fn empty_vendor_key(hive: crate::model::Hive, subpath: &str) -> Option<String> {
+    let (parent, _) = subpath.rsplit_once('\\')?;
+    let (root, vendor) = parent.rsplit_once('\\')?;
+    let is_software_root =
+        root.eq_ignore_ascii_case("SOFTWARE") || root.eq_ignore_ascii_case(r"SOFTWARE\WOW6432Node");
+    if !is_software_root || scanner::reg_denied(vendor) {
+        return None;
+    }
+    registry::key_is_empty(hive, parent).then(|| parent.to_string())
 }
 
 /// `Ok(true)` removed, `Ok(false)` already gone.
@@ -317,25 +351,17 @@ fn remove_one(
                 .value_name
                 .as_deref()
                 .context("value leftover missing name")?;
-            let Some(data) = registry::read_string(hive, subpath, value) else {
-                if !registry::value_exists(hive, subpath, value) {
-                    return Ok(false);
-                }
-                // Record the raw type and bytes. Exporting the containing key
-                // instead would carry every other program in it, and a Run key
-                // belongs to the whole machine.
-                if let Some(s) = session {
-                    let raw = registry::read_raw(hive, subpath, value)
-                        .context("reading registry value")?;
-                    s.backup_raw_value(item.kind, &item.path, hive, subpath, value, &raw)
-                        .context("backing up registry value")?;
-                }
-                registry::delete_value(hive, subpath, value).context("deleting registry value")?;
-                return Ok(true);
-            };
+            if !registry::value_exists(hive, subpath, value) {
+                return Ok(false);
+            }
+            // Only the value is recorded, never the key around it. Exporting
+            // the containing key would carry every other program in it, and a
+            // Run key belongs to the whole machine.
             if let Some(s) = session {
-                s.backup_value(item.kind, &item.path, hive, subpath, value, &data)
-                    .context("recording registry value")?;
+                let raw =
+                    registry::read_raw(hive, subpath, value).context("reading registry value")?;
+                s.backup_value(item.kind, &item.path, hive, subpath, value, &raw)
+                    .context("backing up registry value")?;
             }
             registry::delete_value(hive, subpath, value).context("deleting registry value")?;
             Ok(true)
