@@ -200,7 +200,7 @@ pub fn dangling_references() -> Vec<Leftover> {
     for hive in [Hive::CurrentUser, Hive::LocalMachine] {
         for entry in system::path_entries(hive) {
             let dir = PathBuf::from(util::expand_env_vars(&entry));
-            if !dir.is_absolute() || dir.exists() {
+            if !dir.is_absolute() || dir.exists() || !system::volume_available(&dir) {
                 continue;
             }
             out.push(Leftover::path_entry(
@@ -231,7 +231,7 @@ pub fn dangling_references() -> Vec<Leftover> {
             let Some(exe) = system::command_exe(&data) else {
                 continue;
             };
-            if exe.is_absolute() && !exe.exists() {
+            if exe.is_absolute() && !exe.exists() && system::volume_available(&exe) {
                 out.push(Leftover::reg_value(
                     *hive,
                     *base,
@@ -245,7 +245,11 @@ pub fn dangling_references() -> Vec<Leftover> {
 
     for svc in system::services() {
         let Some(exe) = &svc.exe else { continue };
-        if exe.is_absolute() && !exe.exists() && !system::in_windows_dir(exe) {
+        if exe.is_absolute()
+            && !exe.exists()
+            && system::volume_available(exe)
+            && !system::in_windows_dir(exe)
+        {
             out.push(Leftover::service(
                 svc.name,
                 &exe.to_string_lossy(),
@@ -257,7 +261,11 @@ pub fn dangling_references() -> Vec<Leftover> {
 
     for task in system::scheduled_tasks() {
         let Some(exe) = &task.exe else { continue };
-        if exe.is_absolute() && !exe.exists() && !system::in_windows_dir(exe) {
+        if exe.is_absolute()
+            && !exe.exists()
+            && system::volume_available(exe)
+            && !system::in_windows_dir(exe)
+        {
             out.push(Leftover::task(
                 task.name,
                 &exe.to_string_lossy(),

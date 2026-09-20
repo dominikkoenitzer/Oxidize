@@ -45,6 +45,16 @@ pub fn in_windows_dir(p: &Path) -> bool {
     path_under(p, &windir())
 }
 
+/// Is the drive or share this path sits on mounted? A path on an unplugged
+/// drive is missing for now, not gone, and the setting works again once the
+/// drive is back.
+pub fn volume_available(p: &Path) -> bool {
+    match p.ancestors().last() {
+        Some(root) if !root.as_os_str().is_empty() => root.exists(),
+        _ => false,
+    }
+}
+
 /// Turn the first token of a command line into an executable path, resolving
 /// the kernel-style prefixes service ImagePaths use.
 pub fn command_exe(command: &str) -> Option<PathBuf> {
@@ -450,6 +460,8 @@ mod tests {
         );
         let sys = command_exe(r"\SystemRoot\System32\svchost.exe -k netsvcs").unwrap();
         assert!(in_windows_dir(&sys));
+        assert!(volume_available(&sys));
+        assert!(!volume_available(Path::new(r"relative\path")));
         assert_eq!(command_exe(""), None);
         assert_eq!(
             command_exe(r"C:\Program Files\Vendor\svc.exe -k run"),

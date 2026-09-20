@@ -124,7 +124,7 @@ impl OxidizeApp {
             include_system: false,
             elevated: safety::is_elevated(),
             busy: false,
-            status: "Loading installed programs…".to_string(),
+            status: "Loading installed programs...".to_string(),
             log: Vec::new(),
             confirm: None,
             tx,
@@ -161,7 +161,7 @@ impl OxidizeApp {
 
     fn load_programs(&mut self, ctx: &egui::Context) {
         self.busy = true;
-        self.status = "Loading installed programs…".to_string();
+        self.status = "Loading installed programs...".to_string();
         let include_system = self.include_system;
         self.spawn(ctx, move || {
             Msg::Programs(registry::enumerate_installed_programs(include_system))
@@ -204,7 +204,7 @@ impl OxidizeApp {
 
     fn start_scan(&mut self, ctx: &egui::Context, program: Program) {
         self.busy = true;
-        self.status = format!("Scanning for leftovers of {}…", program.display_name);
+        self.status = format!("Scanning for leftovers of {}...", program.display_name);
         self.spawn(ctx, move || {
             let target = scanner::build_target(&program);
             let installed = uninstall::still_installed(&program);
@@ -218,7 +218,7 @@ impl OxidizeApp {
 
     fn start_uninstall(&mut self, ctx: &egui::Context, program: Program) {
         self.busy = true;
-        self.status = format!("Running the uninstaller for {}…", program.display_name);
+        self.status = format!("Running the uninstaller for {}...", program.display_name);
         let silent = self.silent;
         self.spawn(ctx, move || match uninstall::plan(&program, silent) {
             Ok(plan) => match uninstall::run(&plan) {
@@ -238,7 +238,7 @@ impl OxidizeApp {
 
     fn start_remove(&mut self, ctx: &egui::Context, items: Vec<Leftover>, label: String) {
         self.busy = true;
-        self.status = format!("Removing {} item(s)…", items.len());
+        self.status = format!("Removing {} item(s)...", items.len());
         let safety_ctx = self.safety_ctx();
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
@@ -317,6 +317,13 @@ impl OxidizeApp {
                                 self.log.push(format!("failed {}: {e}", item.path))
                             }
                         }
+                    }
+                    for p in &outcome.emptied_parents {
+                        self.log
+                            .push(format!("removed {} (emptied folder)", p.display()));
+                    }
+                    for k in &outcome.emptied_keys {
+                        self.log.push(format!("removed {k} (emptied key)"));
                     }
                     let line = if self.dry_run {
                         format!("dry run: {} items would be removed", outcome.attempted)

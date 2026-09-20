@@ -32,7 +32,7 @@ anyhow = "1"
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# glow instead of the wgpu default: more robust in VMs and over remote desktop.
+# glow instead of the wgpu default: it survives VMs and remote desktop.
 eframe = { version = "0.36", default-features = false, features = [
     "accesskit",
     "default_fonts",

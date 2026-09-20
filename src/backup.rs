@@ -35,12 +35,15 @@ pub enum Undo {
     TaskImport { name: String, file: PathBuf },
     /// Put an entry back on the `Path` variable.
     PathAdd { hive: Hive, entry: String },
-    /// Write a string value back.
+    /// Write a string value back with the type it had. An expandable value
+    /// written back as a plain string stops expanding `%VAR%`.
     ValueWrite {
         hive: Hive,
         subpath: String,
         name: String,
         data: String,
+        #[serde(default = "reg_sz")]
+        vtype: u32,
     },
     /// Write a value back with its original type and bytes.
     RawValueWrite {
@@ -50,6 +53,11 @@ pub enum Undo {
         vtype: u32,
         bytes: Vec<u8>,
     },
+}
+
+/// Manifests that predate the type field only ever held `REG_SZ`.
+fn reg_sz() -> u32 {
+    winreg::enums::RegType::REG_SZ as u32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,30 +162,9 @@ impl BackupSession {
         Ok(out_file)
     }
 
-    /// Record a single string value so it can be written back.
+    /// Record one value with its type. Text stays readable in the manifest,
+    /// anything else keeps its raw bytes.
     pub fn backup_value(
-        &mut self,
-        kind: LeftoverKind,
-        display: &str,
-        hive: Hive,
-        subpath: &str,
-        name: &str,
-        data: &str,
-    ) -> Result<()> {
-        self.record(
-            kind,
-            display,
-            Undo::ValueWrite {
-                hive,
-                subpath: subpath.to_string(),
-                name: name.to_string(),
-                data: data.to_string(),
-            },
-        )
-    }
-
-    /// Record a value that is not a readable string, keeping its type and bytes.
-    pub fn backup_raw_value(
         &mut self,
         kind: LeftoverKind,
         display: &str,
@@ -186,17 +173,24 @@ impl BackupSession {
         name: &str,
         value: &winreg::RegValue,
     ) -> Result<()> {
-        self.record(
-            kind,
-            display,
-            Undo::RawValueWrite {
+        let vtype = value.vtype.clone() as u32;
+        let undo = match crate::registry::as_text(value) {
+            Some(data) => Undo::ValueWrite {
                 hive,
                 subpath: subpath.to_string(),
                 name: name.to_string(),
-                vtype: value.vtype.clone() as u32,
+                data,
+                vtype,
+            },
+            None => Undo::RawValueWrite {
+                hive,
+                subpath: subpath.to_string(),
+                name: name.to_string(),
+                vtype,
                 bytes: value.bytes.to_vec(),
             },
-        )
+        };
+        self.record(kind, display, undo)
     }
 
     pub fn backup_path_entry(&mut self, display: &str, hive: Hive, entry: &str) -> Result<()> {
@@ -235,21 +229,7 @@ impl BackupSession {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        match fs::rename(original, &dest) {
-            Ok(()) => {}
-            Err(_) => {
-                // Another volume: copy, then remove. Roll the copy back if the
-                // remove fails so nothing is left half done.
-                copy_recursive(original, &dest)
-                    .with_context(|| format!("copying {} to quarantine", original.display()))?;
-                if let Err(e) = remove_path(original) {
-                    let _ = remove_path(&dest);
-                    return Err(anyhow::Error::new(e)).with_context(|| {
-                        format!("removing {} (copy rolled back)", original.display())
-                    });
-                }
-            }
-        }
+        move_path(original, &dest)?;
         self.record(
             kind,
             &original.display().to_string(),
@@ -443,6 +423,23 @@ fn validate_reg_file(path: &Path, hive: Hive, subpath: &str) -> Result<()> {
     Ok(())
 }
 
+/// Move a file or folder. `rename` cannot cross volumes, so quarantining
+/// something on `D:` falls back to copy then delete, and the copy is rolled
+/// back if the original will not go. Restore takes the same route home.
+pub fn move_path(from: &Path, to: &Path) -> Result<()> {
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    copy_recursive(from, to)
+        .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    if let Err(e) = remove_path(from) {
+        let _ = remove_path(to);
+        return Err(anyhow::Error::new(e))
+            .with_context(|| format!("removing {} (copy rolled back)", from.display()));
+    }
+    Ok(())
+}
+
 pub fn remove_path(p: &Path) -> std::io::Result<()> {
     if p.is_dir() {
         fs::remove_dir_all(p)
@@ -513,6 +510,18 @@ mod tests {
         assert!(validate_reg_file(&path, Hive::CurrentUser, r"SOFTWARE\Other").is_err());
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_manifest_without_a_type_reads_as_reg_sz() {
+        let json = r#"{"program":"X","created":"now","entries":[{"kind":"RegistryValue",
+            "path":"HKCU\\Run : X","undo":{"ValueWrite":{"hive":"CurrentUser",
+            "subpath":"SOFTWARE","name":"X","data":"y"}}}]}"#;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        match &m.entries[0].undo {
+            Undo::ValueWrite { vtype, .. } => assert_eq!(*vtype, reg_sz()),
+            other => panic!("unexpected undo: {other:?}"),
+        }
     }
 
     #[test]
