@@ -191,12 +191,15 @@ pub fn split_uninstall_command(cmd: &str) -> Vec<String> {
         return split_command_line(trimmed);
     }
     // Byte scan rather than `to_lowercase().find()`, so a non-ASCII path
-    // cannot shift the index and panic the slice.
-    let end = trimmed
-        .as_bytes()
+    // cannot shift the index and panic the slice. The extension has to end the
+    // token as well, or a folder called `Foo.exeBackup` would cut the path.
+    let bytes = trimmed.as_bytes();
+    let end = bytes
         .windows(4)
-        .position(|w| w.eq_ignore_ascii_case(b".exe"))
-        .map(|i| i + 4);
+        .enumerate()
+        .filter(|(_, w)| w.eq_ignore_ascii_case(b".exe"))
+        .map(|(i, _)| i + 4)
+        .find(|&i| matches!(bytes.get(i), None | Some(b' ') | Some(b'\t')));
     match end {
         Some(i) if trimmed.is_char_boundary(i) => {
             let (exe, rest) = trimmed.split_at(i);
@@ -452,6 +455,13 @@ mod tests {
         // The whole point: Windows runs `uninst.exe`, not `C:\Program`.
         let v = split_uninstall_command(r"C:\Program Files\Foo\uninst.exe /S");
         assert_eq!(v[0], r"C:\Program Files\Foo\uninst.exe");
+        assert_eq!(&v[1..], ["/S"]);
+    }
+
+    #[test]
+    fn the_extension_has_to_end_the_program_path() {
+        let v = split_uninstall_command(r"C:\Tools\Foo.exeBackup\uninst.exe /S");
+        assert_eq!(v[0], r"C:\Tools\Foo.exeBackup\uninst.exe");
         assert_eq!(&v[1..], ["/S"]);
     }
 
