@@ -84,11 +84,20 @@ impl BackupSession {
     pub fn new(program_label: &str) -> Result<BackupSession> {
         let base = backups_base()?;
         let now = chrono::Local::now();
-        let root = base.join(format!(
+        let stem = format!(
             "{} {}",
             now.format("%Y-%m-%d %H%M%S"),
             sanitize(program_label)
-        ));
+        );
+        // The stamp is only accurate to the second, and two removals of the
+        // same program can fall inside one. Sharing a folder would overwrite
+        // the first manifest and strand what it holds.
+        let mut root = base.join(&stem);
+        let mut n = 2;
+        while root.exists() {
+            root = base.join(format!("{stem} ({n})"));
+            n += 1;
+        }
         fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
         Ok(BackupSession {
             root,
@@ -522,6 +531,20 @@ mod tests {
             Undo::ValueWrite { vtype, .. } => assert_eq!(*vtype, reg_sz()),
             other => panic!("unexpected undo: {other:?}"),
         }
+    }
+
+    #[test]
+    fn two_sessions_in_one_second_get_their_own_folder() {
+        let base = backups_base().unwrap();
+        let first = BackupSession::new("Oxidize Session Test").unwrap();
+        let second = BackupSession::new("Oxidize Session Test").unwrap();
+        assert_ne!(first.root(), second.root());
+        assert!(second.name().ends_with("(2)"));
+        let _ = fs::remove_dir_all(first.root());
+        let _ = fs::remove_dir_all(second.root());
+        // Leave no empty backups folder behind on a machine that had none.
+        let _ = fs::remove_dir(&base);
+        let _ = fs::remove_dir(base.parent().unwrap());
     }
 
     #[test]
