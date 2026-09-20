@@ -56,11 +56,7 @@ pub fn enum_string_values(hive: Hive, subpath: &str) -> Vec<(String, String)> {
     };
     key.enum_values()
         .filter_map(Result::ok)
-        .filter_map(|(name, value)| {
-            String::from_reg_value(&value)
-                .ok()
-                .map(|s| (name, clean_string(s)))
-        })
+        .filter_map(|(name, value)| as_text(&value).map(|s| (name, clean_string(s))))
         .collect()
 }
 
@@ -139,7 +135,9 @@ fn read_program(source: RegistrySource, key_name: String, sub: &RegKey) -> Optio
         install_date: opt_string(sub, "InstallDate").and_then(|d| util::parse_install_date(&d)),
         install_location: opt_string(sub, "InstallLocation"),
         display_icon: opt_string(sub, "DisplayIcon"),
-        estimated_size_kb: opt_u32(sub, "EstimatedSize"),
+        // A recorded size of zero is the installer saying nothing, not a
+        // program that takes no space.
+        estimated_size_kb: opt_u32(sub, "EstimatedSize").filter(|kb| *kb > 0),
         uninstall_string: opt_string(sub, "UninstallString"),
         quiet_uninstall_string: opt_string(sub, "QuietUninstallString"),
         url_info_about: opt_string(sub, "URLInfoAbout"),
@@ -180,9 +178,26 @@ pub fn enumerate_installed_programs(include_system: bool) -> Vec<Program> {
     programs
 }
 
-/// Delete a key and everything beneath it. HKLM keys need elevation.
+/// Delete a key and everything beneath it. HKLM keys need elevation. The
+/// parent is opened in the 64-bit view first, so the key that goes is the key
+/// that was read: `RegDeleteTree` on its own follows the process's own view,
+/// which would redirect a 32-bit build into `WOW6432Node`.
 pub fn delete_key_tree(hive: Hive, subpath: &str) -> io::Result<()> {
-    predef(hive).delete_subkey_all(subpath)
+    match subpath.rsplit_once('\\') {
+        Some((parent, leaf)) => predef(hive)
+            .open_subkey_with_flags(parent, KEY_READ | KEY_SET_VALUE | KEY_WOW64_64KEY)?
+            .delete_subkey_all(leaf),
+        None => predef(hive).delete_subkey_all(subpath),
+    }
+}
+
+/// True only when the key is genuinely not there. A key we may not open is
+/// not an absent key, and must not be reported as one already gone.
+pub fn key_absent(hive: Hive, subpath: &str) -> bool {
+    matches!(
+        predef(hive).open_subkey_with_flags(subpath, KEY_READ | KEY_WOW64_64KEY),
+        Err(e) if e.kind() == io::ErrorKind::NotFound
+    )
 }
 
 /// Delete a single value under `subpath`.
@@ -196,6 +211,17 @@ pub fn key_is_empty(hive: Hive, subpath: &str) -> bool {
     match open_read(hive, subpath) {
         Some(key) => key.enum_keys().next().is_none() && key.enum_values().next().is_none(),
         None => false,
+    }
+}
+
+/// True only when the value is genuinely not there, the same way
+/// [`key_absent`] answers for a key.
+pub fn value_absent(hive: Hive, subpath: &str, value_name: &str) -> bool {
+    match predef(hive).open_subkey_with_flags(subpath, KEY_READ | KEY_WOW64_64KEY) {
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
+        Ok(key) => {
+            matches!(key.get_raw_value(value_name), Err(e) if e.kind() == io::ErrorKind::NotFound)
+        }
     }
 }
 

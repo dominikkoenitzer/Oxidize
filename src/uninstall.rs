@@ -120,7 +120,6 @@ pub fn wait_for_completion(program: &Program, plan: &UninstallPlan, max: Duratio
     if plan.is_msi || !still_installed(program) {
         return !still_installed(program);
     }
-    let uninstaller = util::file_basename_lower(&plan.argv[0]);
     let install_dir = program
         .install_location
         .as_deref()
@@ -130,16 +129,16 @@ pub fn wait_for_completion(program: &Program, plan: &UninstallPlan, max: Duratio
 
     let start = Instant::now();
     while start.elapsed() < max {
-        if !still_installed(program) {
-            return true;
-        }
+        // A running process is only ours if it runs from the program's own
+        // folder or is the uninstaller's copy of itself in %TEMP%. Matching on
+        // the file name alone waits for any unrelated program that happens to
+        // share it: a Steam game uninstalls through `steam.exe`, which runs the
+        // whole time, and every Squirrel app uninstalls through `Update.exe`.
         let alive = system::running_exes().into_iter().any(|exe| {
-            let base = util::file_basename_lower(&exe.to_string_lossy());
-            base.is_some() && base == uninstaller
-                || install_dir
-                    .as_deref()
-                    .map(|d| system::path_under(&exe, d))
-                    .unwrap_or(false)
+            install_dir
+                .as_deref()
+                .map(|d| system::path_under(&exe, d))
+                .unwrap_or(false)
                 || is_temp_uninstaller(&exe)
         });
         if !alive {

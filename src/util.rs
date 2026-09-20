@@ -201,25 +201,63 @@ pub fn split_uninstall_command(cmd: &str) -> Vec<String> {
     if trimmed.starts_with('"') {
         return split_command_line(trimmed);
     }
-    // Byte scan rather than `to_lowercase().find()`, so a non-ASCII path
-    // cannot shift the index and panic the slice. The extension has to end the
-    // token as well, or a folder called `Foo.exeBackup` would cut the path.
-    let bytes = trimmed.as_bytes();
-    let end = bytes
+    // Windows resolves an unquoted program by trying ever longer prefixes and
+    // taking the first that names a real file, so try that first.
+    let end = program_prefix_end(trimmed).or_else(|| exe_token_end(trimmed));
+    if let Some(i) = end {
+        let (exe, rest) = trimmed.split_at(i);
+        let mut argv = vec![exe.to_string()];
+        argv.extend(split_command_line(rest));
+        return argv;
+    }
+    // Nothing on disk and no extension to go by. Splitting a path on its
+    // spaces here is what hands `C:\\Program Files\\Vendor\\Uninstaller /S` to
+    // `Command` as `C:\\Program`, which Windows resolves as `C:\\Program.exe`,
+    // so a path stays in one piece and only a bare name is split.
+    if trimmed.starts_with("\\\\")
+        || trimmed
+            .split([' ', '\t'])
+            .next()
+            .unwrap_or("")
+            .contains(['\\', '/'])
+    {
+        vec![trimmed.to_string()]
+    } else {
+        split_command_line(trimmed)
+    }
+}
+
+/// Where the program path ends in an unquoted command line: after the first
+/// `.exe` that a space or the end of the string follows. A folder called
+/// `Foo.exeBackup` must not cut the path short.
+pub fn exe_token_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    bytes
         .windows(4)
         .enumerate()
         .filter(|(_, w)| w.eq_ignore_ascii_case(b".exe"))
         .map(|(i, _)| i + 4)
-        .find(|&i| matches!(bytes.get(i), None | Some(b' ') | Some(b'\t')));
-    match end {
-        Some(i) if trimmed.is_char_boundary(i) => {
-            let (exe, rest) = trimmed.split_at(i);
-            let mut argv = vec![exe.to_string()];
-            argv.extend(split_command_line(rest));
-            argv
+        .find(|&i| matches!(bytes.get(i), None | Some(b' ') | Some(b'\t')) && s.is_char_boundary(i))
+}
+
+/// The end of the longest leading run that names a file on disk, the way
+/// `CreateProcess` resolves an unquoted program.
+fn program_prefix_end(s: &str) -> Option<usize> {
+    let is_program = |p: &str| {
+        !p.is_empty()
+            && (std::path::Path::new(p).is_file()
+                || std::path::Path::new(&format!("{p}.exe")).is_file())
+    };
+    let mut candidate = None;
+    for (i, c) in s.char_indices() {
+        if (c == ' ' || c == '\t') && is_program(&s[..i]) {
+            candidate = Some(i);
         }
-        _ => split_command_line(trimmed),
     }
+    if is_program(s) {
+        candidate = Some(s.len());
+    }
+    candidate
 }
 
 pub fn split_command_line(cmd: &str) -> Vec<String> {
@@ -295,7 +333,9 @@ pub fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    // 1023.95 and not 1024: a byte count that rounds up to 1024.0 in the
+    // format below belongs in the next unit, not printed as "1024.0 KB".
+    while value >= 1023.95 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
@@ -318,7 +358,16 @@ pub fn parse_install_date(raw: &str) -> Option<String> {
     let (y, m, d) = match digits.as_slice() {
         [ymd] if ymd.len() == 8 => (&ymd[0..4], &ymd[4..6], &ymd[6..8]),
         [y, m, d] if y.len() == 4 => (*y, *m, *d),
-        [m, d, y] if y.len() == 4 => (*y, *m, *d),
+        // `MM/DD/YYYY` is the common one, but a day past 12 in the first
+        // group can only be a European `DD.MM.YYYY`.
+        [a, b, y] if y.len() == 4 => {
+            let first = a.parse::<u32>().unwrap_or(0);
+            if first > 12 {
+                (*y, *b, *a)
+            } else {
+                (*y, *a, *b)
+            }
+        }
         _ => return None,
     };
     let (yy, mm, dd) = (

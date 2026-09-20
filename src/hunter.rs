@@ -172,10 +172,7 @@ pub fn hunt(query: &str, programs: &[Program]) -> Vec<HunterMatch> {
             if exe_paths.iter().any(|exe| path_under(exe, install)) {
                 score += 1000;
                 reasons.push("executable runs from this program's install folder".to_string());
-            } else if dirs
-                .iter()
-                .any(|d| path_under(d, install) || install.parent() == Some(d.as_path()))
-            {
+            } else if dirs.iter().any(|d| path_under(d, install)) {
                 score += 500;
                 reasons.push("located inside this program's install folder".to_string());
             }

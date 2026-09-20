@@ -62,7 +62,7 @@ const REG_DENY: &[&str] = &[
     "nvidia corporation",
     "amd",
     "realtek",
-    "khronos group",
+    "khronos",
     "odbc",
 ];
 
@@ -119,28 +119,43 @@ pub fn build_target(program: &Program) -> ScanTarget {
                 .to_string()
         })
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty());
+        .filter(|p| !p.as_os_str().is_empty())
+        // A program writes its own install location, so a protected one is
+        // either a broken installer or a hostile one. Either way nothing may
+        // be claimed through it: everything under the folder would count as
+        // the program's, down to Windows' own autostart entries.
+        .filter(|p| !is_protected_path(p));
 
+    // Only a name that says which product this is counts. Every Squirrel app
+    // uninstalls through `Update.exe`, and `App Paths\setup.exe` belongs to
+    // nobody, so those names would claim each other's entries.
+    let generic_exe = |base: &str| {
+        matches!(
+            base,
+            "msiexec.exe"
+                | "unins000.exe"
+                | "uninstall.exe"
+                | "setup.exe"
+                | "install.exe"
+                | "rundll32.exe"
+                | "update.exe"
+                | "updater.exe"
+        )
+    };
     let mut exe_names = Vec::new();
     if let Some(icon) = &program.display_icon {
         let without_index = icon.split(',').next().unwrap_or(icon);
         if let Some(base) = util::file_basename_lower(&util::expand_env_vars(without_index)) {
-            if base.ends_with(".exe") {
+            if base.ends_with(".exe") && !generic_exe(&base) {
                 exe_names.push(base);
             }
         }
     }
-    // The uninstaller's own exe is usually generic, so only app-specific
-    // names count.
     if let Some(us) = &program.uninstall_string {
         let argv = util::split_command_line(&util::expand_env_vars(us));
         if let Some(first) = argv.first() {
             if let Some(base) = util::file_basename_lower(first) {
-                let generic = matches!(
-                    base.as_str(),
-                    "msiexec.exe" | "unins000.exe" | "uninstall.exe" | "setup.exe" | "rundll32.exe"
-                );
-                if base.ends_with(".exe") && !generic && !exe_names.contains(&base) {
+                if base.ends_with(".exe") && !generic_exe(&base) && !exe_names.contains(&base) {
                     exe_names.push(base);
                 }
             }
@@ -161,6 +176,7 @@ pub fn build_target(program: &Program) -> ScanTarget {
     target.install_location = install_location;
     target.exe_names = exe_names;
     target.registry = Some((program.registry_key.clone(), program.source));
+    target.vendor_is_shared = vendor_is_shared(&target);
     target
 }
 
@@ -191,7 +207,9 @@ fn folder_tokens(location: &Path, folder: &str) -> Vec<String> {
 /// into rather than flagged.
 pub fn name_only_target(name: &str, publisher: Option<&str>) -> ScanTarget {
     if publisher.is_some() {
-        return name_target(name, publisher);
+        let mut target = name_target(name, publisher);
+        target.vendor_is_shared = vendor_is_shared(&target);
+        return target;
     }
     let tokens = significant_tokens(name);
     if tokens.len() >= 2 {
@@ -219,6 +237,7 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         name_tokens = without_vendor;
     }
     ScanTarget {
+        vendor_is_shared: false,
         display_name: name.to_string(),
         publisher: publisher.map(str::to_string),
         install_location: None,
@@ -227,6 +246,32 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         publisher_tokens,
         registry: None,
     }
+}
+
+/// Does the product's name boil down to the vendor's own word, with other
+/// programs from that vendor installed? "NVIDIA App" keeps only "nvidia", and
+/// `ProgramData\NVIDIA` holds the data of five NVIDIA products. A vendor with
+/// nothing else installed is a different matter: `AppData\Roaming\discord` is
+/// Discord's, whatever else the word may mean.
+fn vendor_is_shared(target: &ScanTarget) -> bool {
+    if target.publisher_tokens.is_empty() || target.name_tokens != target.publisher_tokens {
+        return false;
+    }
+    registry::enumerate_installed_programs(true)
+        .into_iter()
+        .filter(|p| {
+            target
+                .registry
+                .as_ref()
+                .map(|(key, source)| !(p.registry_key == *key && p.source == *source))
+                .unwrap_or(true)
+        })
+        .any(|p| {
+            p.publisher
+                .as_deref()
+                .map(|pubr| significant_tokens(pubr) == target.publisher_tokens)
+                .unwrap_or(false)
+        })
 }
 
 // Matching
@@ -269,7 +314,7 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     if norm.len() < 3 {
         return None;
     }
-    if is_exact_product(name, target) {
+    if is_exact_product(name, target) && !target.vendor_is_shared {
         return Some((Confidence::High, "exact name".to_string()));
     }
 
@@ -289,6 +334,7 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
         && target.name_tokens[0].len() >= 4
         && name_is_one_word(target);
     if contains_subslice(&candidate, &target.name_tokens)
+        && !target.vendor_is_shared
         && (target.name_tokens.len() >= 2 || same_words || one_word)
     {
         return Some((
@@ -435,15 +481,37 @@ fn other_program_install_dirs(target: &ScanTarget) -> Vec<PathBuf> {
         .collect()
 }
 
+/// A path as Windows will read it when the time comes to delete it: real name
+/// resolved where the path exists, extended-length prefix and forward slashes
+/// gone, and the trailing dots and spaces Windows itself ignores taken off
+/// every part. `C:/Windows`, `C:\PROGRA~1` and `C:\Windows.` all name a
+/// protected directory, and a guard that compares raw strings misses all
+/// three.
+fn resolve_for_guard(p: &Path) -> String {
+    let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let s = real.to_string_lossy().to_lowercase().replace('/', "\\");
+    let s = s
+        .strip_prefix("\\\\?\\unc\\")
+        .map(|rest| format!("\\\\{rest}"))
+        .unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string());
+    s.split('\\')
+        .map(|part| part.trim_end_matches(['.', ' ']))
+        .collect::<Vec<_>>()
+        .join("\\")
+        .trim_end_matches('\\')
+        .to_string()
+}
+
 /// Paths that are never deletable: drive roots, the Windows folder, the scan
 /// roots themselves and the user-profile tree roots.
 pub fn is_protected_path(p: &Path) -> bool {
-    let s = p.to_string_lossy().to_lowercase();
-    let s = s.trim_end_matches('\\');
+    let s = resolve_for_guard(p);
+    let s = s.as_str();
     if s.len() <= 3 {
         return true;
     }
-    if let Some(windir) = env_dir("windir") {
+    {
+        let windir = env_dir("windir").unwrap_or_else(system::windows_dir);
         let w = windir.to_string_lossy().to_lowercase();
         let w = w.trim_end_matches('\\');
         if s == w || s.starts_with(&format!("{w}\\")) {
@@ -597,15 +665,17 @@ fn scan_dir_children(
             let houses_other = other_installs
                 .iter()
                 .any(|o| dir_contains(&key, &norm_path_key(o)));
+            let family = holds_namesake_child(&path, target);
             if is_exact_product(&name, target)
+                && !target.vendor_is_shared
                 && !houses_other
                 && !contains_install
-                && !holds_namesake_child(&path, target)
+                && !family
             {
                 push_dir_leftover(out, path, Confidence::High, "exact name".to_string());
             } else if matches_publisher(&name, target) {
                 flag_product_children(&path, target, out, &format!("in vendor folder {name}"));
-            } else if houses_other || contains_install {
+            } else if houses_other || contains_install || family {
                 // Another program is installed inside, and the folder is not
                 // the vendor's, so it is shared whatever its name says:
                 // Visual Studio's folder holds the Build Tools, Steam's holds
@@ -911,7 +981,12 @@ fn windows_hosted_service(exe: &Path) -> bool {
     ) || exe
         .components()
         .filter_map(|c| c.as_os_str().to_str())
-        .any(|c| c.eq_ignore_ascii_case("DriverStore"))
+        .any(|c| {
+            // Defender runs out of `ProgramData\Microsoft\Windows Defender` and
+            // Edge's updater out of `Program Files (x86)\Microsoft`: Microsoft's
+            // own, under a folder that says so, never a third party's leftover.
+            c.eq_ignore_ascii_case("DriverStore") || c.eq_ignore_ascii_case("Microsoft")
+        })
 }
 
 fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
@@ -999,11 +1074,27 @@ fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
     out
 }
 
-/// Drop repeats. Paths compare normalised, so an install folder recorded
-/// with a trailing separator is the entry the walk already found.
+/// Drop repeats. Paths compare normalised, so an install folder recorded with
+/// a trailing separator is the entry the walk already found, and of two
+/// findings for one path the more confident one stays whichever came first.
 fn dedupe_by_path(items: &mut Vec<Leftover>) {
-    let mut seen = std::collections::HashSet::new();
-    items.retain(|l| seen.insert(norm_path_str(&l.path)));
+    let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut drop = vec![false; items.len()];
+    for i in 0..items.len() {
+        let key = norm_path_str(&items[i].path);
+        match best.get(&key) {
+            Some(&j) if items[j].confidence <= items[i].confidence => drop[i] = true,
+            Some(&j) => {
+                drop[j] = true;
+                best.insert(key, i);
+            }
+            None => {
+                best.insert(key, i);
+            }
+        }
+    }
+    let mut keep = drop.iter().map(|d| !d);
+    items.retain(|_| keep.next().unwrap_or(true));
 }
 
 // Entry point
@@ -1218,7 +1309,7 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let game = root
             .join("Steam")
-            .join("steamapps")
+            .join("library")
             .join("common")
             .join("game");
         fs::create_dir_all(&game).unwrap();

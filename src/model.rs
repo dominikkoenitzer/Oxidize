@@ -437,6 +437,10 @@ impl ScanReport {
 /// or built from a bare name when the program is no longer registered.
 #[derive(Debug, Clone)]
 pub struct ScanTarget {
+    /// True when the product's name says no more than its publisher's and that
+    /// publisher has other programs installed. A folder or key with that name
+    /// is then the vendor's, shared with everything else they ship.
+    pub vendor_is_shared: bool,
     pub display_name: String,
     pub publisher: Option<String>,
     pub install_location: Option<PathBuf>,

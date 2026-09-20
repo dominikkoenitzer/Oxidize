@@ -189,10 +189,15 @@ pub fn needs_elevation(items: &[Leftover]) -> bool {
         LeftoverKind::ScheduledTask => true,
         LeftoverKind::File | LeftoverKind::Directory => {
             let p = Path::new(&l.path);
-            ["ProgramFiles", "ProgramFiles(x86)", "ProgramData"]
-                .iter()
-                .filter_map(|v| scanner::env_dir(v))
-                .any(|root| system::path_under(p, &root))
+            [
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "ProgramW6432",
+                "ProgramData",
+            ]
+            .iter()
+            .filter_map(|v| scanner::env_dir(v))
+            .any(|root| system::path_under(p, &root))
         }
     })
 }
@@ -334,7 +339,7 @@ fn remove_one(
                 .subpath
                 .as_deref()
                 .context("registry leftover missing path")?;
-            if !registry::key_exists(hive, subpath) {
+            if registry::key_absent(hive, subpath) {
                 return Ok(false);
             }
             if let Some(s) = session {
@@ -354,7 +359,7 @@ fn remove_one(
                 .value_name
                 .as_deref()
                 .context("value leftover missing name")?;
-            if !registry::value_exists(hive, subpath, value) {
+            if registry::value_absent(hive, subpath, value) {
                 return Ok(false);
             }
             // Only the value is recorded, never the key around it. Exporting
@@ -395,7 +400,7 @@ fn remove_one(
                 .subpath
                 .as_deref()
                 .context("service leftover missing key")?;
-            if !registry::key_exists(crate::model::Hive::LocalMachine, subpath) {
+            if registry::key_absent(crate::model::Hive::LocalMachine, subpath) {
                 return Ok(false);
             }
             if let Some(s) = session {
@@ -427,15 +432,17 @@ fn remove_one(
                 .name
                 .as_deref()
                 .context("path leftover missing entry")?;
-            let present = system::path_entries(hive)
-                .iter()
-                .any(|e| e.eq_ignore_ascii_case(entry));
-            if !present {
+            // The removal takes every entry for the same folder, so the backup
+            // records each of them, not only the one that was flagged.
+            let matches = system::matching_path_entries(hive, entry);
+            if matches.is_empty() {
                 return Ok(false);
             }
             if let Some(s) = session {
-                s.backup_path_entry(&item.path, hive, entry)
-                    .context("recording PATH entry")?;
+                for (index, text) in &matches {
+                    s.backup_path_entry(&item.path, hive, text, *index)
+                        .context("recording PATH entry")?;
+                }
             }
             system::remove_path_entry(hive, entry)?;
             Ok(true)

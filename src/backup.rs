@@ -33,8 +33,13 @@ pub enum Undo {
     MoveBack { from: PathBuf, to: PathBuf },
     /// Re-create a task from its XML.
     TaskImport { name: String, file: PathBuf },
-    /// Put an entry back on the `Path` variable.
-    PathAdd { hive: Hive, entry: String },
+    /// Put an entry back on the `Path` variable, where it was.
+    PathAdd {
+        hive: Hive,
+        entry: String,
+        #[serde(default)]
+        index: Option<usize>,
+    },
     /// Write a string value back with the type it had. An expandable value
     /// written back as a plain string stops expanding `%VAR%`.
     ValueWrite {
@@ -128,7 +133,11 @@ impl BackupSession {
             undo,
         });
         let json = serde_json::to_string_pretty(&self.manifest)?;
-        fs::write(self.root.join(MANIFEST), json).context("writing manifest")?;
+        // Written beside the real file and renamed over it: a manifest half
+        // written by a crash would take every earlier entry down with it.
+        let tmp = self.root.join("manifest.json.new");
+        fs::write(&tmp, json).context("writing manifest")?;
+        fs::rename(&tmp, self.root.join(MANIFEST)).context("replacing manifest")?;
         Ok(())
     }
 
@@ -147,20 +156,21 @@ impl BackupSession {
         let key = format!("{}\\{}", hive.short_name(), subpath);
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        let out_file = dir.join(format!(
-            "{}_{:08x}.reg",
-            sanitize(&key),
-            hasher.finish() as u32
-        ));
+        let out_file = dir.join(format!("{}_{:016x}.reg", sanitize(&key), hasher.finish()));
         if out_file.exists() {
             // Same key backed up twice in one run (a key and one of its
             // values, say): the first export already covers it.
             return Ok(out_file);
         }
 
-        export_registry_key(hive, subpath, &out_file)?;
-        validate_reg_file(&out_file, hive, subpath)
-            .with_context(|| format!("backup validation failed for {}", out_file.display()))?;
+        // Anything left behind by a failed export would be taken for a good
+        // backup by the shortcut above on the next call.
+        if let Err(e) = export_registry_key(hive, subpath, &out_file)
+            .and_then(|()| validate_reg_file(&out_file, hive, subpath))
+        {
+            let _ = fs::remove_file(&out_file);
+            return Err(e).with_context(|| format!("backing up {} to {}", key, out_file.display()));
+        }
         self.record(
             kind,
             display,
@@ -202,13 +212,20 @@ impl BackupSession {
         self.record(kind, display, undo)
     }
 
-    pub fn backup_path_entry(&mut self, display: &str, hive: Hive, entry: &str) -> Result<()> {
+    pub fn backup_path_entry(
+        &mut self,
+        display: &str,
+        hive: Hive,
+        entry: &str,
+        index: usize,
+    ) -> Result<()> {
         self.record(
             LeftoverKind::PathEntry,
             display,
             Undo::PathAdd {
                 hive,
                 entry: entry.to_string(),
+                index: Some(index),
             },
         )
     }
@@ -216,9 +233,12 @@ impl BackupSession {
     pub fn backup_task(&mut self, display: &str, task: &TaskInfo) -> Result<()> {
         let dir = self.root.join("tasks");
         fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        let mut hasher = DefaultHasher::new();
+        task.name.hash(&mut hasher);
         let out = dir.join(format!(
-            "{}.xml",
-            sanitize(task.name.trim_start_matches('\\'))
+            "{}_{:016x}.xml",
+            sanitize(task.name.trim_start_matches('\\')),
+            hasher.finish()
         ));
         system::export_task(task, &out)?;
         self.record(
@@ -239,14 +259,19 @@ impl BackupSession {
         }
 
         move_path(original, &dest)?;
-        self.record(
+        // Without its manifest entry the item is gone as far as restore is
+        // concerned, so a failure here has to put it back where it was.
+        if let Err(e) = self.record(
             kind,
             &original.display().to_string(),
             Undo::MoveBack {
                 from: dest.clone(),
                 to: original.to_path_buf(),
             },
-        )?;
+        ) {
+            let _ = move_path(&dest, original);
+            return Err(e);
+        }
         Ok(dest)
     }
 
@@ -422,7 +447,10 @@ fn validate_reg_file(path: &Path, hive: Hive, subpath: &str) -> Result<()> {
         bail!("missing 'Windows Registry Editor Version 5.00' header");
     }
     let section = format!("[{}\\{}]", hive.full_name(), subpath).to_lowercase();
-    if !text.contains(&section) {
+    let at_line_start = text
+        .match_indices(&section)
+        .any(|(i, _)| i == 0 || text.as_bytes()[i - 1] == b'\n');
+    if !at_line_start {
         bail!(
             "backup does not contain the section [{}\\{}]",
             hive.full_name(),
@@ -558,6 +586,7 @@ mod tests {
                 undo: Undo::PathAdd {
                     hive: Hive::CurrentUser,
                     entry: "C:\\x".into(),
+                    index: Some(0),
                 },
             }],
         };

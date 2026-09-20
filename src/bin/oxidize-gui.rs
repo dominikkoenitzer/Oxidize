@@ -57,8 +57,8 @@ enum Msg {
 /// A pending destructive action awaiting confirmation.
 #[allow(clippy::large_enum_variant)] // these are constructed at most once per click
 enum Confirm {
-    Uninstall(Program),
-    Remove(Vec<Leftover>, String),
+    Uninstall(Program, bool),
+    Remove(Vec<Leftover>, String, SafetyContext),
 }
 
 /// An action requested during rendering, executed after the panels are drawn
@@ -145,7 +145,11 @@ impl OxidizeApp {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(f());
+            // A panic in the engine would otherwise take the answer with it and
+            // leave the window busy with nothing to wait for.
+            let msg = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .unwrap_or_else(|_| Msg::Error("the operation stopped unexpectedly".to_string()));
+            let _ = tx.send(msg);
             ctx.request_repaint();
         });
     }
@@ -214,10 +218,9 @@ impl OxidizeApp {
         });
     }
 
-    fn start_uninstall(&mut self, ctx: &egui::Context, program: Program) {
+    fn start_uninstall(&mut self, ctx: &egui::Context, program: Program, silent: bool) {
         self.busy = true;
         self.status = format!("Running the uninstaller for {}...", program.display_name);
-        let silent = self.silent;
         self.spawn(ctx, move || match uninstall::plan(&program, silent) {
             Ok(plan) => match uninstall::run(&plan) {
                 Ok(status) => Msg::Uninstalled {
@@ -234,10 +237,15 @@ impl OxidizeApp {
         });
     }
 
-    fn start_remove(&mut self, ctx: &egui::Context, items: Vec<Leftover>, label: String) {
+    fn start_remove(
+        &mut self,
+        ctx: &egui::Context,
+        items: Vec<Leftover>,
+        label: String,
+        safety_ctx: SafetyContext,
+    ) {
         self.busy = true;
         self.status = format!("Removing {} item(s)...", items.len());
-        let safety_ctx = self.safety_ctx();
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
                 Ok(outcome) => Msg::Removed(outcome),
@@ -270,7 +278,7 @@ impl OxidizeApp {
                     }
                     self.spawn_icon_load(ctx);
                 }
-                Msg::Scan { id, report } => {
+                Msg::Scan { id, report } if self.selected.as_deref() == Some(id.as_str()) => {
                     // High-confidence items start checked, as on the command line.
                     // A program that is still installed shows its footprint with
                     // nothing checked.
@@ -291,6 +299,8 @@ impl OxidizeApp {
                     self.scan = Some(report);
                     self.busy = false;
                 }
+                // A scan the user has already moved on from.
+                Msg::Scan { .. } => self.busy = false,
                 Msg::Uninstalled {
                     message,
                     still_installed,
@@ -421,9 +431,9 @@ impl OxidizeApp {
             return;
         }
         let message = match self.confirm.as_ref().unwrap() {
-            Confirm::Uninstall(p) => format!("Run the uninstaller for {}?", p.display_name),
-            Confirm::Remove(items, _) => {
-                if self.make_backups {
+            Confirm::Uninstall(p, _) => format!("Run the uninstaller for {}?", p.display_name),
+            Confirm::Remove(items, _, ctx) => {
+                if ctx.make_backups {
                     format!(
                         "Remove {} items? A backup is kept, so this can be undone.",
                         items.len()
@@ -454,8 +464,10 @@ impl OxidizeApp {
 
         match decision {
             Some(true) => match self.confirm.take().unwrap() {
-                Confirm::Uninstall(p) => self.start_uninstall(ctx, p),
-                Confirm::Remove(items, label) => self.start_remove(ctx, items, label),
+                Confirm::Uninstall(p, silent) => self.start_uninstall(ctx, p, silent),
+                Confirm::Remove(items, label, safety) => {
+                    self.start_remove(ctx, items, label, safety)
+                }
             },
             Some(false) => self.confirm = None,
             None => {}
@@ -761,7 +773,7 @@ impl eframe::App for OxidizeApp {
             match action {
                 Action::Refresh => self.load_programs(ctx),
                 Action::Scan(p) => self.start_scan(ctx, p),
-                Action::Uninstall(p) => {
+                Action::Uninstall(p) if self.confirm.is_none() => {
                     if self.dry_run {
                         match uninstall::plan(&p, self.silent) {
                             Ok(plan) => {
@@ -772,16 +784,19 @@ impl eframe::App for OxidizeApp {
                             Err(e) => self.log.push(format!("Cannot uninstall: {e:#}")),
                         }
                     } else {
-                        self.confirm = Some(Confirm::Uninstall(p));
+                        self.confirm = Some(Confirm::Uninstall(p, self.silent));
                     }
                 }
-                Action::Remove(items, label) => {
+                Action::Remove(items, label) if self.confirm.is_none() => {
                     if self.dry_run {
-                        self.start_remove(ctx, items, label);
+                        let safety = self.safety_ctx();
+                        self.start_remove(ctx, items, label, safety);
                     } else {
-                        self.confirm = Some(Confirm::Remove(items, label));
+                        self.confirm = Some(Confirm::Remove(items, label, self.safety_ctx()));
                     }
                 }
+                // A question is already on screen: let the user answer it first.
+                Action::Uninstall(_) | Action::Remove(..) => {}
                 Action::RestartAdmin => match safety::relaunch_elevated() {
                     Ok(()) => std::process::exit(0),
                     Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
