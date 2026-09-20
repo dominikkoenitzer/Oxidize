@@ -44,6 +44,10 @@ oxidize orphans --remove              drops PATH entries, autostart values, serv
                                       and tasks whose files no longer exist
 ```
 
+A program Windows no longer lists is scanned by name alone, and a vendor folder
+is only recognised as one when you name the publisher:
+`oxidize scan Chrome --publisher "Google LLC"`.
+
 Every leftover has a confidence. `--remove` takes the high-confidence ones;
 `--medium` adds the plausible ones, `--all` takes everything listed.
 

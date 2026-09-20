@@ -226,6 +226,22 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
 // Matching
 // --------
 
+/// Is the product's name really just its one token? "Brave" is, and so is
+/// "Malwarebytes version 5.6.5.306", where everything else is version noise.
+/// "Python Launcher" is not: "launcher" says something, even though it is too
+/// common to match on.
+fn name_is_one_word(target: &ScanTarget) -> bool {
+    let [token] = target.name_tokens.as_slice() else {
+        return false;
+    };
+    target
+        .display_name
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| w.len() >= 3 && !w.chars().all(|c| c.is_ascii_digit()))
+        .all(|w| w == *token || target.publisher_tokens.contains(&w) || util::is_noise_word(&w))
+}
+
 /// Is this name the product itself: the display name, or its product words
 /// joined ("GoogleChrome" for "Google Chrome")?
 fn is_exact_product(name: &str, target: &ScanTarget) -> bool {
@@ -256,7 +272,19 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
         return None;
     }
 
-    if contains_subslice(&candidate, &target.name_tokens) {
+    // The same words on both sides, give or take the noise: "CLI" for "GitHub
+    // CLI".
+    let same_words = candidate.len() == target.name_tokens.len();
+    // A single word carries the name only when the name really is that one
+    // word, and only if it is long enough to mean anything. "Microsoft Visual
+    // C++ 2010 Redistributable" boils down to "visual", which would claim
+    // Visual Studio's services, and ".NET SDK" to "sdk".
+    let one_word = target.name_tokens.len() == 1
+        && target.name_tokens[0].len() >= 4
+        && name_is_one_word(target);
+    if contains_subslice(&candidate, &target.name_tokens)
+        && (target.name_tokens.len() >= 2 || same_words || one_word)
+    {
         return Some((
             Confidence::High,
             format!("contains \"{}\"", target.display_name),
@@ -856,10 +884,34 @@ fn match_exe_item(
     score_product(name, target)
 }
 
+/// Is this service Windows' own host process, or a driver Windows installed?
+/// Both take their name from whoever asked for them, so Logitech's LampArray
+/// service in the driver store reads as Logitech's, and every per-user service
+/// reads as whatever shares a word with it. Neither is a program's leftover.
+/// A program that puts its own service binary in `System32` still counts.
+fn windows_hosted_service(exe: &Path) -> bool {
+    let base = util::file_basename_lower(&exe.to_string_lossy()).unwrap_or_default();
+    matches!(
+        base.as_str(),
+        "svchost.exe" | "rundll32.exe" | "dllhost.exe" | "services.exe"
+    ) || exe
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .any(|c| c.eq_ignore_ascii_case("DriverStore"))
+}
+
 fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
     let mut out = Vec::new();
 
     for svc in system::services() {
+        if svc
+            .exe
+            .as_deref()
+            .map(windows_hosted_service)
+            .unwrap_or(false)
+        {
+            continue;
+        }
         let label = svc.display_name.as_deref().unwrap_or(&svc.name);
         let hit = match_exe_item(&svc.name, svc.exe.as_deref(), target)
             .or_else(|| match_exe_item(label, None, target));
@@ -1080,6 +1132,70 @@ mod tests {
             score_product("Wallpaper", &two),
             Some((Confidence::Medium, _))
         ));
+    }
+
+    #[test]
+    fn one_word_matches_only_when_the_name_is_that_word() {
+        // "Brave Update Service" is Brave's: the name really is one word.
+        let brave = name_target("Brave", Some("Brave Software Inc"));
+        assert!(matches!(
+            score_product("Brave Update Service", &brave),
+            Some((Confidence::High, _))
+        ));
+
+        // "Microsoft Visual C++ 2010 x64 Redistributable" boils down to
+        // "visual", which is not what the product is called, so Visual
+        // Studio's service is plausible at most.
+        let vcredist = name_target(
+            "Microsoft Visual C++ 2010  x64 Redistributable - 10.0.40219",
+            Some("Microsoft Corporation"),
+        );
+        assert_eq!(vcredist.name_tokens, vec!["visual".to_string()]);
+        assert!(matches!(
+            score_product("Visual Studio Installer Elevation Service", &vcredist),
+            Some((Confidence::Medium, _))
+        ));
+
+        // Version noise does not stop a name from being one word.
+        let mbam = name_target("Malwarebytes version 5.6.5.306", Some("Malwarebytes"));
+        assert!(matches!(
+            score_product("Malwarebytes Anti-Malware", &mbam),
+            Some((Confidence::High, _))
+        ));
+    }
+
+    #[test]
+    fn a_short_word_carries_no_name_on_its_own() {
+        let sdk = name_target(
+            "Microsoft .NET SDK 9.0.318 (x64)",
+            Some("Microsoft Corporation"),
+        );
+        assert_eq!(sdk.name_tokens, vec!["sdk".to_string()]);
+        assert!(score_product("NVIDIA FrameView SDK", &sdk).is_none());
+
+        // The same words on both sides still match, inside the vendor key
+        // "GitHub" the child "CLI" is the product.
+        let cli = name_target("GitHub CLI", Some("GitHub, Inc."));
+        assert_eq!(cli.name_tokens, vec!["cli".to_string()]);
+        assert!(matches!(
+            score_product("CLI", &cli),
+            Some((Confidence::High, _))
+        ));
+        assert!(score_product("claude-cli-nodejs", &cli).is_none());
+    }
+
+    #[test]
+    fn windows_own_service_hosts_are_left_alone() {
+        assert!(windows_hosted_service(Path::new(
+            r"C:\WINDOWS\system32\svchost.exe"
+        )));
+        assert!(windows_hosted_service(Path::new(
+            r"C:\WINDOWS\System32\DriverStore\FileRepository\logi.inf_amd64_1\logi_service.exe"
+        )));
+        // A program that drops its own service binary in System32 still counts.
+        assert!(!windows_hosted_service(Path::new(
+            r"C:\WINDOWS\SysWOW64\wallpaperservice32.exe"
+        )));
     }
 
     #[test]

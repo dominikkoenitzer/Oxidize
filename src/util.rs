@@ -5,9 +5,10 @@
 //! Everything here is dependency-free and unit-tested, because the leftover
 //! matcher's correctness (and therefore its safety) hinges on these functions.
 
-/// Generic words that carry no identifying signal and would cause false
-/// matches if used as search tokens (e.g. a folder literally named "Software").
-const STOPWORDS: &[&str] = &[
+/// Company suffixes, packaging words and version noise: filler that says
+/// nothing about which product this is. A name made of the product word plus
+/// these is still a one-word name.
+const NOISE_WORDS: &[&str] = &[
     "the",
     "inc",
     "llc",
@@ -60,9 +61,13 @@ const STOPWORDS: &[&str] = &[
     "files",
     "data",
     "tools",
-    // High-collision generic words: too common to identify a product on their
-    // own, so they never become match tokens (a single coincidental hit on one
-    // of these must not flag an unrelated program's files).
+];
+
+/// Words that do name something, but are far too common to identify a product
+/// on their own: a single coincidental hit on one of these must not flag an
+/// unrelated program's files. A name that carries one of these is more than
+/// its product word.
+const GENERIC_WORDS: &[&str] = &[
     "media",
     "player",
     "viewer",
@@ -92,9 +97,15 @@ const STOPWORDS: &[&str] = &[
     "client",
 ];
 
-/// True if `token` is a non-identifying stopword.
+/// True if `token` is a non-identifying stopword of either kind.
 pub fn is_stopword(token: &str) -> bool {
-    STOPWORDS.contains(&token)
+    NOISE_WORDS.contains(&token) || GENERIC_WORDS.contains(&token)
+}
+
+/// True if `token` is only packaging noise: a version, an edition or an
+/// architecture, never part of what the product is called.
+pub fn is_noise_word(token: &str) -> bool {
+    NOISE_WORDS.contains(&token)
 }
 
 /// Collapse a string to lower-case alphanumerics only, for substring
