@@ -62,7 +62,8 @@ Registry keys and values under `SOFTWARE` in HKCU and HKLM, both 32- and
 ProgramData, AppData, the Start Menu, Startup and the Desktop. Services,
 scheduled tasks, firewall rules and PATH entries. Windows' own locations are
 never touched, and a vendor folder that also holds other products is never
-removed as a whole.
+removed as a whole. One that held nothing but the program, folder or key, goes
+with it.
 
 Store apps are not covered.
 

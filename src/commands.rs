@@ -89,7 +89,9 @@ fn cmd_list(args: &ListArgs, g: &Global) -> Result<()> {
     let show_date = matches!(args.sort, SortKey::Date);
     print_program_table(&programs, show_date);
     println!();
-    println!("{}", term::dim(&format!("{} programs", programs.len())));
+    let n = programs.len();
+    let word = if n == 1 { "program" } else { "programs" };
+    println!("{}", term::dim(&format!("{n} {word}")));
     Ok(())
 }
 
@@ -103,12 +105,10 @@ fn sort_programs(programs: &mut [Program], key: SortKey) {
                 .unwrap_or("")
                 .cmp(a.install_date.as_deref().unwrap_or(""))
         }),
-        SortKey::Publisher => programs.sort_by(|a, b| {
-            a.publisher
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase()
-                .cmp(&b.publisher.as_deref().unwrap_or("").to_lowercase())
+        // Entries without a publisher sort last, not first.
+        SortKey::Publisher => programs.sort_by_key(|p| {
+            let name = p.publisher.as_deref().unwrap_or("").to_lowercase();
+            (name.is_empty(), name)
         }),
     }
 }
