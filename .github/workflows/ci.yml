@@ -40,13 +40,13 @@ jobs:
         run: cargo fmt --check
 
       - name: Build
-        run: cargo build --release --all-targets
+        run: cargo build --locked --release --all-targets
 
       - name: Test
-        run: cargo test --all
+        run: cargo test --locked --all
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Upload binaries
         uses: actions/upload-artifact@v7
