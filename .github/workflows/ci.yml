@@ -12,6 +12,12 @@ on:
     - cron: '20 */6 * * *'
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.ref }}
+  # A second push to the default branch used to cancel the run for the first one, so that commit was never
+  # checked by anything. Only a superseded pull request push is safe to drop.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
