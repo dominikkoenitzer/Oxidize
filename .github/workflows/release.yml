@@ -7,6 +7,12 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  # Never cancel a publish in flight: a half-uploaded asset is worse than a
+  # duplicate run.
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Build and publish
