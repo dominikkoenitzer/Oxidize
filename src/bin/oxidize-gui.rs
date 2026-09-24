@@ -17,12 +17,21 @@ use oxidize::model::{Confidence, Group, Leftover, Program, ScanReport};
 use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
 use oxidize::{registry, scanner, uninstall, util};
 
+/// The Oxidize mark for the window, the same artwork the executables embed.
+fn window_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../assets/oxidize.png"))
+        .expect("assets/oxidize.png is a valid PNG")
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1040.0, 700.0])
             .with_min_inner_size([720.0, 480.0])
-            .with_title("Oxidize"),
+            .with_title("Oxidize")
+            // The window's own icon; without one eframe shows the egui logo in
+            // the title bar and taskbar.
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native(
@@ -1039,4 +1048,14 @@ fn extract_icon_rgba(
     _install_location: Option<&str>,
 ) -> Option<(Vec<u8>, u32, u32)> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn window_icon_decodes() {
+        let icon = super::window_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
 }
