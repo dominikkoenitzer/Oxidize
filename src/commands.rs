@@ -260,8 +260,212 @@ fn print_remove_hint(high: usize, command: &str) {
 
 fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
     let programs = registry::enumerate_installed_programs(true);
-    let program = resolve_program(&programs, &args.target)?.clone();
-    uninstall_program(&program, args.silent, args.keep, &args.levels, g)
+    if let [target] = args.targets.as_slice() {
+        let program = resolve_program(&programs, target)?.clone();
+        return uninstall_program(&program, args.silent, args.keep, &args.levels, g);
+    }
+    let batch = plan_batch(&programs, &args.targets, args.silent)?;
+    uninstall_batch(&batch, args.keep, &args.levels, g)
+}
+
+/// A program of a batch with the command that uninstalls it.
+struct Planned {
+    program: Program,
+    plan: uninstall::UninstallPlan,
+}
+
+/// Resolve every name and plan every uninstaller before anything runs. Any
+/// name that matches no program or several, and any program without an
+/// uninstall command, stops the whole batch. The order is the order of the
+/// names; a program named twice runs once.
+fn plan_batch(programs: &[Program], targets: &[String], silent: bool) -> Result<Vec<Planned>> {
+    let mut planned: Vec<Planned> = Vec::new();
+    let mut problems = Vec::new();
+    for target in targets {
+        let program = match resolve_target(programs, target) {
+            Ok(p) => p,
+            Err(Resolve::NotFound) => {
+                problems.push(format!("no installed program matches \"{target}\""));
+                continue;
+            }
+            Err(Resolve::Ambiguous(msg)) => {
+                problems.push(msg);
+                continue;
+            }
+        };
+        if planned.iter().any(|b| same_program(&b.program, program)) {
+            continue;
+        }
+        match uninstall::plan(program, silent) {
+            Ok(plan) => planned.push(Planned {
+                program: program.clone(),
+                plan,
+            }),
+            Err(e) => problems.push(format!("{}: {e:#}", program.display_name)),
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "nothing was uninstalled. Fix these first:\n{}",
+            problems.join("\n")
+        );
+    }
+    Ok(planned)
+}
+
+/// The same Uninstall entry: one id can exist in more than one hive or view.
+fn same_program(a: &Program, b: &Program) -> bool {
+    a.id() == b.id() && a.source == b.source
+}
+
+/// Show the whole plan, ask once, then uninstall the programs one after
+/// another, each with its own leftover scan, removal and backup.
+fn uninstall_batch(batch: &[Planned], keep: bool, levels: &LevelOpts, g: &Global) -> Result<()> {
+    // Capture every footprint before the first uninstaller runs: one of them
+    // may take a later program along.
+    let targets: Vec<ScanTarget> = batch
+        .iter()
+        .map(|b| scanner::build_target(&b.program))
+        .collect();
+    let n = batch.len();
+
+    if !g.json {
+        let head = if n == 1 {
+            "1 program".to_string()
+        } else {
+            format!("{n} programs, one after another")
+        };
+        println!("{}", term::bold(&head));
+        for (i, b) in batch.iter().enumerate() {
+            println!("  {}. {}", i + 1, program_head(&b.program));
+            println!("     {}", term::dim(&b.plan.display()));
+        }
+    }
+
+    let question = if n == 1 {
+        "Run the uninstaller?".to_string()
+    } else {
+        format!("Run {n} uninstallers?")
+    };
+    if !g.dry_run && !g.confirm(&question, true) {
+        if g.json {
+            let programs: Vec<_> = batch
+                .iter()
+                .map(|b| json!({ "program": b.program, "command": b.plan.display(), "cancelled": true }))
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "programs": programs,
+                    "uninstalled": 0,
+                    "failed": 0,
+                    "cancelled": true,
+                }))?
+            );
+        } else {
+            term::info("Cancelled.");
+        }
+        return Ok(());
+    }
+
+    let mut runs = Vec::with_capacity(n);
+    for (i, (b, target)) in batch.iter().zip(&targets).enumerate() {
+        if !g.json {
+            println!();
+            println!(
+                "{}",
+                term::bold(&format!("[{}/{n}] {}", i + 1, b.program.display_name))
+            );
+        }
+        // One program failing does not stop the others.
+        let run = run_uninstall(&b.program, target, &b.plan, keep, levels, g).unwrap_or_else(|e| {
+            let error = format!("{e:#}");
+            if !g.json {
+                term::error(&error);
+            }
+            ProgramRun::stopped(&b.program, &b.plan, error)
+        });
+        runs.push(run);
+    }
+
+    if g.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&batch_json(&runs, g.dry_run))?
+        );
+    } else {
+        print_batch_summary(&runs, g.dry_run);
+    }
+    let failed = runs.iter().filter(|r| r.failed(g.dry_run)).count();
+    if failed > 0 {
+        bail!("{failed} of {n} programs did not uninstall cleanly");
+    }
+    Ok(())
+}
+
+/// A batch as JSON: every program's own result in the order they ran, each
+/// with `failed`, then the counts.
+fn batch_json(runs: &[ProgramRun], dry_run: bool) -> serde_json::Value {
+    let programs: Vec<_> = runs
+        .iter()
+        .map(|r| {
+            let mut entry = r.json.clone();
+            entry["failed"] = json!(r.failed(dry_run));
+            entry
+        })
+        .collect();
+    json!({
+        "programs": programs,
+        "uninstalled": runs.iter().filter(|r| r.gone).count(),
+        "failed": runs.iter().filter(|r| r.failed(dry_run)).count(),
+        "cancelled": false,
+    })
+}
+
+/// One line per program: its state, its leftovers, its backup.
+fn print_batch_summary(runs: &[ProgramRun], dry_run: bool) {
+    println!();
+    println!("{}", term::bold("Summary"));
+    let name_w = column_width(runs.iter().map(|r| r.name.as_str()), 40);
+    let state_w = column_width(runs.iter().map(|r| r.state(dry_run)), 16);
+    for r in runs {
+        let state = fit(r.state(dry_run), state_w);
+        let state = if r.failed(dry_run) {
+            term::red(&state)
+        } else if r.gone {
+            term::green(&state)
+        } else {
+            term::dim(&state)
+        };
+        let mut line = format!(
+            "  {}  {state}  {}",
+            fit(&r.name, name_w),
+            r.leftovers(dry_run)
+        );
+        if let Some(name) = r.removal.as_ref().and_then(|o| o.backup_name.as_ref()) {
+            line.push_str(&term::dim(&format!("  backup \"{name}\"")));
+        }
+        println!("{line}");
+    }
+    println!();
+    let n = runs.len();
+    if dry_run {
+        println!("{}", term::dim("dry run: nothing was changed"));
+        return;
+    }
+    let gone = runs.iter().filter(|r| r.gone).count();
+    let failed = runs.iter().filter(|r| r.failed(dry_run)).count();
+    let mut parts = vec![format!("{gone} of {n} uninstalled")];
+    if failed > 0 {
+        parts.push(format!("{failed} failed"));
+    }
+    println!("{}", parts.join(", "));
+    if runs
+        .iter()
+        .any(|r| r.removal.as_ref().is_some_and(|o| o.backup_name.is_some()))
+    {
+        println!("{}", term::dim("Undo one: oxidize restore <backup>"));
+    }
 }
 
 /// Uninstall, then scan and offer to remove the leftovers. Shared with
@@ -316,9 +520,77 @@ fn program_head(program: &Program) -> String {
     head
 }
 
-/// What one uninstall did.
+/// What one uninstall did, for the JSON output and a batch summary.
 struct ProgramRun {
+    name: String,
     json: serde_json::Value,
+    /// The Uninstall entry is gone afterwards.
+    gone: bool,
+    /// Leftovers the scan found.
+    found: usize,
+    removal: Option<DeletionOutcome>,
+    /// Why the uninstall stopped, when it did.
+    error: Option<String>,
+}
+
+impl ProgramRun {
+    /// An uninstall that stopped with an error before it finished.
+    fn stopped(program: &Program, plan: &uninstall::UninstallPlan, error: String) -> Self {
+        ProgramRun {
+            name: program.display_name.clone(),
+            json: json!({ "program": program, "command": plan.display(), "error": error }),
+            gone: false,
+            found: 0,
+            removal: None,
+            error: Some(error),
+        }
+    }
+
+    /// An error, an entry still registered after its uninstaller, or a
+    /// leftover that could not be removed.
+    fn failed(&self, dry_run: bool) -> bool {
+        self.error.is_some()
+            || (!dry_run && !self.gone)
+            || self.removal.as_ref().is_some_and(|o| o.failed > 0)
+    }
+
+    fn state(&self, dry_run: bool) -> &'static str {
+        if self.error.is_some() {
+            "failed"
+        } else if dry_run {
+            "dry run"
+        } else if self.gone {
+            "uninstalled"
+        } else {
+            "still registered"
+        }
+    }
+
+    /// What became of the leftovers, or why the program stopped.
+    fn leftovers(&self, dry_run: bool) -> String {
+        if let Some(e) = &self.error {
+            return e.clone();
+        }
+        match &self.removal {
+            Some(o) if dry_run => format!("{} leftovers would be removed", o.attempted),
+            // Removal was offered and declined.
+            Some(o) if o.attempted == 0 => format!("{} leftovers kept", self.found),
+            Some(o) => {
+                let emptied = o.emptied_parents.len() + o.emptied_keys.len();
+                let mut parts = vec![format!("{} leftovers removed", o.deleted + emptied)];
+                if o.skipped > 0 {
+                    parts.push(format!("{} already gone", o.skipped));
+                }
+                if o.failed > 0 {
+                    parts.push(format!("{} failed", o.failed));
+                }
+                parts.join(", ")
+            }
+            None if self.found == 0 => "no leftovers".to_string(),
+            None if !dry_run && !self.gone => "leftovers not removed".to_string(),
+            None => format!("{} leftovers kept", self.found),
+        }
+    }
 }
 
 /// Run a confirmed plan, wait for it, then scan and offer to remove the
@@ -370,6 +642,7 @@ fn run_uninstall(
     }
     json_out["report"] = json!(report);
 
+    let mut removal = None;
     if !report.is_empty() && !keep {
         if installed {
             if !g.json {
@@ -380,11 +653,18 @@ fn run_uninstall(
                 );
             }
         } else {
-            let removal = remove_from_report(&report, name, levels, g)?;
+            removal = remove_from_report(&report, name, levels, g)?;
             json_out["removal"] = removal_json(&removal);
         }
     }
-    Ok(ProgramRun { json: json_out })
+    Ok(ProgramRun {
+        name: name.clone(),
+        json: json_out,
+        gone,
+        found: report.total(),
+        removal,
+        error: None,
+    })
 }
 
 // trace
