@@ -49,6 +49,7 @@ enum Msg {
         report: ScanReport,
     },
     Uninstalled {
+        program: Program,
         message: String,
         still_installed: bool,
     },
@@ -90,6 +91,9 @@ struct OxidizeApp {
     /// Id of the program the scan belongs to.
     scan_for: Option<String>,
     checked: Vec<bool>,
+    /// The program whose uninstaller ran last. Once it leaves the installed
+    /// list it can only be reached through this, for its leftovers.
+    uninstalled: Option<Program>,
 
     // UI state.
     filter: String,
@@ -122,6 +126,7 @@ impl OxidizeApp {
             scan: None,
             scan_for: None,
             checked: Vec::new(),
+            uninstalled: None,
             filter: String::new(),
             selected: None,
             sort_by_size: false,
@@ -239,6 +244,7 @@ impl OxidizeApp {
                         uninstall::describe_exit(status, plan.is_msi)
                     ),
                     still_installed: uninstall::still_installed(&program),
+                    program,
                 },
                 Err(e) => Msg::Error(format!("Uninstall failed: {e:#}")),
             },
@@ -268,14 +274,29 @@ impl OxidizeApp {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Programs(programs) => {
+                    let was_listed = self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|id| self.programs.iter().any(|p| p.id() == id));
                     self.programs = programs;
                     self.busy = false;
                     self.status = format!("{} program(s) installed.", self.programs.len());
-                    // Drop a stale selection.
-                    if let Some(id) = &self.selected {
+                    // Drop a stale selection, unless it is the program just
+                    // uninstalled: what it left behind is scanned now.
+                    if let Some(id) = self.selected.clone() {
                         if !self.programs.iter().any(|p| p.id() == id) {
-                            self.selected = None;
-                            self.scan = None;
+                            match self.uninstalled.clone().filter(|p| p.id() == id) {
+                                Some(program) => {
+                                    if was_listed {
+                                        self.scan = None;
+                                        self.start_scan(ctx, program);
+                                    }
+                                }
+                                None => {
+                                    self.selected = None;
+                                    self.scan = None;
+                                }
+                            }
                         }
                     }
                     // Forget icons for programs that no longer exist, then load
@@ -311,9 +332,11 @@ impl OxidizeApp {
                 // A scan the user has already moved on from.
                 Msg::Scan { .. } => self.busy = false,
                 Msg::Uninstalled {
+                    program,
                     message,
                     still_installed,
                 } => {
+                    self.uninstalled = Some(program);
                     self.log.push(message);
                     self.status = if still_installed {
                         "Uninstaller finished. The program is still registered.".to_string()
@@ -396,7 +419,10 @@ impl OxidizeApp {
 
     fn selected_program(&self) -> Option<&Program> {
         let id = self.selected.as_ref()?;
-        self.programs.iter().find(|p| p.id() == id)
+        self.programs
+            .iter()
+            .find(|p| p.id() == id)
+            .or_else(|| self.uninstalled.as_ref().filter(|p| p.id() == id))
     }
 
     /// Filtered + sorted indices into `self.programs`.
@@ -1052,6 +1078,86 @@ fn extract_icon_rgba(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use oxidize::model::{Hive, RegistrySource, RegistryView};
+
+    fn app() -> OxidizeApp {
+        let (tx, rx) = channel();
+        OxidizeApp {
+            programs: Vec::new(),
+            icons: HashMap::new(),
+            scan: None,
+            scan_for: None,
+            checked: Vec::new(),
+            uninstalled: None,
+            filter: String::new(),
+            selected: None,
+            sort_by_size: false,
+            dry_run: false,
+            make_backups: true,
+            silent: false,
+            include_system: false,
+            elevated: false,
+            busy: false,
+            status: String::new(),
+            log: Vec::new(),
+            confirm: None,
+            tx,
+            rx,
+        }
+    }
+
+    #[test]
+    fn an_uninstalled_program_stays_selected_for_its_leftovers() {
+        let name = "Oxidize Gui Test Leftovers";
+        let program = Program {
+            registry_key: name.to_string(),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        };
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.programs = vec![program.clone()];
+        app.selected = Some(program.id().to_string());
+
+        // The uninstaller ran and the program left the installed list.
+        app.tx
+            .send(Msg::Uninstalled {
+                program: program.clone(),
+                message: "done".to_string(),
+                still_installed: false,
+            })
+            .unwrap();
+        app.tx.send(Msg::Programs(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+
+        assert_eq!(app.selected.as_deref(), Some(program.id()));
+        assert_eq!(app.selected_program().map(Program::id), Some(program.id()));
+
+        // And it is scanned again, now as a program that is gone, so its
+        // leftovers can be ticked and removed.
+        let start = std::time::Instant::now();
+        while app.scan.is_none() && start.elapsed() < std::time::Duration::from_secs(300) {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.drain_messages(&ctx);
+        }
+        let report = app.scan.as_ref().expect("the program is scanned again");
+        assert_eq!(app.scan_for.as_deref(), Some(program.id()));
+        assert!(!report.installed);
+        assert_eq!(app.selected.as_deref(), Some(program.id()));
+    }
+
     #[test]
     fn window_icon_decodes() {
         let icon = super::window_icon();
