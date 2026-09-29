@@ -269,6 +269,7 @@ fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
 }
 
 /// A program of a batch with the command that uninstalls it.
+#[derive(Debug)]
 struct Planned {
     program: Program,
     plan: uninstall::UninstallPlan,
@@ -1322,5 +1323,298 @@ fn resolve_program<'a>(programs: &'a [Program], target: &str) -> Result<&'a Prog
         Ok(p) => Ok(p),
         Err(Resolve::NotFound) => bail!("no installed program matches \"{target}\""),
         Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Hive, LeftoverKind, RegistrySource, RegistryView};
+    use crate::safety::ItemOutcome;
+    use clap::Parser;
+
+    fn program(name: &str, key: &str, uninstall: Option<&str>) -> Program {
+        Program {
+            registry_key: key.to_string(),
+            source: RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: uninstall.map(str::to_string),
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    fn installed() -> Vec<Program> {
+        vec![
+            program(
+                "Brave",
+                "BraveSoftware Brave-Browser",
+                Some(r#""C:\Brave\setup.exe" --uninstall"#),
+            ),
+            program(
+                "VLC media player",
+                "VLC media player",
+                Some(r"C:\VLC\uninstall.exe"),
+            ),
+            program(
+                "7-Zip 24.08 (x64)",
+                "7-Zip",
+                Some(r"C:\7-Zip\Uninstall.exe"),
+            ),
+            program("Frobnic Editor", "FrobEdit", Some(r"C:\Frob\unins000.exe")),
+            program("Frobnic Viewer", "FrobView", Some(r"C:\Frob\unins001.exe")),
+            program("Driver Pack", "DriverPack", None),
+        ]
+    }
+
+    fn names(targets: &[&str]) -> Vec<String> {
+        targets.iter().map(|t| t.to_string()).collect()
+    }
+
+    fn planned_names(batch: &[Planned]) -> Vec<&str> {
+        batch
+            .iter()
+            .map(|b| b.program.display_name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn several_names_are_parsed_and_one_is_required() {
+        let cli = Cli::try_parse_from(["oxidize", "uninstall", "brave", "vlc", "7zip", "-y"])
+            .expect("several names parse");
+        assert!(cli.yes);
+        match cli.command {
+            Commands::Uninstall(args) => assert_eq!(args.targets, ["brave", "vlc", "7zip"]),
+            other => panic!("unexpected command: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["oxidize", "uninstall"]).is_err());
+    }
+
+    #[test]
+    fn a_batch_runs_in_the_order_of_the_names() {
+        let programs = installed();
+        let batch = plan_batch(&programs, &names(&["7-zip", "brave", "vlc"]), false).unwrap();
+        assert_eq!(
+            planned_names(&batch),
+            ["7-Zip 24.08 (x64)", "Brave", "VLC media player"]
+        );
+        assert_eq!(batch[1].plan.argv, [r"C:\Brave\setup.exe", "--uninstall"]);
+    }
+
+    #[test]
+    fn names_resolve_by_id_exact_name_or_unique_part() {
+        let programs = installed();
+        let batch = plan_batch(
+            &programs,
+            &names(&["FrobView", "frobnic editor", "media"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            planned_names(&batch),
+            ["Frobnic Viewer", "Frobnic Editor", "VLC media player"]
+        );
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_stops_the_whole_batch() {
+        let programs = installed();
+        let err = plan_batch(&programs, &names(&["brave", "nosuchapp"]), false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.starts_with("nothing was uninstalled"), "{msg}");
+        assert!(
+            msg.contains("no installed program matches \"nosuchapp\""),
+            "{msg}"
+        );
+        assert!(!msg.contains("Brave"), "{msg}");
+    }
+
+    #[test]
+    fn an_ambiguous_name_lists_its_candidates_and_stops_the_batch() {
+        let programs = installed();
+        let err = plan_batch(&programs, &names(&["vlc", "frobnic"]), false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("\"frobnic\" matches 2 programs"), "{msg}");
+        assert!(msg.contains("Frobnic Editor"), "{msg}");
+        assert!(msg.contains("Frobnic Viewer"), "{msg}");
+    }
+
+    #[test]
+    fn every_problem_is_listed_at_once_in_the_order_given() {
+        let programs = installed();
+        let err = plan_batch(
+            &programs,
+            &names(&["nosuchapp", "vlc", "frobnic", "driver"]),
+            false,
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        let missing = msg.find("\"nosuchapp\"").expect("missing name listed");
+        let ambiguous = msg
+            .find("\"frobnic\" matches")
+            .expect("ambiguous name listed");
+        let no_command = msg
+            .find("Driver Pack: no uninstall command")
+            .expect("program without an uninstaller listed");
+        assert!(missing < ambiguous && ambiguous < no_command, "{msg}");
+    }
+
+    #[test]
+    fn a_program_named_twice_runs_once() {
+        let programs = installed();
+        let batch = plan_batch(
+            &programs,
+            &names(&["brave", "vlc", "Brave", "BraveSoftware Brave-Browser"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(planned_names(&batch), ["Brave", "VLC media player"]);
+    }
+
+    #[test]
+    fn the_same_id_in_another_hive_is_another_program() {
+        let machine = program("Tool", "Tool", Some(r"C:\Tool\uninstall.exe"));
+        let mut user = machine.clone();
+        user.source = RegistrySource::new(Hive::CurrentUser, RegistryView::Native64);
+        assert!(same_program(&machine, &machine.clone()));
+        assert!(!same_program(&machine, &user));
+    }
+
+    #[test]
+    fn silent_is_planned_per_program() {
+        let mut programs = installed();
+        programs[0].quiet_uninstall_string =
+            Some(r#""C:\Brave\setup.exe" --uninstall --force-uninstall"#.to_string());
+        let batch = plan_batch(&programs, &names(&["brave", "vlc"]), true).unwrap();
+        assert_eq!(batch[0].plan.source, "QuietUninstallString");
+        assert_eq!(
+            batch[0].plan.argv.last().map(String::as_str),
+            Some("--force-uninstall")
+        );
+        // No quiet variant: the normal command, and the plan says so.
+        assert_eq!(batch[1].plan.source, "UninstallString, no quiet variant");
+
+        let loud = plan_batch(&programs, &names(&["brave"]), false).unwrap();
+        assert_eq!(loud[0].plan.source, "UninstallString");
+    }
+
+    fn run(name: &str, gone: bool, found: usize, removal: Option<DeletionOutcome>) -> ProgramRun {
+        let p = program(name, name, Some(r"C:\x\uninstall.exe"));
+        ProgramRun {
+            name: name.to_string(),
+            json: json!({ "program": p, "command": r"C:\x\uninstall.exe" }),
+            gone,
+            found,
+            removal,
+            error: None,
+        }
+    }
+
+    fn removed(deleted: usize, failed: usize, backup: Option<&str>) -> DeletionOutcome {
+        DeletionOutcome {
+            attempted: deleted + failed,
+            deleted,
+            failed,
+            backup_name: backup.map(str::to_string),
+            items: (0..deleted + failed)
+                .map(|i| ItemOutcome {
+                    path: format!(r"C:\x\{i}"),
+                    kind: LeftoverKind::File,
+                    status: if i < deleted {
+                        ItemStatus::Removed
+                    } else {
+                        ItemStatus::Failed("denied".to_string())
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_program_fails_when_it_stays_registered_stops_or_keeps_a_failed_leftover() {
+        assert!(!run("A", true, 3, Some(removed(3, 0, Some("b")))).failed(false));
+        assert!(run("A", false, 0, None).failed(false));
+        assert!(run("A", true, 3, Some(removed(2, 1, Some("b")))).failed(false));
+        let plan = uninstall::plan(&program("A", "A", Some("x.exe")), false).unwrap();
+        let stopped = ProgramRun::stopped(&program("A", "A", None), &plan, "boom".into());
+        assert!(stopped.failed(false));
+        assert_eq!(stopped.state(false), "failed");
+        assert_eq!(stopped.leftovers(false), "boom");
+        assert_eq!(stopped.json["error"], "boom");
+        // A dry run never ran anything, so still registered is expected.
+        assert!(!run("A", false, 3, None).failed(true));
+    }
+
+    #[test]
+    fn the_summary_says_what_became_of_the_leftovers() {
+        assert_eq!(
+            run("A", true, 3, Some(removed(2, 1, None))).leftovers(false),
+            "2 leftovers removed, 1 failed"
+        );
+        assert_eq!(run("A", true, 0, None).leftovers(false), "no leftovers");
+        assert_eq!(
+            run("A", false, 4, None).leftovers(false),
+            "leftovers not removed"
+        );
+        // Offered and declined, or --keep.
+        assert_eq!(
+            run("A", true, 4, Some(DeletionOutcome::default())).leftovers(false),
+            "4 leftovers kept"
+        );
+        assert_eq!(run("A", true, 4, None).leftovers(false), "4 leftovers kept");
+        let preview = DeletionOutcome {
+            attempted: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            run("A", false, 5, Some(preview)).leftovers(true),
+            "5 leftovers would be removed"
+        );
+        assert_eq!(run("A", false, 0, None).state(false), "still registered");
+        assert_eq!(run("A", true, 0, None).state(false), "uninstalled");
+        assert_eq!(run("A", false, 0, None).state(true), "dry run");
+    }
+
+    #[test]
+    fn a_batch_as_json_lists_each_program_in_order_with_counts() {
+        let runs = [
+            run(
+                "Brave",
+                true,
+                3,
+                Some(removed(3, 0, Some("2026-09-29 120000 Brave"))),
+            ),
+            run("VLC media player", false, 2, None),
+            run("7-Zip", true, 0, None),
+        ];
+        let v = batch_json(&runs, false);
+        let programs = v["programs"].as_array().expect("programs is an array");
+        let order: Vec<&str> = programs
+            .iter()
+            .map(|p| p["program"]["display_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, ["Brave", "VLC media player", "7-Zip"]);
+        // Each entry is the single-program object, plus whether it failed.
+        for p in programs {
+            assert!(p["command"].is_string());
+            assert!(p["failed"].is_boolean());
+        }
+        assert_eq!(programs[0]["failed"], false);
+        assert_eq!(programs[1]["failed"], true);
+        assert_eq!(v["uninstalled"], 2);
+        assert_eq!(v["failed"], 1);
+        assert_eq!(v["cancelled"], false);
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cancelled", "failed", "programs", "uninstalled"]);
     }
 }
