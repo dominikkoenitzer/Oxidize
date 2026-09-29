@@ -179,8 +179,7 @@ fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
     // Back where it was, not at the end: the order of Path decides which of
     // two programs of the same name runs.
     let mut parts: Vec<&str> = current.split(';').filter(|e| !e.is_empty()).collect();
-    let at = index.unwrap_or(parts.len()).min(parts.len());
-    parts.insert(at, entry);
+    put_back(&mut parts, entry, index);
     let joined = parts.join(";");
     let bytes: Vec<u8> = joined
         .encode_utf16()
@@ -200,4 +199,10 @@ fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
     // Without this, running shells keep the Path that is missing the entry.
     system::broadcast_environment_change();
     Ok(())
+}
+
+/// Insert a `Path` entry at its recorded position, or at the end.
+pub(crate) fn put_back<'a>(parts: &mut Vec<&'a str>, entry: &'a str, index: Option<usize>) {
+    let at = index.unwrap_or(parts.len()).min(parts.len());
+    parts.insert(at, entry);
 }
