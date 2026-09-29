@@ -40,7 +40,7 @@ pub struct Cli {
 pub enum Commands {
     /// List installed programs.
     List(ListArgs),
-    /// Uninstall a program, then remove its leftovers.
+    /// Uninstall one or more programs, then remove their leftovers.
     Uninstall(UninstallArgs),
     /// Find a program's leftovers. Works for programs that are already gone.
     Scan(ScanArgs),
@@ -69,9 +69,10 @@ pub struct ListArgs {
 
 #[derive(Args, Debug)]
 pub struct UninstallArgs {
-    /// Program name, a unique part of it, or its registry id.
-    #[arg(value_name = "PROGRAM")]
-    pub target: String,
+    /// Program name, a unique part of it, or its registry id. Several run one
+    /// after another, and only once every name matches exactly one program.
+    #[arg(value_name = "PROGRAM", required = true, num_args = 1..)]
+    pub targets: Vec<String>,
 
     /// Use the program's unattended uninstall switches where it has them.
     #[arg(long)]
