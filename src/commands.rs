@@ -378,14 +378,18 @@ fn uninstall_batch(batch: &[Planned], keep: bool, levels: &LevelOpts, g: &Global
                 term::bold(&format!("[{}/{n}] {}", i + 1, b.program.display_name))
             );
         }
+        // An earlier uninstaller may have taken this one along; its own
+        // would then fail or run on a half-removed install.
+        let already_gone = !g.dry_run && !uninstall::still_installed(&b.program);
         // One program failing does not stop the others.
-        let run = run_uninstall(&b.program, target, &b.plan, keep, levels, g).unwrap_or_else(|e| {
-            let error = format!("{e:#}");
-            if !g.json {
-                term::error(&error);
-            }
-            ProgramRun::stopped(&b.program, &b.plan, error)
-        });
+        let run = run_uninstall(&b.program, target, &b.plan, already_gone, keep, levels, g)
+            .unwrap_or_else(|e| {
+                let error = format!("{e:#}");
+                if !g.json {
+                    term::error(&error);
+                }
+                ProgramRun::stopped(&b.program, &b.plan, error)
+            });
         runs.push(run);
     }
 
@@ -498,7 +502,7 @@ fn uninstall_program(
         return Ok(());
     }
 
-    let run = run_uninstall(program, &target, &plan, keep, levels, g)?;
+    let run = run_uninstall(program, &target, &plan, false, keep, levels, g)?;
     if g.json {
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
@@ -595,11 +599,13 @@ impl ProgramRun {
 }
 
 /// Run a confirmed plan, wait for it, then scan and offer to remove the
-/// leftovers. `target` is the footprint captured before anything ran.
+/// leftovers. `target` is the footprint captured before anything ran. A
+/// program that is `already_gone` goes straight to its leftovers.
 fn run_uninstall(
     program: &Program,
     target: &ScanTarget,
     plan: &uninstall::UninstallPlan,
+    already_gone: bool,
     keep: bool,
     levels: &LevelOpts,
     g: &Global,
@@ -612,6 +618,13 @@ fn run_uninstall(
         if !g.json {
             println!("{}", term::dim("dry run: the uninstaller was not started"));
         }
+    } else if already_gone {
+        if !g.json {
+            println!("{name} is no longer registered, so its uninstaller was not started.");
+        }
+        gone = true;
+        json_out["uninstaller"] = json!("not started, no longer registered");
+        json_out["still_installed"] = json!(false);
     } else {
         let status = uninstall::run(plan)?;
         let described = uninstall::describe_exit(status, plan.is_msi);
