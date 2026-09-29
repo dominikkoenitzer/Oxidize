@@ -258,7 +258,22 @@ impl BackupSession {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        move_path(original, &dest)?;
+        if let Err(e) = move_path(original, &dest) {
+            if e.downcast_ref::<PartialMove>().is_none() {
+                return Err(e);
+            }
+            // Part of the original is gone and the copy is the only whole
+            // version, so restore has to know where it is.
+            self.record(
+                kind,
+                &original.display().to_string(),
+                Undo::MoveBack {
+                    from: dest.clone(),
+                    to: original.to_path_buf(),
+                },
+            )?;
+            return Err(e).context("partially removed");
+        }
         // Without its manifest entry the item is gone as far as restore is
         // concerned, so a failure here has to put it back where it was.
         if let Err(e) = self.record(
@@ -460,9 +475,36 @@ fn validate_reg_file(path: &Path, hive: Hive, subpath: &str) -> Result<()> {
     Ok(())
 }
 
+/// A move whose copy is complete but whose source could only be partly
+/// deleted. The copy at `to` is then the one whole version left and is kept.
+#[derive(Debug)]
+pub struct PartialMove {
+    pub from: PathBuf,
+    pub to: PathBuf,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for PartialMove {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} was only partly removed ({}); the full copy is kept at {}",
+            self.from.display(),
+            self.error,
+            self.to.display()
+        )
+    }
+}
+
+impl std::error::Error for PartialMove {}
+
 /// Move a file or folder. `rename` cannot cross volumes, so quarantining
 /// something on `D:` falls back to copy then delete, and the copy is rolled
 /// back if the original will not go. Restore takes the same route home.
+///
+/// A delete that fails partway (a locked file inside a folder) has already
+/// taken part of the original, so the copy is kept and a [`PartialMove`] is
+/// returned instead.
 pub fn move_path(from: &Path, to: &Path) -> Result<()> {
     if fs::rename(from, to).is_ok() {
         return Ok(());
@@ -470,11 +512,39 @@ pub fn move_path(from: &Path, to: &Path) -> Result<()> {
     copy_recursive(from, to)
         .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
     if let Err(e) = remove_path(from) {
+        if !still_whole(from, to) {
+            return Err(anyhow::Error::new(PartialMove {
+                from: from.to_path_buf(),
+                to: to.to_path_buf(),
+                error: e,
+            }));
+        }
         let _ = remove_path(to);
         return Err(anyhow::Error::new(e))
             .with_context(|| format!("removing {} (copy rolled back)", from.display()));
     }
     Ok(())
+}
+
+/// Everything in the copy is still at the original. Anything missing, or
+/// anything that cannot be read, counts as a delete that got started.
+fn still_whole(original: &Path, copy: &Path) -> bool {
+    if fs::symlink_metadata(original).is_err() {
+        return false;
+    }
+    let Ok(meta) = fs::symlink_metadata(copy) else {
+        return false;
+    };
+    if !meta.is_dir() {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(copy) else {
+        return false;
+    };
+    entries.into_iter().all(|entry| match entry {
+        Ok(entry) => still_whole(&original.join(entry.file_name()), &entry.path()),
+        Err(_) => false,
+    })
 }
 
 pub fn remove_path(p: &Path) -> std::io::Result<()> {
@@ -571,6 +641,95 @@ mod tests {
         let _ = fs::remove_dir_all(first.root());
         let _ = fs::remove_dir_all(second.root());
         // Leave no empty backups folder behind on a machine that had none.
+        let _ = fs::remove_dir(&base);
+        let _ = fs::remove_dir(base.parent().unwrap());
+    }
+
+    /// A folder whose last file is held open without delete sharing: rename
+    /// and the delete both fail on it, the delete only after the first file
+    /// is gone.
+    fn folder_with_a_locked_file(root: &Path) -> (PathBuf, fs::File) {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _ = fs::remove_dir_all(root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::write(src.join("z.txt"), "last").unwrap();
+        // Read sharing so the copy can read it, no delete sharing.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(src.join("z.txt"))
+            .unwrap();
+        (src, held)
+    }
+
+    #[test]
+    fn a_move_that_fails_partway_keeps_the_copy() {
+        let root = std::env::temp_dir().join("oxidize_partial_move_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        let dst = root.join("dst");
+
+        let err = move_path(&src, &dst).unwrap_err();
+        assert!(err.downcast_ref::<PartialMove>().is_some(), "{err:#}");
+        // Part of the original is gone, so the copy is the only full one.
+        assert!(!src.join("a.txt").exists());
+        assert_eq!(fs::read_to_string(dst.join("a.txt")).unwrap(), "first");
+        assert_eq!(fs::read_to_string(dst.join("z.txt")).unwrap(), "last");
+
+        drop(held);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_move_that_deletes_nothing_rolls_the_copy_back() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join("oxidize_untouched_move_test");
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("only.txt"), "only").unwrap();
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(src.join("only.txt"))
+            .unwrap();
+        let dst = root.join("dst");
+
+        let err = move_path(&src, &dst).unwrap_err();
+        assert!(err.downcast_ref::<PartialMove>().is_none(), "{err:#}");
+        assert!(src.join("only.txt").exists());
+        assert!(!dst.exists());
+
+        drop(held);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_partial_quarantine_is_recorded_and_reported() {
+        let base = backups_base().unwrap();
+        let root = std::env::temp_dir().join("oxidize_partial_quarantine_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        let mut session = BackupSession::new("Oxidize Partial Test").unwrap();
+
+        let err = session
+            .quarantine(LeftoverKind::Directory, &src)
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("partially removed"), "{err:#}");
+        let manifest = read_manifest(session.root()).unwrap();
+        assert_eq!(manifest.entries.len(), 1);
+        match &manifest.entries[0].undo {
+            Undo::MoveBack { from, to } => {
+                assert_eq!(to, &src);
+                assert!(from.join("a.txt").exists());
+                assert!(from.join("z.txt").exists());
+            }
+            other => panic!("unexpected undo: {other:?}"),
+        }
+
+        drop(held);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(session.root());
         let _ = fs::remove_dir(&base);
         let _ = fs::remove_dir(base.parent().unwrap());
     }
