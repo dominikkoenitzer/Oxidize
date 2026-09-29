@@ -728,20 +728,9 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
             {
                 if houses_other || vendor_root {
                     flag_product_children(loc, target, &mut out, &note);
-                } else if score_product(leaf, target).is_some() {
-                    push_dir_leftover(
-                        &mut out,
-                        loc.clone(),
-                        Confidence::High,
-                        "install folder".to_string(),
-                    );
                 } else {
-                    push_dir_leftover(
-                        &mut out,
-                        loc.clone(),
-                        Confidence::Medium,
-                        "recorded install folder, name does not match".to_string(),
-                    );
+                    let (conf, reason) = install_folder_score(leaf, target);
+                    push_dir_leftover(&mut out, loc.clone(), conf, reason);
                 }
             }
         }
@@ -759,6 +748,22 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
             .then_with(|| a.path.cmp(&b.path))
     });
     out
+}
+
+/// How sure the recorded install folder is the product's own, by its name.
+/// The target's words include the folder's own, which would match any folder
+/// at all, so the name is checked against the program's name alone.
+fn install_folder_score(leaf: &str, target: &ScanTarget) -> (Confidence, String) {
+    let mut own_name = name_target(&target.display_name, target.publisher.as_deref());
+    own_name.vendor_is_shared = target.vendor_is_shared;
+    if score_product(leaf, &own_name).is_some() {
+        (Confidence::High, "install folder".to_string())
+    } else {
+        (
+            Confidence::Medium,
+            "recorded install folder, name does not match".to_string(),
+        )
+    }
 }
 
 /// Collapse nested filesystem leftovers so a folder and items inside it are
@@ -1328,6 +1333,32 @@ mod tests {
         assert!(out.is_empty(), "{out:?}");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_install_folder_is_not_matched_by_its_own_name() {
+        let program = |install: &str| Program {
+            registry_key: "Foo Editor".to_string(),
+            source: RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
+            display_name: "Foo Editor".to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: Some(install.to_string()),
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        };
+        // A general folder recorded as the install location stays Medium.
+        let t = build_target(&program(r"D:\Games"));
+        assert_eq!(install_folder_score("Games", &t).0, Confidence::Medium);
+        // A folder that names the product is still the product's.
+        let t = build_target(&program(r"D:\Apps\Foo Editor"));
+        assert_eq!(install_folder_score("Foo Editor", &t).0, Confidence::High);
     }
 
     #[test]
