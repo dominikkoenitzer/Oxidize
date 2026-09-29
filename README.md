@@ -45,6 +45,14 @@ oxidize orphans --remove              drops PATH entries, autostart values, serv
                                       and tasks whose files no longer exist
 ```
 
+`oxidize uninstall brave vlc 7zip` uninstalls several programs one after
+another. Every name has to match exactly one program before anything runs;
+otherwise nothing runs and the unclear names are listed with their candidates.
+The plan is shown once, each program then gets its own leftover scan, removal
+and backup, and a summary follows. The exit code is 1 if any program failed.
+With `--json` a batch prints `{"programs": [...], "uninstalled", "failed",
+"cancelled"}`; a single name keeps the single-program shape.
+
 A program Windows no longer lists is scanned by name alone, and a vendor folder
 is only recognised as one when you name the publisher:
 `oxidize scan Chrome --publisher "Google LLC"`.
