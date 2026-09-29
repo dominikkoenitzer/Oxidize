@@ -22,8 +22,9 @@ oxidize restore <backup>         put a backup back
 
 ## Install
 
-Download `oxidize.exe` from the latest release and put it on your PATH, or
-build it yourself:
+Download `oxidize-<version>-windows-x64.zip` from the latest release, check it
+against the `.sha256` file next to it, and unpack `oxidize.exe` and
+`oxidize-gui.exe` into a folder on your PATH. Or build it yourself:
 
 ```
 cargo build --release
