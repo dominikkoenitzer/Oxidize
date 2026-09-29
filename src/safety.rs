@@ -439,15 +439,30 @@ fn remove_one(
                 return Ok(false);
             }
             if let Some(s) = session {
-                for (index, text) in &matches {
-                    s.backup_path_entry(&item.path, hive, text, *index)
-                        .context("recording PATH entry")?;
-                }
+                record_path_entries(s, &item.path, hive, &matches)?;
             }
             system::remove_path_entry(hive, entry)?;
             Ok(true)
         }
     }
+}
+
+/// Record the `Path` entries one removal takes out, with their positions.
+/// Restore replays the manifest backwards, so the last entry is recorded
+/// first: put back front to back, each position is right again by the time
+/// the next one goes in.
+fn record_path_entries(
+    session: &mut BackupSession,
+    display: &str,
+    hive: crate::model::Hive,
+    matches: &[(usize, String)],
+) -> Result<()> {
+    for (index, text) in matches.iter().rev() {
+        session
+            .backup_path_entry(display, hive, text, *index)
+            .context("recording PATH entry")?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -491,6 +506,40 @@ mod tests {
         );
         assert!(needs_elevation(&[hklm]));
         assert!(!needs_elevation(&[hkcu]));
+    }
+
+    #[test]
+    fn two_path_entries_come_back_where_they_were() {
+        let before = [r"C:\A", r"C:\Tool", r"C:\B", r"C:\Tool\", r"C:\C"];
+        let matches: Vec<(usize, String)> = before
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| system::same_path_entry(e, r"C:\Tool"))
+            .map(|(i, e)| (i, e.to_string()))
+            .collect();
+        let base = crate::backup::backups_base().unwrap();
+        let mut session = BackupSession::new("Oxidize Path Order Test").unwrap();
+        record_path_entries(&mut session, "PATH entry", Hive::CurrentUser, &matches).unwrap();
+        let manifest = crate::backup::read_manifest(session.root()).unwrap();
+        let _ = std::fs::remove_dir_all(session.root());
+        let _ = std::fs::remove_dir(&base);
+        let _ = std::fs::remove_dir(base.parent().unwrap());
+
+        // Restore replays the manifest newest first.
+        let mut parts: Vec<&str> = before
+            .iter()
+            .copied()
+            .filter(|e| !system::same_path_entry(e, r"C:\Tool"))
+            .collect();
+        for entry in manifest.entries.iter().rev() {
+            match &entry.undo {
+                crate::backup::Undo::PathAdd { entry, index, .. } => {
+                    crate::restore::put_back(&mut parts, entry, *index)
+                }
+                other => panic!("unexpected undo: {other:?}"),
+            }
+        }
+        assert_eq!(parts, before);
     }
 
     #[test]
