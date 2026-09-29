@@ -94,15 +94,7 @@ impl BackupSession {
             now.format("%Y-%m-%d %H%M%S"),
             sanitize(program_label)
         );
-        // The stamp is only accurate to the second, and two removals of the
-        // same program can fall inside one. Sharing a folder would overwrite
-        // the first manifest and strand what it holds.
-        let mut root = base.join(&stem);
-        let mut n = 2;
-        while root.exists() {
-            root = base.join(format!("{stem} ({n})"));
-            n += 1;
-        }
+        let root = unused_root(&base, &stem);
         fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
         Ok(BackupSession {
             root,
@@ -303,6 +295,19 @@ impl BackupSession {
         dest.push(rel);
         dest
     }
+}
+
+/// The stamp is only accurate to the second, and two removals of the same
+/// program can fall inside one. Sharing a folder would overwrite the first
+/// manifest and strand what it holds.
+fn unused_root(base: &Path, stem: &str) -> PathBuf {
+    let mut root = base.join(stem);
+    let mut n = 2;
+    while root.exists() {
+        root = base.join(format!("{stem} ({n})"));
+        n += 1;
+    }
+    root
 }
 
 /// `%LOCALAPPDATA%\Oxidize\backups`.
@@ -633,11 +638,26 @@ mod tests {
 
     #[test]
     fn two_sessions_in_one_second_get_their_own_folder() {
+        // The clock decides whether two real sessions share a stamp, so the
+        // numbering is checked on a stamp that is taken for certain.
+        let taken = std::env::temp_dir().join("oxidize_taken_root_test");
+        let _ = fs::remove_dir_all(&taken);
+        fs::create_dir_all(taken.join("2026-01-01 120000 X")).unwrap();
+        assert_eq!(
+            unused_root(&taken, "2026-01-01 120000 X"),
+            taken.join("2026-01-01 120000 X (2)")
+        );
+        fs::create_dir_all(taken.join("2026-01-01 120000 X (2)")).unwrap();
+        assert_eq!(
+            unused_root(&taken, "2026-01-01 120000 X"),
+            taken.join("2026-01-01 120000 X (3)")
+        );
+        let _ = fs::remove_dir_all(&taken);
+
         let base = backups_base().unwrap();
         let first = BackupSession::new("Oxidize Session Test").unwrap();
         let second = BackupSession::new("Oxidize Session Test").unwrap();
         assert_ne!(first.root(), second.root());
-        assert!(second.name().ends_with("(2)"));
         let _ = fs::remove_dir_all(first.root());
         let _ = fs::remove_dir_all(second.root());
         // Leave no empty backups folder behind on a machine that had none.
