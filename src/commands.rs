@@ -11,7 +11,7 @@ use crate::cli::{
     BackupsArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs, SortKey,
     TraceArgs, UninstallArgs,
 };
-use crate::model::{Confidence, Group, Leftover, Program, ScanReport};
+use crate::model::{Confidence, Group, Leftover, Program, ScanReport, ScanTarget};
 use crate::safety::{DeletionOutcome, ItemStatus, SafetyContext};
 use crate::{hunter, orphans, registry, restore, safety, scanner, term, uninstall, util};
 
@@ -276,25 +276,63 @@ fn uninstall_program(
     // Capture the footprint before the entry disappears.
     let target = scanner::build_target(program);
     let plan = uninstall::plan(program, silent)?;
-    let name = &program.display_name;
-
-    let mut json_out = json!({ "program": program, "command": plan.display() });
 
     if !g.json {
-        let mut head = term::bold(name);
-        let mut extra = Vec::new();
-        if let Some(v) = &program.display_version {
-            extra.push(v.clone());
-        }
-        if let Some(p) = &program.publisher {
-            extra.push(p.clone());
-        }
-        if !extra.is_empty() {
-            head.push_str(&term::dim(&format!("  {}", extra.join(", "))));
-        }
-        println!("{head}");
+        println!("{}", program_head(program));
         println!("  {}", term::dim(&plan.display()));
     }
+
+    if !g.dry_run && !g.confirm("Run the uninstaller?", true) {
+        if g.json {
+            let json_out =
+                json!({ "program": program, "command": plan.display(), "cancelled": true });
+            println!("{}", serde_json::to_string_pretty(&json_out)?);
+        } else {
+            term::info("Cancelled.");
+        }
+        return Ok(());
+    }
+
+    let run = run_uninstall(program, &target, &plan, keep, levels, g)?;
+    if g.json {
+        println!("{}", serde_json::to_string_pretty(&run.json)?);
+    }
+    Ok(())
+}
+
+/// The program's name in bold, then its version and publisher.
+fn program_head(program: &Program) -> String {
+    let mut head = term::bold(&program.display_name);
+    let mut extra = Vec::new();
+    if let Some(v) = &program.display_version {
+        extra.push(v.clone());
+    }
+    if let Some(p) = &program.publisher {
+        extra.push(p.clone());
+    }
+    if !extra.is_empty() {
+        head.push_str(&term::dim(&format!("  {}", extra.join(", "))));
+    }
+    head
+}
+
+/// What one uninstall did.
+struct ProgramRun {
+    json: serde_json::Value,
+}
+
+/// Run a confirmed plan, wait for it, then scan and offer to remove the
+/// leftovers. `target` is the footprint captured before anything ran.
+fn run_uninstall(
+    program: &Program,
+    target: &ScanTarget,
+    plan: &uninstall::UninstallPlan,
+    keep: bool,
+    levels: &LevelOpts,
+    g: &Global,
+) -> Result<ProgramRun> {
+    let name = &program.display_name;
+    let mut json_out = json!({ "program": program, "command": plan.display() });
 
     let mut gone = false;
     if g.dry_run {
@@ -302,16 +340,7 @@ fn uninstall_program(
             println!("{}", term::dim("dry run: the uninstaller was not started"));
         }
     } else {
-        if !g.confirm("Run the uninstaller?", true) {
-            if g.json {
-                json_out["cancelled"] = json!(true);
-                println!("{}", serde_json::to_string_pretty(&json_out)?);
-            } else {
-                term::info("Cancelled.");
-            }
-            return Ok(());
-        }
-        let status = uninstall::run(&plan)?;
+        let status = uninstall::run(plan)?;
         let described = uninstall::describe_exit(status, plan.is_msi);
         if !g.json {
             println!("Uninstaller {described}.");
@@ -319,7 +348,7 @@ fn uninstall_program(
         if uninstall::still_installed(program) && !plan.is_msi && !g.json {
             println!("{}", term::dim("waiting for the uninstaller to finish"));
         }
-        gone = uninstall::wait_for_completion(program, &plan, Duration::from_secs(120));
+        gone = uninstall::wait_for_completion(program, plan, Duration::from_secs(120));
         json_out["uninstaller"] = json!(described);
         json_out["still_installed"] = json!(!gone);
         if !g.json {
@@ -335,7 +364,7 @@ fn uninstall_program(
 
     // Still registered means the scan would list the live install.
     let installed = !gone && !g.dry_run;
-    let report = scanner::scan(&target, installed);
+    let report = scanner::scan(target, installed);
     if !g.json {
         render_report(&report);
     }
@@ -355,10 +384,7 @@ fn uninstall_program(
             json_out["removal"] = removal_json(&removal);
         }
     }
-    if g.json {
-        println!("{}", serde_json::to_string_pretty(&json_out)?);
-    }
-    Ok(())
+    Ok(ProgramRun { json: json_out })
 }
 
 // trace
