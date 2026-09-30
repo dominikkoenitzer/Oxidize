@@ -1094,13 +1094,13 @@ fn run_package(
             }
         }
         if gone {
-            let provisioned = may_come_back(env.store, app);
-            json_out["provisioned"] = json!(provisioned);
-            if provisioned && !g.json {
+            let comes_back = may_come_back(env.store, app);
+            json_out["may_come_back"] = json!(comes_back);
+            if comes_back && !g.json {
                 println!(
                     "{}",
                     term::dim(
-                        "Windows installs this app for new accounts, and a feature update may bring it back."
+                        "Windows may bring this app back for new accounts or after a feature update."
                     )
                 );
             }
@@ -2560,7 +2560,7 @@ mod tests {
         assert_eq!(items[0]["confidence"], "High");
         assert_eq!(items[1]["path"], r"C:\Users\x\AppData\Roaming\Notes");
         assert_eq!(items[1]["confidence"], "Medium");
-        assert_eq!(run.json["provisioned"], true);
+        assert_eq!(run.json["may_come_back"], true);
         assert_eq!(run.leftovers(false), "2 leftovers kept");
         assert!(folder.exists(), "--keep leaves the folder");
         let _ = std::fs::remove_dir_all(&local);
@@ -2624,8 +2624,8 @@ mod tests {
             [
                 "command",
                 "kind",
+                "may_come_back",
                 "program",
-                "provisioned",
                 "report",
                 "still_installed",
                 "uninstaller"
