@@ -2386,6 +2386,286 @@ mod tests {
         );
     }
 
+    /// Answers yes to everything and prints JSON, so nothing waits on a prompt.
+    fn unattended(dry_run: bool, no_backup: bool) -> Global {
+        Global {
+            dry_run,
+            yes: true,
+            json: true,
+            no_backup,
+        }
+    }
+
+    /// The fake store, a folder standing in for `%LOCALAPPDATA%` and a scan
+    /// by name that finds one folder by the app's name.
+    fn fake_env(store: &FakePackageStore, local_appdata: Option<PathBuf>) -> StoreEnv<'_> {
+        StoreEnv {
+            store,
+            local_appdata,
+            scan_by_name: |target| {
+                vec![Leftover::fs(
+                    crate::model::LeftoverKind::Directory,
+                    PathBuf::from(format!(
+                        r"C:\Users\x\AppData\Roaming\{}",
+                        target.display_name
+                    )),
+                    Confidence::High,
+                    "name match",
+                    Some(0),
+                    true,
+                )]
+            },
+        }
+    }
+
+    fn local_appdata(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "oxidize_store_uninstall_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Packages")).unwrap();
+        dir
+    }
+
+    fn notes_and_paint() -> Vec<Package> {
+        vec![
+            package("Vendor.Notes", "Notes"),
+            package("Vendor.Paint", "Paint"),
+        ]
+    }
+
+    #[test]
+    fn a_dry_run_never_removes_a_store_app() {
+        let store = FakePackageStore::new(notes_and_paint());
+        let env = fake_env(&store, None);
+        let batch: Vec<Step> = notes_and_paint().into_iter().map(Step::Store).collect();
+        let levels = LevelOpts::default();
+        uninstall_batch(&env, &batch, false, &levels, &unattended(true, false)).unwrap();
+        uninstall_package(
+            &env,
+            &notes_and_paint()[0],
+            false,
+            &levels,
+            &unattended(true, false),
+        )
+        .unwrap();
+        assert!(store.removed.borrow().is_empty());
+        assert_eq!(store.list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_refused_store_app_never_reaches_the_removal() {
+        let engine = package("Vendor.Engine", "Engine");
+        let mut studio = package("Vendor.Studio", "Studio");
+        studio.dependencies = vec![engine.family_name.clone()];
+        let windows_store = package("Microsoft.WindowsStore", "Microsoft Store");
+        let store = FakePackageStore::new(vec![engine.clone(), studio, windows_store.clone()]);
+        let env = fake_env(&store, None);
+
+        for app in [&engine, &windows_store] {
+            let err = remove_package(&store, app).unwrap_err();
+            assert!(format!("{err:#}").contains(" stays: "), "{err:#}");
+        }
+        // Even a batch that skipped planning stops at the removal.
+        let batch = vec![Step::Store(engine), Step::Store(windows_store)];
+        let err = uninstall_batch(
+            &env,
+            &batch,
+            true,
+            &LevelOpts::default(),
+            &unattended(false, false),
+        )
+        .unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "2 of 2 Store apps did not uninstall cleanly"
+        );
+        assert!(store.removed.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_failed_removal_fails_the_run_and_the_batch() {
+        let mut store = FakePackageStore::new(notes_and_paint());
+        store.fail_with = Some("0x80073CFA, removal failed".to_string());
+        let env = fake_env(&store, None);
+        let g = unattended(false, false);
+        let levels = LevelOpts::default();
+        let notes = package("Vendor.Notes", "Notes");
+
+        let Err(err) = run_package(&env, &notes, false, true, &levels, &g) else {
+            panic!("the removal fails");
+        };
+        assert!(format!("{err:#}").contains("0x80073CFA"), "{err:#}");
+        let stopped = ProgramRun::stopped_package(&notes, format!("{err:#}"));
+        assert!(stopped.failed(false));
+        assert_eq!(stopped.json["kind"], "store");
+        assert_eq!(stopped.json["program"]["family_name"], notes.family_name);
+
+        let batch: Vec<Step> = notes_and_paint().into_iter().map(Step::Store).collect();
+        let err = uninstall_batch(&env, &batch, true, &levels, &g).unwrap_err();
+        assert_eq!(
+            format!("{err:#}"),
+            "2 of 2 Store apps did not uninstall cleanly"
+        );
+        assert!(uninstall_package(&env, &notes, true, &levels, &g).is_err());
+        // Each app was tried once per run and none is gone.
+        assert_eq!(store.removed.borrow().len(), 4);
+        assert_eq!(store.list().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn an_app_windows_keeps_registered_is_a_failed_run() {
+        let mut store = FakePackageStore::new(notes_and_paint());
+        store.keeps_registered = true;
+        let env = fake_env(&store, None);
+        let g = unattended(false, false);
+        let notes = package("Vendor.Notes", "Notes");
+        let run = run_package(&env, &notes, false, false, &LevelOpts::default(), &g).unwrap();
+        assert!(!run.gone);
+        assert!(run.failed(false));
+        assert_eq!(run.json["still_installed"], true);
+        // Its data is still in use, so nothing is looked for or removed.
+        assert_eq!(run.found, 0);
+        assert!(run.removal.is_none());
+        let err = uninstall_package(&env, &notes, false, &LevelOpts::default(), &g).unwrap_err();
+        assert_eq!(format!("{err:#}"), "Notes is still registered");
+    }
+
+    #[test]
+    fn a_removed_app_leads_to_its_leftovers() {
+        let local = local_appdata("leftovers");
+        let notes = package("Vendor.Notes", "Notes");
+        let folder = local.join("Packages").join(&notes.family_name);
+        std::fs::create_dir_all(folder.join("LocalState")).unwrap();
+        std::fs::write(folder.join("LocalState").join("notes.db"), b"data").unwrap();
+        let mut store = FakePackageStore::new(notes_and_paint());
+        store.provisioned = vec![notes.family_name.clone()];
+        let env = fake_env(&store, Some(local.clone()));
+
+        let run = run_package(
+            &env,
+            &notes,
+            false,
+            true,
+            &LevelOpts::default(),
+            &unattended(false, false),
+        )
+        .unwrap();
+        assert_eq!(*store.removed.borrow(), [notes.full_name.as_str()]);
+        assert!(run.gone && !run.failed(false));
+        let items = run.json["report"]["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["path"], folder.display().to_string());
+        assert_eq!(items[0]["confidence"], "High");
+        assert_eq!(items[1]["path"], r"C:\Users\x\AppData\Roaming\Notes");
+        assert_eq!(items[1]["confidence"], "Medium");
+        assert_eq!(run.json["provisioned"], true);
+        assert_eq!(run.leftovers(false), "2 leftovers kept");
+        assert!(folder.exists(), "--keep leaves the folder");
+        let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn the_data_folder_goes_through_the_leftover_removal() {
+        let local = local_appdata("removal");
+        let notes = package("Vendor.Notes", "Notes");
+        let folder = local.join("Packages").join(&notes.family_name);
+        std::fs::create_dir_all(folder.join("LocalState")).unwrap();
+        let store = FakePackageStore::new(notes_and_paint());
+        let env = StoreEnv {
+            scan_by_name: |_| Vec::new(),
+            ..fake_env(&store, Some(local.clone()))
+        };
+        // High only, and no backup so the test leaves nothing behind.
+        let run = run_package(
+            &env,
+            &notes,
+            false,
+            false,
+            &LevelOpts::default(),
+            &unattended(false, true),
+        )
+        .unwrap();
+        assert!(!folder.exists());
+        assert_eq!(run.json["removal"]["removed"], 1);
+        assert_eq!(
+            run.json["removal"]["items"][0]["path"],
+            folder.display().to_string()
+        );
+        assert!(!run.failed(false));
+        let _ = std::fs::remove_dir_all(&local);
+    }
+
+    #[test]
+    fn a_store_run_as_json_is_a_program_run_with_its_kind() {
+        let store = FakePackageStore::new(notes_and_paint());
+        let env = fake_env(&store, None);
+        let notes = package("Vendor.Notes", "Notes");
+        let run = run_package(
+            &env,
+            &notes,
+            false,
+            true,
+            &LevelOpts::default(),
+            &unattended(false, false),
+        )
+        .unwrap();
+        let mut keys: Vec<&str> = run
+            .json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "command",
+                "kind",
+                "program",
+                "provisioned",
+                "report",
+                "still_installed",
+                "uninstaller"
+            ]
+        );
+        assert_eq!(run.json["kind"], "store");
+        assert_eq!(run.json["program"]["family_name"], notes.family_name);
+        assert_eq!(
+            run.json["command"],
+            "remove package Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe for this user"
+        );
+
+        // In a batch it sits next to the programs, with the same counts.
+        let v = batch_json(&[run, self::run("VLC media player", true, 0, None)], false);
+        let entries = v["programs"].as_array().unwrap();
+        assert_eq!(entries[0]["kind"], "store");
+        assert_eq!(entries[0]["failed"], false);
+        assert_eq!(v["uninstalled"], 2);
+        assert_eq!(v["failed"], 0);
+    }
+
+    #[test]
+    fn an_app_already_gone_is_not_removed_again() {
+        let store = FakePackageStore::new(Vec::new());
+        let env = fake_env(&store, None);
+        let notes = package("Vendor.Notes", "Notes");
+        let run = run_package(
+            &env,
+            &notes,
+            true,
+            true,
+            &LevelOpts::default(),
+            &unattended(false, false),
+        )
+        .unwrap();
+        assert!(run.gone);
+        assert!(store.removed.borrow().is_empty());
+        assert_eq!(run.json["uninstaller"], "not started, no longer registered");
+    }
+
     #[test]
     fn counts_name_both_kinds() {
         assert_eq!(kinds(1, 0), "1 program");
