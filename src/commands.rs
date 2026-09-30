@@ -4,6 +4,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Result};
+use serde::Serialize;
 use serde_json::json;
 
 use crate::backup;
@@ -11,7 +12,10 @@ use crate::cli::{
     BackupsArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs, SortKey,
     TraceArgs, UninstallArgs,
 };
-use crate::model::{Confidence, Group, Leftover, Program, ScanReport, ScanTarget};
+use crate::model::{
+    Confidence, Group, Leftover, Package, Program, ScanReport, ScanTarget, SignatureKind,
+};
+use crate::packages::{package_guard, PackageStore, Refusal, WindowsPackageStore};
 use crate::safety::{DeletionOutcome, ItemStatus, SafetyContext};
 use crate::{hunter, orphans, registry, restore, safety, scanner, term, uninstall, util};
 
@@ -64,84 +68,204 @@ pub fn dispatch(cli: Cli) -> Result<()> {
 // ----
 
 fn cmd_list(args: &ListArgs, g: &Global) -> Result<()> {
-    let mut programs = registry::enumerate_installed_programs(args.system);
+    let mut rows: Vec<Listed> = Vec::new();
+    if !args.store {
+        rows.extend(
+            registry::enumerate_installed_programs(args.system)
+                .into_iter()
+                .map(Listed::Program),
+        );
+    }
+    match store_rows(&WindowsPackageStore, args.system) {
+        Ok(apps) => rows.extend(apps),
+        Err(e) if args.store => return Err(e),
+        // The programs are still worth listing.
+        Err(e) => term::warn(&format!("Store apps left out: {e:#}")),
+    }
     if let Some(filter) = &args.filter {
         let needle = filter.to_lowercase();
-        programs.retain(|p| {
-            p.display_name.to_lowercase().contains(&needle)
-                || p.publisher
-                    .as_deref()
-                    .map(|s| s.to_lowercase().contains(&needle))
-                    .unwrap_or(false)
-        });
+        rows.retain(|r| r.matches(&needle));
     }
-    sort_programs(&mut programs, args.sort);
+    sort_rows(&mut rows, args.sort);
 
     if g.json {
-        println!("{}", serde_json::to_string_pretty(&programs)?);
+        println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
     }
-    if programs.is_empty() {
+    if rows.is_empty() {
         term::info("Nothing matched.");
         return Ok(());
     }
 
     let show_date = matches!(args.sort, SortKey::Date);
-    print_program_table(&programs, show_date);
+    print_list(&rows, show_date);
     println!();
-    let n = programs.len();
-    let word = if n == 1 { "program" } else { "programs" };
-    println!("{}", term::dim(&format!("{n} {word}")));
+    println!("{}", term::dim(&list_footer(&rows)));
     Ok(())
 }
 
-fn sort_programs(programs: &mut [Program], key: SortKey) {
+/// One entry of `list`: a program from the registry or a Store app. As JSON
+/// it is the program or package with a `kind` in front.
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+enum Listed {
+    Program(Program),
+    Store {
+        #[serde(flatten)]
+        package: Package,
+        /// Why the guard keeps the app, `None` when it may go.
+        protected: Option<Refusal>,
+    },
+}
+
+impl Listed {
+    fn name(&self) -> &str {
+        match self {
+            Listed::Program(p) => &p.display_name,
+            Listed::Store { package, .. } => &package.display_name,
+        }
+    }
+
+    fn version(&self) -> &str {
+        match self {
+            Listed::Program(p) => p.display_version.as_deref().unwrap_or(""),
+            Listed::Store { package, .. } => &package.version,
+        }
+    }
+
+    fn publisher(&self) -> &str {
+        match self {
+            Listed::Program(p) => p.publisher.as_deref(),
+            Listed::Store { package, .. } => package.publisher.as_deref(),
+        }
+        .unwrap_or("")
+    }
+
+    fn size_bytes(&self) -> Option<u64> {
+        match self {
+            Listed::Program(p) => p.size_bytes(),
+            Listed::Store { .. } => None,
+        }
+    }
+
+    fn date(&self) -> &str {
+        match self {
+            Listed::Program(p) => p.install_date.as_deref(),
+            Listed::Store { package, .. } => package.installed_date.as_deref(),
+        }
+        .unwrap_or("")
+    }
+
+    /// Where the entry comes from, when that is not the registry.
+    fn source(&self) -> &'static str {
+        match self {
+            Listed::Program(_) => "",
+            Listed::Store { .. } => "store",
+        }
+    }
+
+    /// `needle` is lower-cased. A Store app also answers to its identity name.
+    fn matches(&self, needle: &str) -> bool {
+        let identity = match self {
+            Listed::Program(_) => "",
+            Listed::Store { package, .. } => &package.name,
+        };
+        [self.name(), self.publisher(), identity]
+            .iter()
+            .any(|s| s.to_lowercase().contains(needle))
+    }
+}
+
+/// The Store apps `list` shows, each with the guard's verdict. The guard sees
+/// every package, so one that a hidden Windows package needs is still kept.
+/// Packages signed as part of Windows show only with `system`.
+fn store_rows(store: &dyn PackageStore, system: bool) -> Result<Vec<Listed>> {
+    let packages = store.list()?;
+    Ok(packages
+        .iter()
+        .filter(|p| system || p.signature != SignatureKind::System)
+        .map(|p| Listed::Store {
+            package: p.clone(),
+            protected: package_guard(p, &packages).err(),
+        })
+        .collect())
+}
+
+fn sort_rows(rows: &mut [Listed], key: SortKey) {
     match key {
-        SortKey::Name => programs.sort_by_key(|a| a.display_name.to_lowercase()),
-        SortKey::Size => programs.sort_by_key(|a| std::cmp::Reverse(a.size_bytes().unwrap_or(0))),
-        SortKey::Date => programs.sort_by(|a, b| {
-            b.install_date
-                .as_deref()
-                .unwrap_or("")
-                .cmp(a.install_date.as_deref().unwrap_or(""))
-        }),
+        SortKey::Name => rows.sort_by_key(|r| r.name().to_lowercase()),
+        SortKey::Size => rows.sort_by_key(|r| std::cmp::Reverse(r.size_bytes().unwrap_or(0))),
+        SortKey::Date => rows.sort_by(|a, b| b.date().cmp(a.date())),
         // Entries without a publisher sort last, not first.
-        SortKey::Publisher => programs.sort_by_key(|p| {
-            let name = p.publisher.as_deref().unwrap_or("").to_lowercase();
+        SortKey::Publisher => rows.sort_by_key(|r| {
+            let name = r.publisher().to_lowercase();
             (name.is_empty(), name)
         }),
     }
 }
 
-fn print_program_table(programs: &[Program], show_date: bool) {
-    let name_w = column_width(programs.iter().map(|p| p.display_name.as_str()), 48);
-    let ver_w = column_width(
-        programs
-            .iter()
-            .map(|p| p.display_version.as_deref().unwrap_or("")),
-        16,
-    );
-    let pub_w = column_width(
-        programs
-            .iter()
-            .map(|p| p.publisher.as_deref().unwrap_or("")),
-        28,
-    );
+fn print_list(rows: &[Listed], show_date: bool) {
+    let name_w = column_width(rows.iter().map(Listed::name), 48);
+    let ver_w = column_width(rows.iter().map(Listed::version), 16);
+    let pub_w = column_width(rows.iter().map(Listed::publisher), 28);
+    let source_w = column_width(rows.iter().map(Listed::source), 5);
 
-    for p in programs {
-        let size = p.size_bytes().map(util::human_size).unwrap_or_default();
+    for r in rows {
+        let size = r.size_bytes().map(util::human_size).unwrap_or_default();
         let mut line = format!(
             "{}  {}  {}  {:>9}",
-            fit(&p.display_name, name_w),
-            term::dim(&fit(p.display_version.as_deref().unwrap_or(""), ver_w)),
-            fit(p.publisher.as_deref().unwrap_or(""), pub_w),
+            fit(r.name(), name_w),
+            term::dim(&fit(r.version(), ver_w)),
+            fit(r.publisher(), pub_w),
             size,
         );
+        if source_w > 0 {
+            line.push_str(&format!("  {}", fit(r.source(), source_w)));
+        }
         if show_date {
-            line.push_str(&format!("  {}", p.install_date.as_deref().unwrap_or("")));
+            line.push_str(&format!("  {}", fit(r.date(), 10)));
+        }
+        if let Listed::Store {
+            protected: Some(reason),
+            ..
+        } = r
+        {
+            line.push_str(&term::dim(&format!("  protected: {reason}")));
         }
         println!("{}", line.trim_end());
     }
+}
+
+/// `12 programs`, or `12 programs, 30 Store apps (18 protected)`.
+fn list_footer(rows: &[Listed]) -> String {
+    let apps = rows.iter().filter(|r| !r.source().is_empty()).count();
+    let programs = rows.len() - apps;
+    let protected = rows
+        .iter()
+        .filter(|r| {
+            matches!(
+                r,
+                Listed::Store {
+                    protected: Some(_),
+                    ..
+                }
+            )
+        })
+        .count();
+    let mut parts = Vec::new();
+    if programs > 0 {
+        let word = if programs == 1 { "program" } else { "programs" };
+        parts.push(format!("{programs} {word}"));
+    }
+    if apps > 0 {
+        let word = if apps == 1 { "Store app" } else { "Store apps" };
+        let mut part = format!("{apps} {word}");
+        if protected > 0 {
+            part.push_str(&format!(" ({protected} protected)"));
+        }
+        parts.push(part);
+    }
+    parts.join(", ")
 }
 
 fn column_width<'a>(values: impl Iterator<Item = &'a str>, cap: usize) -> usize {
@@ -1343,6 +1467,7 @@ fn resolve_program<'a>(programs: &'a [Program], target: &str) -> Result<&'a Prog
 mod tests {
     use super::*;
     use crate::model::{Hive, LeftoverKind, RegistrySource, RegistryView};
+    use crate::packages::fake::{package, FakePackageStore};
     use crate::safety::ItemOutcome;
     use clap::Parser;
 
@@ -1629,5 +1754,118 @@ mod tests {
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["cancelled", "failed", "programs", "uninstalled"]);
+    }
+
+    fn row_names(rows: &[Listed]) -> Vec<&str> {
+        rows.iter().map(Listed::name).collect()
+    }
+
+    #[test]
+    fn a_listed_program_keeps_its_json_and_gains_a_kind_in_front() {
+        let p = program("Brave", "BraveSoftware Brave-Browser", Some("x.exe"));
+        let before = serde_json::to_string_pretty(&p).unwrap();
+        let listed = serde_json::to_string_pretty(&Listed::Program(p)).unwrap();
+        assert!(
+            listed.starts_with("{\n  \"kind\": \"program\",\n"),
+            "{listed}"
+        );
+        assert_eq!(listed.replacen("\n  \"kind\": \"program\",", "", 1), before);
+    }
+
+    #[test]
+    fn a_listed_store_app_says_what_it_is_and_why_it_stays() {
+        let engine = package("Vendor.Engine", "Engine");
+        let mut studio = package("Vendor.Studio", "Studio");
+        studio.dependencies = vec![engine.family_name.clone()];
+        let rows = store_rows(&FakePackageStore(vec![engine, studio]), false).unwrap();
+        let v = serde_json::to_value(&rows).unwrap();
+        assert_eq!(v[0]["kind"], "store");
+        assert_eq!(v[0]["family_name"], "Vendor.Engine_8wekyb3d8bbwe");
+        assert_eq!(v[0]["protected"], "Studio depends on it");
+        assert_eq!(v[1]["signature"], "store");
+        assert!(v[1]["protected"].is_null());
+        let mut keys: Vec<&str> = v[1]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "dependencies",
+                "display_name",
+                "family_name",
+                "full_name",
+                "installed_date",
+                "installed_path",
+                "is_bundle",
+                "is_framework",
+                "is_resource",
+                "is_sparse",
+                "kind",
+                "name",
+                "protected",
+                "publisher",
+                "signature",
+                "version",
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_own_packages_show_only_with_system_yet_always_count_for_the_guard() {
+        let engine = package("Vendor.Engine", "Engine");
+        let mut shell = package("Vendor.Shell", "Shell");
+        shell.signature = SignatureKind::System;
+        shell.dependencies = vec![engine.family_name.clone()];
+        let store = FakePackageStore(vec![engine, shell]);
+
+        let shown = store_rows(&store, false).unwrap();
+        assert_eq!(row_names(&shown), ["Engine"]);
+        assert!(matches!(
+            &shown[0],
+            Listed::Store { protected: Some(Refusal::RequiredBy(by)), .. } if by == "Shell"
+        ));
+
+        let all = store_rows(&store, true).unwrap();
+        assert_eq!(row_names(&all), ["Engine", "Shell"]);
+        assert!(matches!(
+            &all[1],
+            Listed::Store {
+                protected: Some(Refusal::System),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn programs_and_store_apps_sort_filter_and_count_together() {
+        let mut rows = vec![Listed::Program(program("Zed", "Zed", None))];
+        rows.extend(
+            store_rows(
+                &FakePackageStore(vec![
+                    package("Vendor.Notes", "Notes"),
+                    package("Microsoft.WindowsStore", "Microsoft Store"),
+                ]),
+                false,
+            )
+            .unwrap(),
+        );
+        rows.push(Listed::Program(program("brave", "brave", None)));
+        sort_rows(&mut rows, SortKey::Name);
+        assert_eq!(
+            row_names(&rows),
+            ["brave", "Microsoft Store", "Notes", "Zed"]
+        );
+        assert_eq!(rows[2].source(), "store");
+        assert_eq!(rows[3].source(), "");
+        assert_eq!(list_footer(&rows), "2 programs, 2 Store apps (1 protected)");
+
+        // A Store app also answers to its identity name.
+        rows.retain(|r| r.matches("vendor.notes"));
+        assert_eq!(row_names(&rows), ["Notes"]);
+        assert_eq!(list_footer(&rows), "1 Store app");
     }
 }
