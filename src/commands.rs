@@ -1899,8 +1899,8 @@ fn not_found(target: &str) -> String {
 /// `uninstall` removes it, so a name only an app answers to stops `scan`.
 fn store_app_refusal(target: &str, app: &Package) -> String {
     format!(
-        "\"{target}\" is the Store app {}. Store apps can be listed but not removed yet",
-        app.display_name
+        "\"{target}\" is the Store app {}. Its leftovers are found when it is removed: oxidize uninstall \"{}\"",
+        app.display_name, app.family_name
     )
 }
 
@@ -2373,6 +2373,17 @@ mod tests {
         // The dependent itself may go.
         let batch = plan_batch(&programs, &apps, &names(&["studio"]), false).unwrap();
         assert_eq!(planned_names(&batch), ["Studio"]);
+    }
+
+    #[test]
+    fn scanning_a_store_app_points_to_uninstall() {
+        let apps = store_apps();
+        let app =
+            store_app_named(&apps, "calculator").expect("the app answers to part of its name");
+        assert_eq!(
+            store_app_refusal("calculator", app),
+            "\"calculator\" is the Store app Windows Calculator. Its leftovers are found when it is removed: oxidize uninstall \"Microsoft.WindowsCalculator_8wekyb3d8bbwe\""
+        );
     }
 
     #[test]
