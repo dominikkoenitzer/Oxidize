@@ -209,16 +209,20 @@ fn print_list(rows: &[Listed], show_date: bool) {
     let ver_w = column_width(rows.iter().map(Listed::version), 16);
     let pub_w = column_width(rows.iter().map(Listed::publisher), 28);
     let source_w = column_width(rows.iter().map(Listed::source), 5);
+    // Store apps have no size; a list of only them drops the empty column.
+    let show_size = rows.iter().any(|r| matches!(r, Listed::Program(_)));
 
     for r in rows {
-        let size = r.size_bytes().map(util::human_size).unwrap_or_default();
         let mut line = format!(
-            "{}  {}  {}  {:>9}",
+            "{}  {}  {}",
             fit(r.name(), name_w),
             term::dim(&fit(r.version(), ver_w)),
             fit(r.publisher(), pub_w),
-            size,
         );
+        if show_size {
+            let size = r.size_bytes().map(util::human_size).unwrap_or_default();
+            line.push_str(&format!("  {size:>9}"));
+        }
         if source_w > 0 {
             line.push_str(&format!("  {}", fit(r.source(), source_w)));
         }
