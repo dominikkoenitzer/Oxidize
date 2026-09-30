@@ -1,7 +1,8 @@
 //! Administrator detection, self-elevation, and the one function every
 //! destructive action goes through.
 //!
-//! Nothing in Oxidize deletes anything except via [`remove_leftovers`]. A dry
+//! Leftovers are only ever deleted through [`remove_leftovers`]; the one other
+//! destructive call is the guarded Store-app removal in `packages.rs`. A dry
 //! run changes nothing, registry keys are exported before deletion, files are
 //! quarantined rather than destroyed, and everything removed is written to a
 //! manifest that `oxidize restore` can replay.
