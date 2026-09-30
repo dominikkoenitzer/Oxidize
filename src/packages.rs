@@ -147,7 +147,8 @@ pub enum Refusal {
     Bundle,
     /// A sparse package: the identity of a normal program.
     Sparse,
-    /// On the list of packages Windows or the Store relies on.
+    /// On the keep list: the Store, its helpers, Windows components and the
+    /// runtimes apps are built on.
     Essential,
     /// Another installed package, named here, depends on it.
     RequiredBy(String),
@@ -161,7 +162,7 @@ impl fmt::Display for Refusal {
             Refusal::Resource => f.write_str("a resource package of another app"),
             Refusal::Bundle => f.write_str("a bundle, not an app"),
             Refusal::Sparse => f.write_str("belongs to a program; uninstall the program instead"),
-            Refusal::Essential => f.write_str("Windows or the Store relies on it"),
+            Refusal::Essential => f.write_str("a Windows component Oxidize keeps"),
             Refusal::RequiredBy(name) => write!(f, "{name} depends on it"),
         }
     }
