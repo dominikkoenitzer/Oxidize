@@ -176,21 +176,33 @@ impl Serialize for Refusal {
 
 /// Identity names of packages Windows or the Store relies on even though
 /// they are not signed as part of Windows.
-const ESSENTIAL_NAMES: [&str; 4] = [
+const ESSENTIAL_NAMES: [&str; 8] = [
     "Microsoft.WindowsStore",
     "Microsoft.DesktopAppInstaller",
     "Microsoft.StorePurchaseApp",
     "Microsoft.SecHealthUI",
+    // Infrastructure installed as ordinary Store apps: winget's package
+    // source, the Xbox and PC Game Pass services, the widgets runtime and
+    // the compatibility fixes Windows Update delivers.
+    "Microsoft.Winget.Source",
+    "Microsoft.GamingServices",
+    "Microsoft.WidgetsPlatformRuntime",
+    "Microsoft.ApplicationCompatibilityEnhancements",
 ];
 
 /// Name prefixes of Windows components and of the runtimes apps run on.
-const ESSENTIAL_PREFIXES: [&str; 6] = [
+const ESSENTIAL_PREFIXES: [&str; 8] = [
     "Microsoft.Windows.",
     "MicrosoftWindows.",
     "Microsoft.VCLibs",
     "Microsoft.UI.Xaml",
     "Microsoft.NET.Native",
     "Microsoft.WindowsAppRuntime",
+    // The Windows App SDK runtime's main and singleton packages, which ship
+    // under a second publisher name.
+    "MicrosoftCorporationII.WinAppRuntime.",
+    // Handwriting recognition per language, used by the pen and touch keyboard.
+    "Microsoft.Ink.Handwriting.",
 ];
 
 fn is_essential(name: &str) -> bool {
@@ -335,6 +347,10 @@ mod tests {
             "Microsoft.StorePurchaseApp",
             "Microsoft.SecHealthUI",
             "microsoft.windowsstore",
+            "Microsoft.Winget.Source",
+            "Microsoft.GamingServices",
+            "Microsoft.WidgetsPlatformRuntime",
+            "Microsoft.ApplicationCompatibilityEnhancements",
         ] {
             assert_eq!(
                 refusal(&package(name, name)),
@@ -354,6 +370,9 @@ mod tests {
             "Microsoft.NET.Native.Framework.2.2",
             "Microsoft.WindowsAppRuntime.1.8",
             "MICROSOFT.VCLIBS.140.00",
+            "MicrosoftCorporationII.WinAppRuntime.Main.1.8",
+            "MicrosoftCorporationII.WinAppRuntime.Singleton",
+            "Microsoft.Ink.Handwriting.Main.en-US.1.0.1",
         ] {
             assert_eq!(
                 refusal(&package(name, name)),
