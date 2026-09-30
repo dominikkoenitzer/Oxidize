@@ -38,7 +38,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
-    /// List installed programs.
+    /// List installed programs and Store apps.
     List(ListArgs),
     /// Uninstall one or more programs, then remove their leftovers.
     Uninstall(UninstallArgs),
@@ -56,12 +56,17 @@ pub enum Commands {
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
-    /// Only programs whose name or publisher contains this text.
+    /// Only programs and apps whose name or publisher contains this text.
     pub filter: Option<String>,
 
-    /// Include hidden system components.
+    /// Include hidden system components and the Store apps that are part of
+    /// Windows.
     #[arg(long)]
     pub system: bool,
+
+    /// Only Store apps.
+    #[arg(long)]
+    pub store: bool,
 
     #[arg(long, value_enum, default_value_t = SortKey::Name)]
     pub sort: SortKey,
