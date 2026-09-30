@@ -124,6 +124,56 @@ impl Program {
     }
 }
 
+/// Who signed a package, which says where it came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignatureKind {
+    /// Unsigned or not known.
+    None,
+    /// Signed with a developer certificate, usually a sideloaded build.
+    Developer,
+    /// Signed with a company certificate and deployed by it.
+    Enterprise,
+    /// From the Microsoft Store.
+    Store,
+    /// Part of Windows.
+    System,
+}
+
+/// One Store app: an MSIX or AppX package registered for the current user.
+#[derive(Debug, Clone, Serialize)]
+pub struct Package {
+    /// `Name_PublisherId`. The same across versions, so it is the stable id.
+    pub family_name: String,
+    /// The exact build: name, version, architecture and publisher id.
+    pub full_name: String,
+    /// The identity name, e.g. `Microsoft.WindowsCalculator`.
+    pub name: String,
+    /// The name Windows shows, or the identity name when there is none.
+    pub display_name: String,
+    pub publisher: Option<String>,
+    /// `Major.Minor.Build.Revision`.
+    pub version: String,
+    pub signature: SignatureKind,
+    pub is_framework: bool,
+    pub is_resource: bool,
+    pub is_bundle: bool,
+    /// Registered with an external location: a sparse package that gives a
+    /// normal program its identity. Such a package goes with the program.
+    pub is_sparse: bool,
+    pub installed_path: Option<String>,
+    /// Install date as `YYYY-MM-DD`.
+    pub installed_date: Option<String>,
+    /// Family names of the packages this one depends on.
+    pub dependencies: Vec<String>,
+}
+
+impl Package {
+    pub fn id(&self) -> &str {
+        &self.family_name
+    }
+}
+
 /// How sure the scanner is that an item belongs to the target program.
 /// Ordered `High < Medium < Low` so "act on everything up to this level"
 /// is a plain comparison.
