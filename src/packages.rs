@@ -1,9 +1,10 @@
 //! Store apps: the MSIX and AppX packages registered for the current user.
-//! Oxidize lists them; nothing here removes one.
+//! Oxidize lists them and removes them for the current user only: never for
+//! every user and never from the image new accounts are set up from.
 
 use std::fmt;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Serialize, Serializer};
 use windows::core::HSTRING;
 use windows::ApplicationModel::{self as appx, PackageSignatureKind};
@@ -19,6 +20,24 @@ pub trait PackageStore {
     /// Whether any package of this family is still registered for the
     /// current user.
     fn is_registered(&self, family_name: &str) -> Result<bool>;
+
+    /// Remove the package for the current user. An error means Windows
+    /// refused or failed; the outcome says whether the family is gone.
+    /// Callers run [`package_guard`] first and never pass a refused package.
+    fn remove(&self, package: &Package) -> Result<RemovalOutcome>;
+
+    /// Whether Windows installs this family for every new account, so it
+    /// can come back. Reading this may need administrator rights.
+    fn is_provisioned(&self, family_name: &str) -> Result<bool>;
+}
+
+/// What became of a package Windows reported as removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalOutcome {
+    /// No package of the family is registered for the current user any more.
+    Removed,
+    /// Windows reported success, yet the family is still registered.
+    StillRegistered,
 }
 
 /// The packages Windows has registered, read through `PackageManager`.
@@ -48,6 +67,39 @@ impl PackageStore for WindowsPackageStore {
             )
             .with_context(|| format!("looking up {family_name} failed"))?;
         Ok(found.into_iter().next().is_some())
+    }
+
+    fn remove(&self, package: &Package) -> Result<RemovalOutcome> {
+        // The full name alone, without RemovalOptions: the current user only,
+        // never RemoveForAllUsers, and the provisioned copy stays untouched.
+        let result = Self::manager()?
+            .RemovePackageAsync(&HSTRING::from(package.full_name.as_str()))
+            .and_then(|operation| operation.join())
+            .with_context(|| format!("Windows did not remove {}", package.display_name))?;
+        if let Some(error) = text(result.ErrorText()) {
+            bail!("Windows did not remove {}: {error}", package.display_name);
+        }
+        if self.is_registered(&package.family_name)? {
+            Ok(RemovalOutcome::StillRegistered)
+        } else {
+            Ok(RemovalOutcome::Removed)
+        }
+    }
+
+    fn is_provisioned(&self, family_name: &str) -> Result<bool> {
+        let provisioned = Self::manager()?
+            .FindProvisionedPackages()
+            .context("reading the provisioned Store apps failed")?;
+        for p in provisioned {
+            if p.Id()?
+                .FamilyName()?
+                .to_string()
+                .eq_ignore_ascii_case(family_name)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -254,18 +306,66 @@ pub fn package_guard(package: &Package, installed: &[Package]) -> Result<(), Ref
 pub(crate) mod fake {
     use super::*;
 
-    pub(crate) struct FakePackageStore(pub Vec<Package>);
+    use std::cell::RefCell;
+
+    /// Packages in memory. `remove` takes one off the list and records it;
+    /// nothing reaches Windows.
+    pub(crate) struct FakePackageStore {
+        packages: RefCell<Vec<Package>>,
+        /// Full names passed to `remove`, in order.
+        pub(crate) removed: RefCell<Vec<String>>,
+        /// Every removal fails with this text, as Windows' `ErrorText` would.
+        pub(crate) fail_with: Option<String>,
+        /// Windows reports success but keeps the package registered.
+        pub(crate) keeps_registered: bool,
+        /// Family names Windows installs for new accounts.
+        pub(crate) provisioned: Vec<String>,
+    }
+
+    impl FakePackageStore {
+        pub(crate) fn new(packages: Vec<Package>) -> Self {
+            FakePackageStore {
+                packages: RefCell::new(packages),
+                removed: RefCell::new(Vec::new()),
+                fail_with: None,
+                keeps_registered: false,
+                provisioned: Vec::new(),
+            }
+        }
+    }
 
     impl PackageStore for FakePackageStore {
         fn list(&self) -> Result<Vec<Package>> {
-            Ok(self.0.clone())
+            Ok(self.packages.borrow().clone())
         }
 
         fn is_registered(&self, family_name: &str) -> Result<bool> {
             Ok(self
-                .0
+                .packages
+                .borrow()
                 .iter()
                 .any(|p| p.family_name.eq_ignore_ascii_case(family_name)))
+        }
+
+        fn remove(&self, package: &Package) -> Result<RemovalOutcome> {
+            self.removed.borrow_mut().push(package.full_name.clone());
+            if let Some(error) = &self.fail_with {
+                bail!("Windows did not remove {}: {error}", package.display_name);
+            }
+            if self.keeps_registered {
+                return Ok(RemovalOutcome::StillRegistered);
+            }
+            self.packages
+                .borrow_mut()
+                .retain(|p| p.full_name != package.full_name);
+            Ok(RemovalOutcome::Removed)
+        }
+
+        fn is_provisioned(&self, family_name: &str) -> Result<bool> {
+            Ok(self
+                .provisioned
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(family_name)))
         }
     }
 
@@ -483,9 +583,25 @@ mod tests {
 
     #[test]
     fn the_fake_store_answers_like_windows() {
-        let store = FakePackageStore(vec![package("Vendor.Notes", "Notes")]);
+        let store = FakePackageStore::new(vec![package("Vendor.Notes", "Notes")]);
         assert_eq!(store.list().unwrap().len(), 1);
         assert!(store.is_registered("vendor.notes_8wekyb3d8bbwe").unwrap());
         assert!(!store.is_registered("Vendor.Other_8wekyb3d8bbwe").unwrap());
+    }
+
+    #[test]
+    fn the_fake_store_removes_only_what_it_is_given() {
+        let notes = package("Vendor.Notes", "Notes");
+        let store = FakePackageStore::new(vec![notes.clone(), package("Vendor.Paint", "Paint")]);
+        assert_eq!(store.remove(&notes).unwrap(), RemovalOutcome::Removed);
+        assert_eq!(*store.removed.borrow(), [notes.full_name.as_str()]);
+        assert!(!store.is_registered(&notes.family_name).unwrap());
+        assert!(store.is_registered("Vendor.Paint_8wekyb3d8bbwe").unwrap());
+
+        let mut failing = FakePackageStore::new(vec![notes.clone()]);
+        failing.fail_with = Some("0x80073CF1".to_string());
+        let err = failing.remove(&notes).unwrap_err();
+        assert!(format!("{err:#}").contains("0x80073CF1"));
+        assert!(failing.is_registered(&notes.family_name).unwrap());
     }
 }

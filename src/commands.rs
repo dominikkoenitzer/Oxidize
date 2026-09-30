@@ -1878,7 +1878,7 @@ mod tests {
     #[test]
     fn store_apps_are_read_only_for_a_name_no_program_matches() {
         let programs = installed();
-        let store = FakePackageStore(store_apps());
+        let store = FakePackageStore::new(store_apps());
         assert!(store_apps_if_unmatched(&store, &programs, &names(&["brave", "vlc"])).is_empty());
         assert_eq!(
             store_apps_if_unmatched(&store, &programs, &names(&["brave", "calculator"])).len(),
@@ -1907,7 +1907,7 @@ mod tests {
         let engine = package("Vendor.Engine", "Engine");
         let mut studio = package("Vendor.Studio", "Studio");
         studio.dependencies = vec![engine.family_name.clone()];
-        let rows = store_rows(&FakePackageStore(vec![engine, studio]), false).unwrap();
+        let rows = store_rows(&FakePackageStore::new(vec![engine, studio]), false).unwrap();
         let v = serde_json::to_value(&rows).unwrap();
         assert_eq!(v[0]["kind"], "store");
         assert_eq!(v[0]["family_name"], "Vendor.Engine_8wekyb3d8bbwe");
@@ -1950,7 +1950,7 @@ mod tests {
         let mut shell = package("Vendor.Shell", "Shell");
         shell.signature = SignatureKind::System;
         shell.dependencies = vec![engine.family_name.clone()];
-        let store = FakePackageStore(vec![engine, shell]);
+        let store = FakePackageStore::new(vec![engine, shell]);
 
         let shown = store_rows(&store, false).unwrap();
         assert_eq!(row_names(&shown), ["Engine"]);
@@ -1975,7 +1975,7 @@ mod tests {
         let mut rows = vec![Listed::Program(program("Zed", "Zed", None))];
         rows.extend(
             store_rows(
-                &FakePackageStore(vec![
+                &FakePackageStore::new(vec![
                     package("Vendor.Notes", "Notes"),
                     package("Microsoft.WindowsStore", "Microsoft Store"),
                 ]),
