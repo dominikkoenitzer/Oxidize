@@ -528,6 +528,9 @@ pub fn is_protected_path(p: &Path) -> bool {
         env_dir("PUBLIC"),
         env_dir("USERPROFILE").and_then(|p| p.parent().map(Path::to_path_buf)),
         env_dir("USERPROFILE").map(|p| p.join("Documents")),
+        // Every Store app keeps its data one level below this folder; the
+        // empty-parent cleanup after a data-folder leftover must stop here.
+        env_dir("LOCALAPPDATA").map(|p| p.join("Packages")),
     ];
     for guard in guards.into_iter().flatten() {
         if s == guard
@@ -1439,6 +1442,9 @@ mod tests {
     #[test]
     fn protected_paths_are_never_deletable() {
         assert!(is_protected_path(Path::new("C:\\")));
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            assert!(is_protected_path(&Path::new(&local).join("Packages")));
+        }
         assert!(is_protected_path(Path::new("D:\\")));
         if let Some(windir) = env_dir("windir") {
             assert!(is_protected_path(&windir));
