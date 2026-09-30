@@ -57,6 +57,12 @@ A program Windows no longer lists is scanned by name alone, and a vendor folder
 is only recognised as one when you name the publisher:
 `oxidize scan Chrome --publisher "Google LLC"`.
 
+`oxidize list` shows Store apps next to programs, marked `store`;
+`oxidize list --store` shows only them, and `--system` adds the ones that are
+part of Windows. An app Oxidize would never remove, such as the Store itself, a
+runtime or the package of a normal program, is marked `protected` with the
+reason. With `--json` every entry gains a `kind`, `program` or `store`.
+
 Every leftover has a confidence. `--remove` takes the high-confidence ones;
 `--medium` adds the plausible ones, `--all` takes everything listed.
 
@@ -78,7 +84,7 @@ never touched, and a vendor folder that also holds other products is never
 removed as a whole. One that held nothing but the program, folder or key, goes
 with it.
 
-Store apps are not covered.
+Store apps are listed but not removed yet.
 
 ## Backups
 
