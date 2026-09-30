@@ -1,6 +1,7 @@
 //! Command handlers: wire the engine together and print results. All
 //! user-facing text lives here so the lower layers stay quiet.
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -15,7 +16,9 @@ use crate::cli::{
 use crate::model::{
     Confidence, Group, Leftover, Package, Program, ScanReport, ScanTarget, SignatureKind,
 };
-use crate::packages::{package_guard, PackageStore, Refusal, WindowsPackageStore};
+use crate::packages::{
+    self, package_guard, PackageStore, Refusal, RemovalOutcome, WindowsPackageStore,
+};
 use crate::safety::{DeletionOutcome, ItemStatus, SafetyContext};
 use crate::{hunter, orphans, registry, restore, safety, scanner, term, uninstall, util};
 
@@ -392,13 +395,26 @@ fn print_remove_hint(high: usize, command: &str) {
 
 fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
     let programs = registry::enumerate_installed_programs(true);
-    let packages = store_apps_if_unmatched(&WindowsPackageStore, &programs, &args.targets);
+    let env = StoreEnv::windows();
+    let packages = installed_store_apps(env.store, g);
     if let [target] = args.targets.as_slice() {
-        let program = resolve_program(&programs, &packages, target)?.clone();
-        return uninstall_program(&program, args.silent, args.keep, &args.levels, g);
+        return match resolve_any(&programs, &packages, target) {
+            Ok(Resolved::Program(program)) => {
+                let program = program.clone();
+                uninstall_program(&program, args.silent, args.keep, &args.levels, g)
+            }
+            Ok(Resolved::Store(app)) => {
+                if let Err(reason) = package_guard(app, &packages) {
+                    bail!("{}", kept(app, &reason));
+                }
+                uninstall_package(&env, app, args.keep, &args.levels, g)
+            }
+            Err(Resolve::NotFound) => bail!("{}", not_found(target)),
+            Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
+        };
     }
     let batch = plan_batch(&programs, &packages, &args.targets, args.silent)?;
-    uninstall_batch(&batch, args.keep, &args.levels, g)
+    uninstall_batch(&env, &batch, args.keep, &args.levels, g)
 }
 
 /// A program of a batch with the command that uninstalls it.
@@ -408,40 +424,66 @@ struct Planned {
     plan: uninstall::UninstallPlan,
 }
 
-/// Resolve every name and plan every uninstaller before anything runs. Any
-/// name that matches no program or several, and any program without an
-/// uninstall command, stops the whole batch, and so does a name only a Store
-/// app in `packages` answers to. The order is the order of the names; a
-/// program named twice runs once.
+/// One entry of a batch: a program and its uninstaller, or a Store app the
+/// guard lets go.
+#[derive(Debug)]
+enum Step {
+    Program(Planned),
+    Store(Package),
+}
+
+impl Step {
+    fn name(&self) -> &str {
+        match self {
+            Step::Program(b) => &b.program.display_name,
+            Step::Store(app) => &app.display_name,
+        }
+    }
+}
+
+/// Resolve every name and plan every step before anything runs. Any name
+/// that matches nothing or several, any program without an uninstall
+/// command and any Store app the guard keeps stops the whole batch. The
+/// order is the order of the names; a program or app named twice runs once.
 fn plan_batch(
     programs: &[Program],
     packages: &[Package],
     targets: &[String],
     silent: bool,
-) -> Result<Vec<Planned>> {
-    let mut planned: Vec<Planned> = Vec::new();
+) -> Result<Vec<Step>> {
+    let mut planned: Vec<Step> = Vec::new();
     let mut problems = Vec::new();
     for target in targets {
-        let program = match resolve_target(programs, target) {
-            Ok(p) => p,
-            Err(Resolve::NotFound) => {
-                problems.push(not_found(target, packages));
-                continue;
+        match resolve_any(programs, packages, target) {
+            Ok(Resolved::Program(program)) => {
+                let seen = planned
+                    .iter()
+                    .any(|s| matches!(s, Step::Program(b) if same_program(&b.program, program)));
+                if seen {
+                    continue;
+                }
+                match uninstall::plan(program, silent) {
+                    Ok(plan) => planned.push(Step::Program(Planned {
+                        program: program.clone(),
+                        plan,
+                    })),
+                    Err(e) => problems.push(format!("{}: {e:#}", program.display_name)),
+                }
             }
-            Err(Resolve::Ambiguous(msg)) => {
-                problems.push(msg);
-                continue;
+            Ok(Resolved::Store(app)) => {
+                let seen = planned.iter().any(
+                    |s| matches!(s, Step::Store(a) if a.family_name.eq_ignore_ascii_case(&app.family_name)),
+                );
+                if seen {
+                    continue;
+                }
+                match package_guard(app, packages) {
+                    Ok(()) => planned.push(Step::Store(app.clone())),
+                    Err(reason) => problems.push(kept(app, &reason)),
+                }
             }
-        };
-        if planned.iter().any(|b| same_program(&b.program, program)) {
-            continue;
-        }
-        match uninstall::plan(program, silent) {
-            Ok(plan) => planned.push(Planned {
-                program: program.clone(),
-                plan,
-            }),
-            Err(e) => problems.push(format!("{}: {e:#}", program.display_name)),
+            Err(Resolve::NotFound) => problems.push(not_found(target)),
+            Err(Resolve::Ambiguous(msg)) => problems.push(msg),
         }
     }
     if !problems.is_empty() {
@@ -453,45 +495,105 @@ fn plan_batch(
     Ok(planned)
 }
 
+/// Why the guard keeps a Store app, as one line.
+fn kept(app: &Package, reason: &Refusal) -> String {
+    format!("{} stays: {reason}", app.display_name)
+}
+
+/// `2 programs`, `1 Store app`, `2 programs and 1 Store app`.
+fn kinds(programs: usize, apps: usize) -> String {
+    let program = format!(
+        "{programs} {}",
+        if programs == 1 { "program" } else { "programs" }
+    );
+    let app = format!(
+        "{apps} {}",
+        if apps == 1 { "Store app" } else { "Store apps" }
+    );
+    match (programs, apps) {
+        (_, 0) => program,
+        (0, _) => app,
+        _ => format!("{program} and {app}"),
+    }
+}
+
 /// The same Uninstall entry: one id can exist in more than one hive or view.
 fn same_program(a: &Program, b: &Program) -> bool {
     a.id() == b.id() && a.source == b.source
 }
 
-/// Show the whole plan, ask once, then uninstall the programs one after
-/// another, each with its own leftover scan, removal and backup.
-fn uninstall_batch(batch: &[Planned], keep: bool, levels: &LevelOpts, g: &Global) -> Result<()> {
+/// Show the whole plan, ask once, then uninstall the programs and remove the
+/// Store apps one after another, each with its own leftover scan, removal
+/// and backup.
+fn uninstall_batch(
+    env: &StoreEnv,
+    batch: &[Step],
+    keep: bool,
+    levels: &LevelOpts,
+    g: &Global,
+) -> Result<()> {
     // Capture every footprint before the first uninstaller runs: one of them
     // may take a later program along.
-    let targets: Vec<ScanTarget> = batch
+    let targets: Vec<Option<ScanTarget>> = batch
         .iter()
-        .map(|b| scanner::build_target(&b.program))
+        .map(|s| match s {
+            Step::Program(b) => Some(scanner::build_target(&b.program)),
+            Step::Store(_) => None,
+        })
         .collect();
     let n = batch.len();
+    let apps = batch.iter().filter(|s| matches!(s, Step::Store(_))).count();
+    let programs = n - apps;
 
     if !g.json {
         let head = if n == 1 {
-            "1 program".to_string()
+            kinds(programs, apps)
         } else {
-            format!("{n} programs, one after another")
+            format!("{}, one after another", kinds(programs, apps))
         };
         println!("{}", term::bold(&head));
-        for (i, b) in batch.iter().enumerate() {
-            println!("  {}. {}", i + 1, program_head(&b.program));
-            println!("     {}", term::dim(&b.plan.display()));
+        for (i, step) in batch.iter().enumerate() {
+            match step {
+                Step::Program(b) => {
+                    println!("  {}. {}", i + 1, program_head(&b.program));
+                    println!("     {}", term::dim(&b.plan.display()));
+                }
+                Step::Store(app) => {
+                    println!("  {}. {}", i + 1, package_head(app));
+                    println!("     {}", term::dim(&package_command(app)));
+                }
+            }
+        }
+        if apps > 0 {
+            println!();
+            println!("{STORE_APP_WARNING}");
         }
     }
 
-    let question = if n == 1 {
-        "Run the uninstaller?".to_string()
-    } else {
-        format!("Run {n} uninstallers?")
+    let question = match (programs, apps) {
+        (1, 0) => "Run the uninstaller?".to_string(),
+        (_, 0) => format!("Run {programs} uninstallers?"),
+        (0, 1) => "Remove the Store app?".to_string(),
+        (0, _) => format!("Remove {apps} Store apps?"),
+        _ => format!(
+            "Run {} and remove {}?",
+            if programs == 1 {
+                "1 uninstaller".to_string()
+            } else {
+                format!("{programs} uninstallers")
+            },
+            kinds(0, apps)
+        ),
     };
-    if !g.dry_run && !g.confirm(&question, true) {
+    // A Store app's removal has no backup, so Enter means no.
+    if !g.dry_run && !g.confirm(&question, apps == 0) {
         if g.json {
             let programs: Vec<_> = batch
                 .iter()
-                .map(|b| json!({ "kind": "program", "program": b.program, "command": b.plan.display(), "cancelled": true }))
+                .map(|s| match s {
+                    Step::Program(b) => json!({ "kind": "program", "program": b.program, "command": b.plan.display(), "cancelled": true }),
+                    Step::Store(app) => json!({ "kind": "store", "program": app, "command": package_command(app), "cancelled": true }),
+                })
                 .collect();
             println!(
                 "{}",
@@ -509,26 +611,40 @@ fn uninstall_batch(batch: &[Planned], keep: bool, levels: &LevelOpts, g: &Global
     }
 
     let mut runs = Vec::with_capacity(n);
-    for (i, (b, target)) in batch.iter().zip(&targets).enumerate() {
+    for (i, (step, target)) in batch.iter().zip(targets).enumerate() {
         if !g.json {
             println!();
             println!(
                 "{}",
-                term::bold(&format!("[{}/{n}] {}", i + 1, b.program.display_name))
+                term::bold(&format!("[{}/{n}] {}", i + 1, step.name()))
             );
         }
-        // An earlier uninstaller may have taken this one along; its own
-        // would then fail or run on a half-removed install.
-        let already_gone = !g.dry_run && !uninstall::still_installed(&b.program);
-        // One program failing does not stop the others.
-        let run = run_uninstall(&b.program, target, &b.plan, already_gone, keep, levels, g)
-            .unwrap_or_else(|e| {
-                let error = format!("{e:#}");
-                if !g.json {
-                    term::error(&error);
-                }
-                ProgramRun::stopped(&b.program, &b.plan, error)
-            });
+        let failed = |e: anyhow::Error| {
+            let error = format!("{e:#}");
+            if !g.json {
+                term::error(&error);
+            }
+            error
+        };
+        // One failing does not stop the others.
+        let run = match step {
+            Step::Program(b) => {
+                let target = target.unwrap_or_else(|| scanner::build_target(&b.program));
+                // An earlier uninstaller may have taken this one along; its
+                // own would then fail or run on a half-removed install.
+                let already_gone = !g.dry_run && !uninstall::still_installed(&b.program);
+                run_uninstall(&b.program, &target, &b.plan, already_gone, keep, levels, g)
+                    .unwrap_or_else(|e| ProgramRun::stopped(&b.program, &b.plan, failed(e)))
+            }
+            Step::Store(app) => {
+                // A lookup that fails counts as registered: the removal then
+                // says what is wrong.
+                let already_gone =
+                    !g.dry_run && !env.store.is_registered(&app.family_name).unwrap_or(true);
+                run_package(env, app, already_gone, keep, levels, g)
+                    .unwrap_or_else(|e| ProgramRun::stopped_package(app, failed(e)))
+            }
+        };
         runs.push(run);
     }
 
@@ -542,7 +658,10 @@ fn uninstall_batch(batch: &[Planned], keep: bool, levels: &LevelOpts, g: &Global
     }
     let failed = runs.iter().filter(|r| r.failed(g.dry_run)).count();
     if failed > 0 {
-        bail!("{failed} of {n} programs did not uninstall cleanly");
+        bail!(
+            "{failed} of {} did not uninstall cleanly",
+            kinds(programs, apps)
+        );
     }
     Ok(())
 }
@@ -689,6 +808,18 @@ impl ProgramRun {
         }
     }
 
+    /// A Store app whose removal stopped with an error.
+    fn stopped_package(app: &Package, error: String) -> Self {
+        ProgramRun {
+            name: app.display_name.clone(),
+            json: json!({ "kind": "store", "program": app, "command": package_command(app), "error": error }),
+            gone: false,
+            found: 0,
+            removal: None,
+            error: Some(error),
+        }
+    }
+
     /// An error, an entry still registered after its uninstaller, or a
     /// leftover that could not be removed.
     fn failed(&self, dry_run: bool) -> bool {
@@ -816,6 +947,235 @@ fn run_uninstall(
         found: report.total(),
         removal,
         error: None,
+    })
+}
+
+/// Said before any Store app is removed, whatever the flags.
+const STORE_APP_WARNING: &str =
+    "Removing a Store app deletes its data with it; reinstalling means the Store. \
+     The removal itself cannot be backed up, only the leftovers found after it.";
+
+/// What removing a Store app works with: the package store, the folder the
+/// apps keep their data in, and the scan by name for everything else.
+struct StoreEnv<'a> {
+    store: &'a dyn PackageStore,
+    /// `%LOCALAPPDATA%`, whose `Packages` folder holds the apps' data.
+    local_appdata: Option<PathBuf>,
+    scan_by_name: fn(&ScanTarget) -> Vec<Leftover>,
+}
+
+impl StoreEnv<'static> {
+    fn windows() -> Self {
+        StoreEnv {
+            store: &WindowsPackageStore,
+            local_appdata: scanner::env_dir("LOCALAPPDATA"),
+            scan_by_name: |target| scanner::scan(target, false).items,
+        }
+    }
+}
+
+/// The Store apps `uninstall` resolves names against. When Windows cannot
+/// list them the programs still resolve, and the warning says why no app
+/// does.
+fn installed_store_apps(store: &dyn PackageStore, g: &Global) -> Vec<Package> {
+    store.list().unwrap_or_else(|e| {
+        if !g.json {
+            term::warn(&format!("Store apps left out: {e:#}"));
+        }
+        Vec::new()
+    })
+}
+
+/// The app's name in bold, then its version and publisher.
+fn package_head(app: &Package) -> String {
+    let mut extra = vec![app.version.clone()];
+    if let Some(p) = &app.publisher {
+        extra.push(p.clone());
+    }
+    extra.push("Store app".to_string());
+    format!(
+        "{}{}",
+        term::bold(&app.display_name),
+        term::dim(&format!("  {}", extra.join(", ")))
+    )
+}
+
+/// What removing the app does, in the place a program shows its uninstaller.
+fn package_command(app: &Package) -> String {
+    format!("remove package {} for this user", app.full_name)
+}
+
+/// Remove one Store app, then scan and offer to remove its leftovers.
+fn uninstall_package(
+    env: &StoreEnv,
+    app: &Package,
+    keep: bool,
+    levels: &LevelOpts,
+    g: &Global,
+) -> Result<()> {
+    if !g.json {
+        println!("{}", package_head(app));
+        println!("  {}", term::dim(&package_command(app)));
+        println!();
+        println!("{STORE_APP_WARNING}");
+    }
+
+    // No backup of the removal, so Enter means no.
+    if !g.dry_run && !g.confirm("Remove the Store app?", false) {
+        if g.json {
+            let json_out = json!({ "kind": "store", "program": app, "command": package_command(app), "cancelled": true });
+            println!("{}", serde_json::to_string_pretty(&json_out)?);
+        } else {
+            term::info("Cancelled.");
+        }
+        return Ok(());
+    }
+
+    let run = match run_package(env, app, false, keep, levels, g) {
+        Ok(run) => run,
+        Err(e) => {
+            if g.json {
+                let stopped = ProgramRun::stopped_package(app, format!("{e:#}"));
+                println!("{}", serde_json::to_string_pretty(&stopped.json)?);
+            }
+            return Err(e);
+        }
+    };
+    if g.json {
+        println!("{}", serde_json::to_string_pretty(&run.json)?);
+    }
+    if !g.dry_run && !run.gone {
+        bail!("{} is still registered", app.display_name);
+    }
+    Ok(())
+}
+
+/// Remove a confirmed Store app, then scan for and offer to remove what it
+/// left. An app that is `already_gone` goes straight to its leftovers.
+fn run_package(
+    env: &StoreEnv,
+    app: &Package,
+    already_gone: bool,
+    keep: bool,
+    levels: &LevelOpts,
+    g: &Global,
+) -> Result<ProgramRun> {
+    let name = &app.display_name;
+    let mut json_out = json!({ "kind": "store", "program": app, "command": package_command(app) });
+
+    let mut gone = false;
+    if g.dry_run {
+        if !g.json {
+            println!(
+                "{}",
+                term::dim(
+                    "dry run: the app was not removed; Windows deletes its data folder with it"
+                )
+            );
+        }
+    } else if already_gone {
+        if !g.json {
+            println!("{name} is no longer registered, so it was not removed again.");
+        }
+        gone = true;
+        json_out["uninstaller"] = json!("not started, no longer registered");
+        json_out["still_installed"] = json!(false);
+    } else {
+        gone = remove_package(env.store, app)? == RemovalOutcome::Removed;
+        json_out["uninstaller"] = json!("removed by Windows");
+        json_out["still_installed"] = json!(!gone);
+        if !g.json {
+            if gone {
+                println!("{name} is no longer registered.");
+            } else {
+                term::warn(&format!(
+                    "{name} is still registered, although Windows reported it removed."
+                ));
+            }
+        }
+        if gone {
+            let provisioned = may_come_back(env.store, app);
+            json_out["provisioned"] = json!(provisioned);
+            if provisioned && !g.json {
+                println!(
+                    "{}",
+                    term::dim(
+                        "Windows installs this app for new accounts, and a feature update may bring it back."
+                    )
+                );
+            }
+        }
+    }
+
+    // Still registered means its data folder is still in use.
+    let installed = !gone && !g.dry_run;
+    let report = if installed {
+        if !g.json {
+            println!();
+            println!(
+                "{}",
+                term::dim("Leftovers are not looked for while the app is still registered.")
+            );
+        }
+        ScanReport {
+            program_name: name.clone(),
+            installed: true,
+            items: Vec::new(),
+        }
+    } else {
+        // A dry run leaves the data folder out: Windows deletes it with the
+        // app, so it is a leftover only if it outlives the removal.
+        let local = if g.dry_run {
+            None
+        } else {
+            env.local_appdata.as_deref()
+        };
+        let target = scanner::name_target(name, app.publisher.as_deref());
+        let report = ScanReport {
+            program_name: name.clone(),
+            installed: false,
+            items: packages::leftovers(app, local, (env.scan_by_name)(&target)),
+        };
+        if !g.json {
+            render_report(&report);
+        }
+        report
+    };
+    json_out["report"] = json!(report);
+
+    let mut removal = None;
+    if !installed && !report.is_empty() && !keep {
+        removal = remove_from_report(&report, name, levels, g)?;
+        json_out["removal"] = removal_json(&removal);
+    }
+    Ok(ProgramRun {
+        name: name.clone(),
+        json: json_out,
+        gone,
+        found: report.total(),
+        removal,
+        error: None,
+    })
+}
+
+/// Remove a Store app after asking the guard once more against a fresh
+/// listing: a refused app never reaches the removal.
+fn remove_package(store: &dyn PackageStore, app: &Package) -> Result<RemovalOutcome> {
+    let installed = store.list()?;
+    if let Err(reason) = package_guard(app, &installed) {
+        bail!("{}", kept(app, &reason));
+    }
+    store.remove(app)
+}
+
+/// Whether Windows may bring a removed app back: it is provisioned for new
+/// accounts. Reading that can need administrator rights; when it cannot be
+/// read, an app Microsoft publishes counts as one that may.
+fn may_come_back(store: &dyn PackageStore, app: &Package) -> bool {
+    store.is_provisioned(&app.family_name).unwrap_or_else(|_| {
+        app.family_name
+            .to_ascii_lowercase()
+            .ends_with("_8wekyb3d8bbwe")
     })
 }
 
@@ -1423,23 +1783,62 @@ enum Resolve {
     Ambiguous(String),
 }
 
+/// A name `uninstall` acts on: a program or a Store app.
+#[derive(Debug, Clone, Copy)]
+enum Resolved<'a> {
+    Program(&'a Program),
+    Store(&'a Package),
+}
+
 /// Exact id, then exact name, then a unique substring of the name.
 fn resolve_target<'a>(
     programs: &'a [Program],
     target: &str,
 ) -> std::result::Result<&'a Program, Resolve> {
-    if let Some(p) = programs
-        .iter()
-        .find(|p| p.id().eq_ignore_ascii_case(target))
-    {
-        return Ok(p);
+    match resolve_any(programs, &[], target)? {
+        Resolved::Program(p) => Ok(p),
+        // Only reached with Store apps to choose from.
+        Resolved::Store(_) => Err(Resolve::NotFound),
     }
+}
+
+/// Programs and Store apps side by side: an exact id (a program's registry
+/// id; an app's family, full or identity name), then an exact name, then a
+/// unique part of a name. A name both kinds answer to equally well is
+/// ambiguous; neither wins. Store apps signed as part of Windows answer only
+/// to their exact id or name.
+fn resolve_any<'a>(
+    programs: &'a [Program],
+    packages: &'a [Package],
+    target: &str,
+) -> std::result::Result<Resolved<'a>, Resolve> {
+    let program_id = programs
+        .iter()
+        .find(|p| p.id().eq_ignore_ascii_case(target));
+    let app_id = packages.iter().find(|a| {
+        [&a.family_name, &a.full_name, &a.name]
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(target))
+    });
+    match (program_id, app_id) {
+        (Some(p), None) => return Ok(Resolved::Program(p)),
+        (None, Some(a)) => return Ok(Resolved::Store(a)),
+        (Some(p), Some(a)) => return Err(ambiguous(target, &[p], &[a])),
+        (None, None) => {}
+    }
+
     let exact: Vec<&Program> = programs
         .iter()
         .filter(|p| p.display_name.eq_ignore_ascii_case(target))
         .collect();
-    if exact.len() == 1 {
-        return Ok(exact[0]);
+    let exact_apps: Vec<&Package> = packages
+        .iter()
+        .filter(|a| a.display_name.eq_ignore_ascii_case(target))
+        .collect();
+    match (exact.as_slice(), exact_apps.as_slice()) {
+        ([p], []) => return Ok(Resolved::Program(p)),
+        ([], [a]) => return Ok(Resolved::Store(a)),
+        _ => {}
     }
 
     let needle = target.to_lowercase();
@@ -1447,50 +1846,57 @@ fn resolve_target<'a>(
         .iter()
         .filter(|p| p.display_name.to_lowercase().contains(&needle))
         .collect();
-    match subs.len() {
-        0 => Err(Resolve::NotFound),
-        1 => Ok(subs[0]),
-        n => {
-            let listing = subs
-                .iter()
-                .take(12)
-                .map(|p| format!("  {}  {}", p.display_name, term::dim(p.id())))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let more = if n > 12 {
-                format!("\n  and {} more", n - 12)
-            } else {
-                String::new()
-            };
-            Err(Resolve::Ambiguous(format!(
-                "\"{target}\" matches {n} programs:\n{listing}{more}\nUse a longer name or the id on the right."
-            )))
-        }
+    let sub_apps: Vec<&Package> = packages
+        .iter()
+        .filter(|a| {
+            a.signature != SignatureKind::System
+                && [&a.display_name, &a.name]
+                    .iter()
+                    .any(|s| s.to_lowercase().contains(&needle))
+        })
+        .collect();
+    match (subs.as_slice(), sub_apps.as_slice()) {
+        ([], []) => Err(Resolve::NotFound),
+        ([p], []) => Ok(Resolved::Program(p)),
+        ([], [a]) => Ok(Resolved::Store(a)),
+        _ => Err(ambiguous(target, &subs, &sub_apps)),
     }
 }
 
-fn resolve_program<'a>(
-    programs: &'a [Program],
-    packages: &[Package],
-    target: &str,
-) -> Result<&'a Program> {
-    match resolve_target(programs, target) {
-        Ok(p) => Ok(p),
-        Err(Resolve::NotFound) => bail!("{}", not_found(target, packages)),
-        Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
-    }
+/// Every candidate for a name, each with the id that picks it.
+fn ambiguous(target: &str, programs: &[&Program], apps: &[&Package]) -> Resolve {
+    let n = programs.len() + apps.len();
+    let listing = programs
+        .iter()
+        .map(|p| format!("  {}  {}", p.display_name, term::dim(p.id())))
+        .chain(apps.iter().map(|a| {
+            format!(
+                "  {} (Store app)  {}",
+                a.display_name,
+                term::dim(&a.family_name)
+            )
+        }))
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let more = if n > 12 {
+        format!("\n  and {} more", n - 12)
+    } else {
+        String::new()
+    };
+    Resolve::Ambiguous(format!(
+        "\"{target}\" matches {}:\n{listing}{more}\nUse a longer name or the id on the right.",
+        kinds(programs.len(), apps.len())
+    ))
 }
 
-/// Why a name that matches no program cannot be acted on.
-fn not_found(target: &str, packages: &[Package]) -> String {
-    match store_app_named(packages, target) {
-        Some(app) => store_app_refusal(target, app),
-        None => format!("no installed program matches \"{target}\""),
-    }
+/// Why `uninstall` cannot act on a name.
+fn not_found(target: &str) -> String {
+    format!("no installed program or Store app matches \"{target}\"")
 }
 
-/// Store apps are listed but not removed yet, so a name that only a Store
-/// app answers to stops `uninstall` and `scan` before they do anything.
+/// `scan` looks for a program's leftovers; a Store app's are found when
+/// `uninstall` removes it, so a name only an app answers to stops `scan`.
 fn store_app_refusal(target: &str, app: &Package) -> String {
     format!(
         "\"{target}\" is the Store app {}. Store apps can be listed but not removed yet",
@@ -1508,23 +1914,6 @@ fn store_app_named<'a>(packages: &'a [Package], target: &str) -> Option<&'a Pack
             .any(|id| id.eq_ignore_ascii_case(target))
             || p.display_name.to_lowercase().contains(&needle)
     })
-}
-
-/// The Store apps, read only when a name matches no program. Programs win,
-/// so otherwise they are not needed. A listing that fails counts as no apps.
-fn store_apps_if_unmatched(
-    store: &dyn PackageStore,
-    programs: &[Program],
-    targets: &[String],
-) -> Vec<Package> {
-    let unmatched = targets
-        .iter()
-        .any(|t| matches!(resolve_target(programs, t), Err(Resolve::NotFound)));
-    if unmatched {
-        store.list().unwrap_or_default()
-    } else {
-        Vec::new()
-    }
 }
 
 #[cfg(test)]
@@ -1581,11 +1970,15 @@ mod tests {
         targets.iter().map(|t| t.to_string()).collect()
     }
 
-    fn planned_names(batch: &[Planned]) -> Vec<&str> {
-        batch
-            .iter()
-            .map(|b| b.program.display_name.as_str())
-            .collect()
+    fn planned_names(batch: &[Step]) -> Vec<&str> {
+        batch.iter().map(Step::name).collect()
+    }
+
+    fn plan_of(step: &Step) -> &uninstall::UninstallPlan {
+        match step {
+            Step::Program(b) => &b.plan,
+            Step::Store(app) => panic!("{} is a Store app", app.display_name),
+        }
     }
 
     #[test]
@@ -1608,7 +2001,10 @@ mod tests {
             planned_names(&batch),
             ["7-Zip 24.08 (x64)", "Brave", "VLC media player"]
         );
-        assert_eq!(batch[1].plan.argv, [r"C:\Brave\setup.exe", "--uninstall"]);
+        assert_eq!(
+            plan_of(&batch[1]).argv,
+            [r"C:\Brave\setup.exe", "--uninstall"]
+        );
     }
 
     #[test]
@@ -1634,7 +2030,7 @@ mod tests {
         let msg = format!("{err:#}");
         assert!(msg.starts_with("nothing was uninstalled"), "{msg}");
         assert!(
-            msg.contains("no installed program matches \"nosuchapp\""),
+            msg.contains("no installed program or Store app matches \"nosuchapp\""),
             "{msg}"
         );
         assert!(!msg.contains("Brave"), "{msg}");
@@ -1699,16 +2095,19 @@ mod tests {
         programs[0].quiet_uninstall_string =
             Some(r#""C:\Brave\setup.exe" --uninstall --force-uninstall"#.to_string());
         let batch = plan_batch(&programs, &[], &names(&["brave", "vlc"]), true).unwrap();
-        assert_eq!(batch[0].plan.source, "QuietUninstallString");
+        assert_eq!(plan_of(&batch[0]).source, "QuietUninstallString");
         assert_eq!(
-            batch[0].plan.argv.last().map(String::as_str),
+            plan_of(&batch[0]).argv.last().map(String::as_str),
             Some("--force-uninstall")
         );
         // No quiet variant: the normal command, and the plan says so.
-        assert_eq!(batch[1].plan.source, "UninstallString, no quiet variant");
+        assert_eq!(
+            plan_of(&batch[1]).source,
+            "UninstallString, no quiet variant"
+        );
 
         let loud = plan_batch(&programs, &[], &names(&["brave"]), false).unwrap();
-        assert_eq!(loud[0].plan.source, "UninstallString");
+        assert_eq!(plan_of(&loud[0]).source, "UninstallString");
     }
 
     fn run(name: &str, gone: bool, found: usize, removal: Option<DeletionOutcome>) -> ProgramRun {
@@ -1831,59 +2230,157 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn a_name_only_a_store_app_answers_to_uninstalls_nothing() {
-        let programs = installed();
-        let err = resolve_program(&programs, &store_apps(), "calculator").unwrap_err();
-        assert_eq!(
-            format!("{err:#}"),
-            "\"calculator\" is the Store app Windows Calculator. Store apps can be listed but not removed yet"
-        );
-        let family = "Microsoft.WindowsCalculator_8wekyb3d8bbwe";
-        let err = resolve_program(&programs, &store_apps(), family).unwrap_err();
-        assert!(format!("{err:#}").contains("Store apps can be listed but not removed yet"));
+    fn resolved_app<'a>(programs: &'a [Program], apps: &'a [Package], target: &str) -> &'a str {
+        match resolve_any(programs, apps, target) {
+            Ok(Resolved::Store(app)) => &app.family_name,
+            Ok(Resolved::Program(p)) => panic!("{target} resolved to the program {}", p.id()),
+            Err(Resolve::NotFound) => panic!("{target} matched nothing"),
+            Err(Resolve::Ambiguous(msg)) => panic!("{msg}"),
+        }
     }
 
     #[test]
-    fn a_store_app_in_a_batch_stops_the_whole_batch() {
+    fn a_store_app_resolves_by_family_full_identity_or_shown_name() {
         let programs = installed();
+        let apps = store_apps();
+        let family = "Microsoft.WindowsCalculator_8wekyb3d8bbwe";
+        for target in [
+            "calculator",
+            "Windows Calculator",
+            family,
+            "microsoft.windowscalculator_8wekyb3d8bbwe",
+            "Microsoft.WindowsCalculator_1.2.3.0_x64__8wekyb3d8bbwe",
+            "Microsoft.WindowsCalculator",
+        ] {
+            assert_eq!(resolved_app(&programs, &apps, target), family, "{target}");
+        }
+    }
+
+    #[test]
+    fn a_name_both_kinds_answer_to_lists_both_with_their_ids() {
+        let programs = installed();
+        let apps = store_apps();
+        let Err(Resolve::Ambiguous(msg)) = resolve_any(&programs, &apps, "brave") else {
+            panic!("brave is both a program and a Store app");
+        };
+        assert!(
+            msg.starts_with("\"brave\" matches 1 program and 1 Store app:"),
+            "{msg}"
+        );
+        assert!(msg.contains("Brave  BraveSoftware Brave-Browser"), "{msg}");
+        assert!(
+            msg.contains("Brave (Store app)  Vendor.Brave_8wekyb3d8bbwe"),
+            "{msg}"
+        );
+        // Either id picks one.
+        assert!(matches!(
+            resolve_any(&programs, &apps, "BraveSoftware Brave-Browser"),
+            Ok(Resolved::Program(p)) if p.display_name == "Brave"
+        ));
+        assert_eq!(
+            resolved_app(&programs, &apps, "Vendor.Brave_8wekyb3d8bbwe"),
+            "Vendor.Brave_8wekyb3d8bbwe"
+        );
+        // In a batch the ambiguity stops everything.
+        let err = plan_batch(&programs, &apps, &names(&["vlc", "brave"]), false).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("\"brave\" matches 1 program and 1 Store app"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn an_exact_name_beats_a_part_of_another_kinds_name() {
+        let programs = installed();
+        let apps = vec![package("Vendor.Player", "VLC media player Remote")];
+        assert!(matches!(
+            resolve_any(&programs, &apps, "vlc media player"),
+            Ok(Resolved::Program(p)) if p.display_name == "VLC media player"
+        ));
+        assert!(matches!(
+            resolve_any(&programs, &apps, "vlc"),
+            Err(Resolve::Ambiguous(_))
+        ));
+    }
+
+    #[test]
+    fn a_windows_signed_app_answers_only_to_its_exact_name() {
+        let mut shell = package("Vendor.Shell", "Shell Helper");
+        shell.signature = SignatureKind::System;
+        let apps = vec![shell];
+        assert!(matches!(
+            resolve_any(&[], &apps, "helper"),
+            Err(Resolve::NotFound)
+        ));
+        assert!(matches!(
+            resolve_any(&[], &apps, "shell helper"),
+            Ok(Resolved::Store(_))
+        ));
+    }
+
+    #[test]
+    fn a_batch_mixes_programs_and_store_apps_in_the_order_given() {
+        let programs = installed();
+        let apps = store_apps();
+        let batch = plan_batch(
+            &programs,
+            &apps,
+            &names(&["vlc", "calculator", "7-zip", "Windows Calculator"]),
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            planned_names(&batch),
+            [
+                "VLC media player",
+                "Windows Calculator",
+                "7-Zip 24.08 (x64)"
+            ]
+        );
+        assert!(matches!(&batch[1], Step::Store(app) if app.name == "Microsoft.WindowsCalculator"));
+        assert_eq!(plan_of(&batch[2]).argv, [r"C:\7-Zip\Uninstall.exe"]);
+    }
+
+    #[test]
+    fn a_store_app_the_guard_keeps_stops_the_whole_batch() {
+        let programs = installed();
+        let engine = package("Vendor.Engine", "Engine");
+        let mut studio = package("Vendor.Studio", "Studio");
+        studio.dependencies = vec![engine.family_name.clone()];
+        let apps = vec![
+            engine,
+            studio,
+            package("Microsoft.WindowsStore", "Microsoft Store"),
+        ];
         let err = plan_batch(
             &programs,
-            &store_apps(),
-            &names(&["vlc", "calculator", "nosuchapp"]),
+            &apps,
+            &names(&["vlc", "engine", "microsoft store", "nosuchapp"]),
             false,
         )
         .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.starts_with("nothing was uninstalled"), "{msg}");
+        assert!(msg.contains("Engine stays: Studio depends on it"), "{msg}");
         assert!(
-            msg.contains("\"calculator\" is the Store app Windows Calculator. Store apps can be listed but not removed yet"),
+            msg.contains("Microsoft Store stays: a Windows component Oxidize keeps"),
             "{msg}"
         );
         assert!(
-            msg.contains("no installed program matches \"nosuchapp\""),
+            msg.contains("no installed program or Store app matches \"nosuchapp\""),
             "{msg}"
         );
+        // The dependent itself may go.
+        let batch = plan_batch(&programs, &apps, &names(&["studio"]), false).unwrap();
+        assert_eq!(planned_names(&batch), ["Studio"]);
     }
 
     #[test]
-    fn a_program_wins_over_a_store_app_of_the_same_name() {
-        let programs = installed();
-        let program = resolve_program(&programs, &store_apps(), "brave").unwrap();
-        assert_eq!(program.id(), "BraveSoftware Brave-Browser");
-        let batch = plan_batch(&programs, &store_apps(), &names(&["brave"]), false).unwrap();
-        assert_eq!(planned_names(&batch), ["Brave"]);
-    }
-
-    #[test]
-    fn store_apps_are_read_only_for_a_name_no_program_matches() {
-        let programs = installed();
-        let store = FakePackageStore::new(store_apps());
-        assert!(store_apps_if_unmatched(&store, &programs, &names(&["brave", "vlc"])).is_empty());
-        assert_eq!(
-            store_apps_if_unmatched(&store, &programs, &names(&["brave", "calculator"])).len(),
-            2
-        );
+    fn counts_name_both_kinds() {
+        assert_eq!(kinds(1, 0), "1 program");
+        assert_eq!(kinds(3, 0), "3 programs");
+        assert_eq!(kinds(0, 1), "1 Store app");
+        assert_eq!(kinds(2, 2), "2 programs and 2 Store apps");
     }
 
     fn row_names(rows: &[Listed]) -> Vec<&str> {
