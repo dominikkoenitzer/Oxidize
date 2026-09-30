@@ -6,6 +6,7 @@ pub mod commands;
 pub mod hunter;
 pub mod model;
 pub mod orphans;
+pub mod packages;
 pub mod registry;
 pub mod restore;
 pub mod safety;
