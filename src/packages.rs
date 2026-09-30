@@ -52,13 +52,15 @@ fn read_package(p: &appx::Package) -> Result<Package> {
     let id = p.Id()?;
     let name = id.Name()?.to_string();
     let version = id.Version()?;
+    let family_name = id.FamilyName()?.to_string();
     let dependencies = p
         .Dependencies()?
         .into_iter()
         .map(|d| Ok(d.Id()?.FamilyName()?.to_string()))
         .collect::<Result<Vec<_>>>()?;
     Ok(Package {
-        family_name: id.FamilyName()?.to_string(),
+        dependencies: other_families(&family_name, dependencies),
+        family_name,
         full_name: id.FullName()?.to_string(),
         display_name: text(p.DisplayName()).unwrap_or_else(|| name.clone()),
         name,
@@ -81,8 +83,21 @@ fn read_package(p: &appx::Package) -> Result<Package> {
             .InstalledDate()
             .ok()
             .and_then(|d| date_from_ticks(d.UniversalTime)),
-        dependencies,
     })
+}
+
+/// Windows counts an app's own resource packages among its dependencies, and
+/// they share its family name. Keep the other families, each once.
+fn other_families(own: &str, dependencies: Vec<String>) -> Vec<String> {
+    let mut families: Vec<String> = Vec::with_capacity(dependencies.len());
+    for family in dependencies {
+        let seen = family.eq_ignore_ascii_case(own)
+            || families.iter().any(|f| f.eq_ignore_ascii_case(&family));
+        if !seen {
+            families.push(family);
+        }
+    }
+    families
 }
 
 /// A string property, `None` when it is empty or cannot be read.
@@ -171,6 +186,26 @@ mod tests {
         let noon = (1_710_504_000 + 11_644_473_600) * 10_000_000;
         assert_eq!(date_from_ticks(noon).as_deref(), Some("2024-03-15"));
         assert_eq!(date_from_ticks(0), None);
+    }
+
+    #[test]
+    fn an_apps_own_resource_packages_are_not_its_dependencies() {
+        let deps = [
+            "Microsoft.UI.Xaml.2.8_8wekyb3d8bbwe",
+            "Vendor.Notes_8wekyb3d8bbwe",
+            "Microsoft.VCLibs.140.00_8wekyb3d8bbwe",
+            "vendor.notes_8wekyb3d8bbwe",
+            "Microsoft.UI.Xaml.2.8_8wekyb3d8bbwe",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            other_families("Vendor.Notes_8wekyb3d8bbwe", deps),
+            [
+                "Microsoft.UI.Xaml.2.8_8wekyb3d8bbwe",
+                "Microsoft.VCLibs.140.00_8wekyb3d8bbwe"
+            ]
+        );
     }
 
     #[test]
