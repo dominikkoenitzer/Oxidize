@@ -1,7 +1,10 @@
 //! Store apps: the MSIX and AppX packages registered for the current user.
 //! Oxidize lists them; nothing here removes one.
 
+use std::fmt;
+
 use anyhow::{Context, Result};
+use serde::{Serialize, Serializer};
 use windows::core::HSTRING;
 use windows::ApplicationModel::{self as appx, PackageSignatureKind};
 use windows::Management::Deployment::{PackageManager, PackageTypes};
@@ -134,6 +137,105 @@ fn date_from_ticks(ticks: i64) -> Option<String> {
     )
 }
 
+/// Why a package must stay. The text is what the list shows next to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refusal {
+    /// Signed as part of Windows.
+    System,
+    Framework,
+    Resource,
+    Bundle,
+    /// A sparse package: the identity of a normal program.
+    Sparse,
+    /// On the list of packages Windows or the Store relies on.
+    Essential,
+    /// Another installed package, named here, depends on it.
+    RequiredBy(String),
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::System => f.write_str("part of Windows"),
+            Refusal::Framework => f.write_str("a framework other apps run on"),
+            Refusal::Resource => f.write_str("a resource package of another app"),
+            Refusal::Bundle => f.write_str("a bundle, not an app"),
+            Refusal::Sparse => f.write_str("belongs to a program; uninstall the program instead"),
+            Refusal::Essential => f.write_str("Windows or the Store relies on it"),
+            Refusal::RequiredBy(name) => write!(f, "{name} depends on it"),
+        }
+    }
+}
+
+impl Serialize for Refusal {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+/// Identity names of packages Windows or the Store relies on even though
+/// they are not signed as part of Windows.
+const ESSENTIAL_NAMES: [&str; 4] = [
+    "Microsoft.WindowsStore",
+    "Microsoft.DesktopAppInstaller",
+    "Microsoft.StorePurchaseApp",
+    "Microsoft.SecHealthUI",
+];
+
+/// Name prefixes of Windows components and of the runtimes apps run on.
+const ESSENTIAL_PREFIXES: [&str; 6] = [
+    "Microsoft.Windows.",
+    "MicrosoftWindows.",
+    "Microsoft.VCLibs",
+    "Microsoft.UI.Xaml",
+    "Microsoft.NET.Native",
+    "Microsoft.WindowsAppRuntime",
+];
+
+fn is_essential(name: &str) -> bool {
+    ESSENTIAL_NAMES.iter().any(|n| n.eq_ignore_ascii_case(name))
+        || ESSENTIAL_PREFIXES.iter().any(|prefix| {
+            name.get(..prefix.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        })
+}
+
+/// Whether Oxidize may ever remove `package`. `installed` is every package
+/// listed with it, so one that another depends on stays. Pure: it decides
+/// from the fields alone and asks Windows nothing.
+pub fn package_guard(package: &Package, installed: &[Package]) -> Result<(), Refusal> {
+    if package.signature == SignatureKind::System {
+        return Err(Refusal::System);
+    }
+    if package.is_framework {
+        return Err(Refusal::Framework);
+    }
+    if package.is_resource {
+        return Err(Refusal::Resource);
+    }
+    if package.is_bundle {
+        return Err(Refusal::Bundle);
+    }
+    if package.is_sparse {
+        return Err(Refusal::Sparse);
+    }
+    if is_essential(&package.name) {
+        return Err(Refusal::Essential);
+    }
+    let family = &package.family_name;
+    let dependent = installed.iter().find(|other| {
+        !other.family_name.eq_ignore_ascii_case(family)
+            && other
+                .dependencies
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(family))
+    });
+    match dependent {
+        Some(other) => Err(Refusal::RequiredBy(other.display_name.clone())),
+        None => Ok(()),
+    }
+}
+
 /// A fixed list of packages standing in for Windows.
 #[cfg(test)]
 pub(crate) mod fake {
@@ -179,6 +281,133 @@ pub(crate) mod fake {
 mod tests {
     use super::fake::{package, FakePackageStore};
     use super::*;
+
+    fn refusal(package: &Package) -> Option<Refusal> {
+        package_guard(package, std::slice::from_ref(package)).err()
+    }
+
+    #[test]
+    fn an_ordinary_store_app_may_go() {
+        assert_eq!(refusal(&package("Vendor.Notes", "Notes")), None);
+        let mut sideloaded = package("Vendor.Notes", "Notes");
+        sideloaded.signature = SignatureKind::Developer;
+        assert_eq!(refusal(&sideloaded), None);
+    }
+
+    #[test]
+    fn a_package_signed_as_part_of_windows_stays() {
+        let mut p = package("Vendor.Notes", "Notes");
+        p.signature = SignatureKind::System;
+        assert_eq!(refusal(&p), Some(Refusal::System));
+    }
+
+    #[test]
+    fn frameworks_resources_and_bundles_stay() {
+        let mut framework = package("Vendor.Runtime", "Runtime");
+        framework.is_framework = true;
+        assert_eq!(refusal(&framework), Some(Refusal::Framework));
+
+        let mut resource = package("Vendor.Notes", "Notes");
+        resource.is_resource = true;
+        assert_eq!(refusal(&resource), Some(Refusal::Resource));
+
+        let mut bundle = package("Vendor.Notes", "Notes");
+        bundle.is_bundle = true;
+        assert_eq!(refusal(&bundle), Some(Refusal::Bundle));
+    }
+
+    #[test]
+    fn a_sparse_package_points_to_its_program() {
+        let mut p = package("Vendor.Editor", "Editor");
+        p.is_sparse = true;
+        assert_eq!(refusal(&p), Some(Refusal::Sparse));
+        assert!(Refusal::Sparse
+            .to_string()
+            .contains("uninstall the program instead"));
+    }
+
+    #[test]
+    fn the_store_and_its_helpers_stay() {
+        for name in [
+            "Microsoft.WindowsStore",
+            "Microsoft.DesktopAppInstaller",
+            "Microsoft.StorePurchaseApp",
+            "Microsoft.SecHealthUI",
+            "microsoft.windowsstore",
+        ] {
+            assert_eq!(
+                refusal(&package(name, name)),
+                Some(Refusal::Essential),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_components_and_runtimes_stay_by_name_prefix() {
+        for name in [
+            "Microsoft.Windows.Photos",
+            "MicrosoftWindows.Client.WebExperience",
+            "Microsoft.VCLibs.140.00.UWPDesktop",
+            "Microsoft.UI.Xaml.2.8",
+            "Microsoft.NET.Native.Framework.2.2",
+            "Microsoft.WindowsAppRuntime.1.8",
+            "MICROSOFT.VCLIBS.140.00",
+        ] {
+            assert_eq!(
+                refusal(&package(name, name)),
+                Some(Refusal::Essential),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_only_starts_like_a_listed_one_may_go() {
+        // `Microsoft.Windows.` needs its dot; the four names match whole.
+        for name in [
+            "Microsoft.WindowsCalculator",
+            "Microsoft.WindowsStoreCompanion",
+            "Microsoft.Win",
+        ] {
+            assert_eq!(refusal(&package(name, name)), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_package_another_one_depends_on_stays() {
+        let base = package("Vendor.Engine", "Engine");
+        let mut app = package("Vendor.Studio", "Studio");
+        app.dependencies = vec!["vendor.engine_8wekyb3d8bbwe".to_string()];
+        let installed = [base.clone(), app.clone()];
+        assert_eq!(
+            package_guard(&base, &installed),
+            Err(Refusal::RequiredBy("Studio".to_string()))
+        );
+        assert_eq!(
+            Refusal::RequiredBy("Studio".to_string()).to_string(),
+            "Studio depends on it"
+        );
+        // The dependent itself may go, and so may the base once nothing
+        // installed depends on it.
+        assert_eq!(package_guard(&app, &installed), Ok(()));
+        assert_eq!(package_guard(&base, std::slice::from_ref(&base)), Ok(()));
+    }
+
+    #[test]
+    fn depending_on_its_own_family_protects_nothing() {
+        let mut p = package("Vendor.Notes", "Notes");
+        p.dependencies = vec![p.family_name.clone()];
+        assert_eq!(refusal(&p), None);
+    }
+
+    #[test]
+    fn a_refusal_serializes_as_its_reason() {
+        assert_eq!(
+            serde_json::to_value(Refusal::System).unwrap(),
+            "part of Windows"
+        );
+    }
 
     #[test]
     fn a_winrt_date_becomes_a_calendar_day() {
