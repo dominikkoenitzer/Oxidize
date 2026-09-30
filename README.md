@@ -109,8 +109,10 @@ cargo fmt --check
 ```
 
 The engine is a library (`src/lib.rs`); `src/main.rs` and
-`src/bin/oxidize-gui.rs` are the two front-ends. Nothing deletes anything
-except `safety::remove_leftovers`.
+`src/bin/oxidize-gui.rs` are the two front-ends. Leftovers are only ever
+deleted through `safety::remove_leftovers`; the one other destructive call is
+the Store-app removal in `packages.rs`, which Windows carries out and which
+runs only after the guard allows it.
 
 ## License
 
