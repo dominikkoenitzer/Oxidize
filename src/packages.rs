@@ -3,6 +3,7 @@
 //! every user and never from the image new accounts are set up from.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 use serde::{Serialize, Serializer};
@@ -10,7 +11,8 @@ use windows::core::HSTRING;
 use windows::ApplicationModel::{self as appx, PackageSignatureKind};
 use windows::Management::Deployment::{PackageManager, PackageTypes};
 
-use crate::model::{Package, SignatureKind};
+use crate::model::{Confidence, Leftover, LeftoverKind, Package, SignatureKind};
+use crate::scanner;
 
 /// Where the installed packages come from: Windows, or a fixed list in tests.
 pub trait PackageStore {
@@ -299,6 +301,89 @@ pub fn package_guard(package: &Package, installed: &[Package]) -> Result<(), Ref
         Some(other) => Err(Refusal::RequiredBy(other.display_name.clone())),
         None => Ok(()),
     }
+}
+
+/// Whether `name` has the shape of a package family name: an identity name
+/// of letters, digits, dots and dashes, an underscore, then the 13-character
+/// publisher id. Nothing else may become a folder name below `Packages`.
+fn is_family_name(name: &str) -> bool {
+    let Some((identity, publisher_id)) = name.rsplit_once('_') else {
+        return false;
+    };
+    let identity_ok = identity
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        && identity.chars().any(|c| c.is_ascii_alphanumeric());
+    let publisher_ok = publisher_id.len() == 13
+        && publisher_id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    identity_ok && publisher_ok
+}
+
+/// The app's data folder, `<local_appdata>\Packages\<family name>`, when it
+/// is still there: a real folder exactly one level below `Packages`, never a
+/// link, and only for a name with the family-name shape.
+pub fn data_folder(local_appdata: &Path, family_name: &str) -> Option<PathBuf> {
+    if !is_family_name(family_name) {
+        return None;
+    }
+    let packages = local_appdata.join("Packages");
+    let folder = packages.join(family_name);
+    if folder.parent() != Some(packages.as_path()) {
+        return None;
+    }
+    let meta = std::fs::symlink_metadata(&folder).ok()?;
+    (meta.is_dir() && !meta.file_type().is_symlink()).then_some(folder)
+}
+
+/// Where Windows keeps what belongs to its packages: the `WindowsApps`
+/// folders and aliases, every `Packages` folder, the AppModel and
+/// AppContainer registry. A scan by name never reports anything there.
+fn is_package_managed(leftover: &Leftover) -> bool {
+    let path = leftover.path.to_lowercase().replace('/', "\\");
+    let in_folder = path
+        .split('\\')
+        .any(|part| part == "windowsapps" || part == "packages");
+    let registry = [leftover.subpath.as_deref(), Some(path.as_str())]
+        .into_iter()
+        .flatten()
+        .map(str::to_lowercase)
+        .any(|p| p.contains("appmodel") || p.contains("appcontainer"));
+    in_folder || registry
+}
+
+/// What a removed Store app left: its data folder under `local_appdata`
+/// (High), then what a scan by name found elsewhere, never above Medium and
+/// never in a place Windows manages for its packages.
+pub fn leftovers(
+    package: &Package,
+    local_appdata: Option<&Path>,
+    by_name: Vec<Leftover>,
+) -> Vec<Leftover> {
+    let mut items = Vec::new();
+    if let Some(folder) = local_appdata.and_then(|dir| data_folder(dir, &package.family_name)) {
+        let size = scanner::dir_size(&folder);
+        let empty = scanner::is_dir_empty(&folder);
+        items.push(Leftover::fs(
+            LeftoverKind::Directory,
+            folder,
+            Confidence::High,
+            "the app's data folder, still there after removal",
+            Some(size),
+            empty,
+        ));
+    }
+    items.extend(
+        by_name
+            .into_iter()
+            .filter(|l| !is_package_managed(l))
+            .map(|mut l| {
+                l.confidence = l.confidence.max(Confidence::Medium);
+                l
+            }),
+    );
+    items
 }
 
 /// A fixed list of packages standing in for Windows.
@@ -603,5 +688,134 @@ mod tests {
         let err = failing.remove(&notes).unwrap_err();
         assert!(format!("{err:#}").contains("0x80073CF1"));
         assert!(failing.is_registered(&notes.family_name).unwrap());
+    }
+
+    /// An empty `Packages` folder below a fresh folder standing in for
+    /// `%LOCALAPPDATA%`.
+    fn local_appdata(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("oxidize_package_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Packages")).unwrap();
+        dir
+    }
+
+    #[test]
+    fn only_a_family_name_shape_names_a_data_folder() {
+        for good in [
+            "Vendor.Notes_8wekyb3d8bbwe",
+            "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
+            "5319275A.WhatsAppDesktop_cv1g1gvanyjgm",
+            "Vendor-App_0123456789abc",
+        ] {
+            assert!(is_family_name(good), "{good}");
+        }
+        for bad in [
+            "",
+            "Vendor.Notes",
+            "Vendor.Notes_",
+            "_8wekyb3d8bbwe",
+            "Vendor.Notes_8wekyb3d8bbw",
+            "Vendor.Notes_8wekyb3d8bbwee",
+            "Vendor.Notes_8WEKYB3D8BBWE",
+            r"..\..\Windows_8wekyb3d8bbwe",
+            r"Vendor\Notes_8wekyb3d8bbwe",
+            "Vendor/Notes_8wekyb3d8bbwe",
+            ".._8wekyb3d8bbwe",
+            "C:_8wekyb3d8bbwe",
+            "Vendor Notes_8wekyb3d8bbwe",
+        ] {
+            assert!(!is_family_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_data_folder_is_a_real_folder_one_level_below_packages() {
+        let local = local_appdata("data_folder");
+        let family = "Vendor.Notes_8wekyb3d8bbwe";
+        assert_eq!(data_folder(&local, family), None, "not there");
+        std::fs::create_dir_all(local.join("Packages").join(family).join("LocalState")).unwrap();
+        assert_eq!(
+            data_folder(&local, family),
+            Some(local.join("Packages").join(family))
+        );
+        // A file is not a data folder, and a crafted name never leaves
+        // Packages.
+        std::fs::write(
+            local.join("Packages").join("Vendor.File_8wekyb3d8bbwe"),
+            b"x",
+        )
+        .unwrap();
+        assert_eq!(data_folder(&local, "Vendor.File_8wekyb3d8bbwe"), None);
+        assert_eq!(data_folder(&local, r"..\Packages_8wekyb3d8bbwe"), None);
+        assert_eq!(data_folder(&local, "Packages"), None);
+        assert_eq!(data_folder(&local, ""), None);
+        let _ = std::fs::remove_dir_all(&local);
+    }
+
+    fn found(path: &str, confidence: Confidence) -> Leftover {
+        Leftover::fs(
+            LeftoverKind::Directory,
+            PathBuf::from(path),
+            confidence,
+            "name match",
+            Some(0),
+            true,
+        )
+    }
+
+    #[test]
+    fn leftovers_are_the_data_folder_then_name_matches_capped_at_medium() {
+        let local = local_appdata("leftovers");
+        let notes = package("Vendor.Notes", "Notes");
+        let folder = local.join("Packages").join(&notes.family_name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("settings.dat"), b"12345").unwrap();
+        let by_name = vec![
+            found(r"C:\Users\x\AppData\Roaming\Notes", Confidence::High),
+            found(r"C:\ProgramData\Notes", Confidence::Low),
+            found(
+                r"C:\Program Files\WindowsApps\Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe",
+                Confidence::High,
+            ),
+            found(
+                r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\notes.exe",
+                Confidence::High,
+            ),
+            found(
+                r"C:\Users\x\AppData\Local\Packages\Vendor.Other_8wekyb3d8bbwe",
+                Confidence::High,
+            ),
+            Leftover::reg_key(
+                crate::model::Hive::CurrentUser,
+                r"Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Families\Vendor.Notes_8wekyb3d8bbwe",
+                Confidence::High,
+                "name match",
+            ),
+        ];
+        let items = leftovers(&notes, Some(&local), by_name);
+        let summary: Vec<(String, Confidence)> = items
+            .iter()
+            .map(|l| (l.path.clone(), l.confidence))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                (folder.display().to_string(), Confidence::High),
+                (
+                    r"C:\Users\x\AppData\Roaming\Notes".to_string(),
+                    Confidence::Medium
+                ),
+                (r"C:\ProgramData\Notes".to_string(), Confidence::Low),
+            ]
+        );
+        assert_eq!(items[0].size_bytes, Some(5));
+        assert_eq!(items[0].kind, LeftoverKind::Directory);
+
+        // Gone with the package: nothing of it is reported.
+        std::fs::remove_dir_all(&folder).unwrap();
+        assert!(leftovers(&notes, Some(&local), Vec::new()).is_empty());
+        assert!(leftovers(&notes, None, Vec::new()).is_empty());
+        let _ = std::fs::remove_dir_all(&local);
     }
 }
