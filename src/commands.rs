@@ -491,7 +491,7 @@ fn uninstall_batch(batch: &[Planned], keep: bool, levels: &LevelOpts, g: &Global
         if g.json {
             let programs: Vec<_> = batch
                 .iter()
-                .map(|b| json!({ "program": b.program, "command": b.plan.display(), "cancelled": true }))
+                .map(|b| json!({ "kind": "program", "program": b.program, "command": b.plan.display(), "cancelled": true }))
                 .collect();
             println!(
                 "{}",
@@ -632,8 +632,7 @@ fn uninstall_program(
 
     if !g.dry_run && !g.confirm("Run the uninstaller?", true) {
         if g.json {
-            let json_out =
-                json!({ "program": program, "command": plan.display(), "cancelled": true });
+            let json_out = json!({ "kind": "program", "program": program, "command": plan.display(), "cancelled": true });
             println!("{}", serde_json::to_string_pretty(&json_out)?);
         } else {
             term::info("Cancelled.");
@@ -682,7 +681,7 @@ impl ProgramRun {
     fn stopped(program: &Program, plan: &uninstall::UninstallPlan, error: String) -> Self {
         ProgramRun {
             name: program.display_name.clone(),
-            json: json!({ "program": program, "command": plan.display(), "error": error }),
+            json: json!({ "kind": "program", "program": program, "command": plan.display(), "error": error }),
             gone: false,
             found: 0,
             removal: None,
@@ -750,7 +749,7 @@ fn run_uninstall(
     g: &Global,
 ) -> Result<ProgramRun> {
     let name = &program.display_name;
-    let mut json_out = json!({ "program": program, "command": plan.display() });
+    let mut json_out = json!({ "kind": "program", "program": program, "command": plan.display() });
 
     let mut gone = false;
     if g.dry_run {
@@ -1756,6 +1755,7 @@ mod tests {
         assert_eq!(stopped.state(false), "failed");
         assert_eq!(stopped.leftovers(false), "boom");
         assert_eq!(stopped.json["error"], "boom");
+        assert_eq!(stopped.json["kind"], "program");
         // A dry run never ran anything, so still registered is expected.
         assert!(!run("A", false, 3, None).failed(true));
     }
