@@ -502,6 +502,13 @@ pub struct ScanTarget {
     pub publisher_tokens: Vec<String>,
     /// The Uninstall subkey and its source. `None` for name-only targets.
     pub registry: Option<(String, RegistrySource)>,
+    /// More names that are the product exactly, normalised like the display
+    /// name: a Store app's package identity.
+    pub exact_names: Vec<String>,
+    /// Whether one word of the name can match on its own. A program is mostly
+    /// listed under its brand; a Store app often under a description ("Game
+    /// Speech Window") whose words belong to everyone.
+    pub lone_words_match: bool,
 }
 
 #[cfg(test)]
