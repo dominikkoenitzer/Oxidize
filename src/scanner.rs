@@ -304,17 +304,7 @@ pub fn name_only_target(name: &str, publisher: Option<&str>) -> ScanTarget {
 /// Identity from a display name and publisher.
 pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
     let publisher_tokens = publisher.map(significant_tokens).unwrap_or_default();
-    let mut name_tokens = significant_tokens(name);
-    // "Mozilla Thunderbird" by Mozilla: the vendor word is not the product.
-    // Drop it from the product tokens as long as something else remains.
-    let without_vendor: Vec<String> = name_tokens
-        .iter()
-        .filter(|t| !publisher_tokens.contains(t))
-        .cloned()
-        .collect();
-    if !without_vendor.is_empty() {
-        name_tokens = without_vendor;
-    }
+    let name_tokens = product_tokens(name, &publisher_tokens);
     let mut target = ScanTarget {
         vendor_is_shared: false,
         display_name: name.to_string(),
@@ -337,6 +327,23 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         }
     }
     target
+}
+
+/// The words of a product's name that say which product it is. "Mozilla
+/// Thunderbird" by Mozilla: the vendor word is not the product, so it is
+/// dropped as long as something else remains.
+fn product_tokens(name: &str, publisher_tokens: &[String]) -> Vec<String> {
+    let tokens = significant_tokens(name);
+    let without_vendor: Vec<String> = tokens
+        .iter()
+        .filter(|t| !publisher_tokens.contains(t))
+        .cloned()
+        .collect();
+    if without_vendor.is_empty() {
+        tokens
+    } else {
+        without_vendor
+    }
 }
 
 /// Does the product's name boil down to the vendor's own word, with other
@@ -452,10 +459,14 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     }
     // One word of a two-word name is half of it, so it claims only a name
     // made of the product's and the vendor's words: "Wallpaper" for
-    // "Wallpaper Engine", never `docker-secrets-engine`.
+    // "Wallpaper Engine", never `docker-secrets-engine`. The name's own words
+    // decide, not the install folder's: "NVIDIA App" installed in
+    // `Installer2\Display.NvApp.{GUID}` is still a one-word name.
     let own_word =
         |w: &String| target.name_tokens.contains(w) || target.publisher_tokens.contains(w);
-    if target.name_tokens.len() >= 2 && !candidate.iter().all(own_word) {
+    if product_tokens(&target.display_name, &target.publisher_tokens).len() >= 2
+        && !candidate.iter().all(own_word)
+    {
         return None;
     }
     if let Some(hit) = target
@@ -1647,6 +1658,21 @@ mod tests {
             score_product("Wallpaper", &engine),
             Some((Confidence::Medium, _))
         ));
+
+        // A one-word name stays one, whatever words its install folder adds:
+        // NVIDIA App's own self-update task still is its.
+        let mut nvapp = registered(
+            "NVIDIA App 11.0.9.251",
+            Some(
+                r"C:\Program Files\NVIDIA Corporation\Installer2\Display.NvApp.{EAB5A4EC-3E37-4254-9510-236A9B8FF631}",
+            ),
+            None,
+            None,
+        );
+        nvapp.publisher = Some("NVIDIA Corporation".to_string());
+        let nvapp = build_target(&nvapp);
+        assert!(nvapp.name_tokens.len() > 1, "{:?}", nvapp.name_tokens);
+        assert!(score_product("NVIDIA App SelfUpdate_", &nvapp).is_some());
 
         // The firewall rules for Python 3.13's `python.exe` are not the
         // launcher's, by their name or by their path.
