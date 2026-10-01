@@ -1503,4 +1503,125 @@ mod tests {
             &t
         ));
     }
+
+    /// The Store app Windows lists as "Game Speech Window", package
+    /// `Microsoft.XboxSpeechToTextOverlay`.
+    fn game_speech_window() -> ScanTarget {
+        let mut app = crate::packages::fake::package(
+            "Microsoft.XboxSpeechToTextOverlay",
+            "Game Speech Window",
+        );
+        app.publisher = Some("Microsoft Corporation".to_string());
+        crate::packages::scan_target(&app)
+    }
+
+    #[test]
+    fn one_word_of_a_store_apps_name_matches_nothing() {
+        let t = game_speech_window();
+        assert_eq!(t.name_tokens, ["game", "speech", "window"]);
+
+        // `AppData\Local\speech` holds Windows' speech data.
+        assert!(score_product("speech", &t).is_none());
+        assert!(!is_exact_product("speech", &t));
+        // Warframe's firewall rules, by their name and by their program.
+        for rule in [
+            "Warframe Epic Game 64-bit (TCP-In)",
+            "Warframe Epic Game 64-bit (TCP-Out)",
+        ] {
+            assert!(match_exe_item(rule, None, &t).is_none(), "{rule}");
+        }
+        assert!(!path_names_product(
+            Path::new(r"C:\Program Files\Epic Games\Warframe\Downloaded\Warframe.x64.exe"),
+            &t
+        ));
+        for other in ["Game", "Games", "Window", "Speech Recognition", "Game Bar"] {
+            assert!(score_product(other, &t).is_none(), "{other}");
+        }
+
+        // A program of that name keeps its rule: one word is plausible.
+        let program = name_target("Game Speech Window", Some("Microsoft Corporation"));
+        assert!(matches!(
+            score_product("speech", &program),
+            Some((Confidence::Medium, _))
+        ));
+    }
+
+    #[test]
+    fn a_store_app_is_found_by_its_package_identity_or_whole_name() {
+        let t = game_speech_window();
+        for name in [
+            "XboxSpeechToTextOverlay",
+            "Microsoft.XboxSpeechToTextOverlay",
+            "Microsoft.XboxSpeechToTextOverlay_8wekyb3d8bbwe",
+            "Game Speech Window",
+            "GameSpeechWindow",
+            "Game Speech Window Cache",
+        ] {
+            assert!(
+                matches!(score_product(name, &t), Some((Confidence::High, _))),
+                "{name}"
+            );
+        }
+
+        // One word of the identity is no name either: `ohmyposh.cli` does not
+        // claim a folder "cli", but its shown name still claims `oh-my-posh`.
+        let mut posh = crate::packages::fake::package("ohmyposh.cli", "Oh My Posh");
+        posh.publisher = Some("Jan Joris De Dobbeleer".to_string());
+        let posh = crate::packages::scan_target(&posh);
+        assert!(score_product("cli", &posh).is_none());
+        assert!(matches!(
+            score_product("oh-my-posh", &posh),
+            Some((Confidence::High, _))
+        ));
+
+        // A one-word shown name claims the folder of that name, not every
+        // folder that has the word in it.
+        let terminal = crate::packages::scan_target(&crate::packages::fake::package(
+            "Microsoft.WindowsTerminal",
+            "Windows Terminal",
+        ));
+        assert_eq!(terminal.name_tokens, ["terminal"]);
+        for name in ["Windows Terminal", "WindowsTerminal"] {
+            assert!(
+                matches!(score_product(name, &terminal), Some((Confidence::High, _))),
+                "{name}"
+            );
+        }
+        for name in ["Terminal", "Terminal Icons"] {
+            assert!(score_product(name, &terminal).is_none(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_store_apps_folders_are_found_by_identity_not_by_one_word() {
+        let root =
+            std::env::temp_dir().join(format!("oxidize_store_scan_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for folder in [
+            "speech",
+            "Games",
+            "XboxSpeechToTextOverlay",
+            "Game Speech Window",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &game_speech_window(), &[], &mut out);
+        let mut found: Vec<String> = out
+            .iter()
+            .map(|l| {
+                Path::new(&l.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        found.sort();
+        assert_eq!(found, ["Game Speech Window", "XboxSpeechToTextOverlay"]);
+        assert!(out.iter().all(|l| l.confidence == Confidence::High));
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

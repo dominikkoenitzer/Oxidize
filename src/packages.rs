@@ -870,4 +870,45 @@ mod tests {
         assert!(leftovers(&notes, None, Vec::new()).is_empty());
         let _ = std::fs::remove_dir_all(&local);
     }
+
+    #[test]
+    fn a_package_name_is_counted_in_the_words_it_runs_together() {
+        for (name, words) in [
+            ("XboxSpeechToTextOverlay", 5),
+            ("Microsoft.XboxSpeechToTextOverlay", 6),
+            ("TranslucentTB", 2),
+            ("MSTeams", 2),
+            ("OMENLightStudio", 3),
+            ("AV1VideoExtension", 4),
+            ("cli", 1),
+            ("Claude", 1),
+            ("", 0),
+        ] {
+            assert_eq!(word_count(name), words, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_store_apps_target_knows_its_package_identity() {
+        let mut app = package("Microsoft.XboxSpeechToTextOverlay", "Game Speech Window");
+        app.publisher = Some("Microsoft Corporation".to_string());
+        let target = scan_target(&app);
+        assert!(!target.lone_words_match);
+        assert_eq!(target.display_name, "Game Speech Window");
+        assert_eq!(
+            target.exact_names,
+            [
+                "microsoftxboxspeechtotextoverlay",
+                "xboxspeechtotextoverlay",
+                "microsoftxboxspeechtotextoverlay8wekyb3d8bbwe",
+            ]
+        );
+
+        // A one-word identity name adds nothing, its family name does.
+        let posh = scan_target(&package("ohmyposh.cli", "Oh My Posh"));
+        assert_eq!(
+            posh.exact_names,
+            ["ohmyposhcli", "ohmyposhcli8wekyb3d8bbwe"]
+        );
+    }
 }
