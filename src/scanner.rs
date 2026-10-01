@@ -342,8 +342,8 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     let one_word = target.name_tokens.len() == 1
         && target.name_tokens[0].len() >= 4
         && name_is_one_word(target);
-    let enough_words = target.name_tokens.len() >= 2
-        || (target.lone_words_match && (same_words || one_word));
+    let enough_words =
+        target.name_tokens.len() >= 2 || (target.lone_words_match && (same_words || one_word));
     if contains_subslice(&candidate, &target.name_tokens)
         && !target.vendor_is_shared
         && enough_words
