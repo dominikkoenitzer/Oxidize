@@ -8,7 +8,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport, ScanTarget};
+use crate::model::{
+    Confidence, Hive, Leftover, LeftoverKind, Program, RegistrySource, ScanReport, ScanTarget,
+};
 use crate::registry;
 use crate::system;
 use crate::util::{self, normalize, significant_tokens};
@@ -126,7 +128,46 @@ pub fn build_target(program: &Program) -> ScanTarget {
         // the program's, down to Windows' own autostart entries.
         .filter(|p| !is_protected_path(p));
 
+    let own = (program.registry_key.clone(), program.source);
+    let other_installs: Vec<PathBuf> = other_program_install_dirs(Some(&own))
+        .into_iter()
+        .filter(|p| !is_protected_path(p))
+        .collect();
+    // What services and scheduled tasks run, by name, to tell a folder of the
+    // program's own from a vendor folder recorded in its place.
+    let runs: Vec<(Vec<String>, PathBuf)> = if install_location.is_some() {
+        let services = system::services().into_iter().filter_map(|s| {
+            let mut names = vec![s.name];
+            names.extend(s.display_name);
+            Some((names, s.exe?))
+        });
+        let tasks = system::scheduled_tasks().into_iter().filter_map(|t| {
+            let leaf = t.name.rsplit('\\').next().unwrap_or(&t.name);
+            let leaf = leaf.split('{').next().unwrap_or(leaf).to_string();
+            Some((vec![leaf], t.exe?))
+        });
+        services.chain(tasks).collect()
+    } else {
+        Vec::new()
+    };
+    build_target_from(program, install_location, &other_installs, &runs)
+}
+
+/// `build_target` with what it reads from the system passed in: the install
+/// folder as recorded, the other programs' install folders, and the names and
+/// executables of the services and scheduled tasks.
+fn build_target_from(
+    program: &Program,
+    install_location: Option<PathBuf>,
+    other_installs: &[PathBuf],
+    runs: &[(Vec<String>, PathBuf)],
+) -> ScanTarget {
     let mut target = name_target(&program.display_name, program.publisher.as_deref());
+    // A vendor folder recorded as the install folder is no evidence: what is
+    // inside belongs to whichever product put it there. Ownership falls back
+    // to the uninstaller's folder and the program's names.
+    let install_location =
+        install_location.filter(|loc| !shared_install_folder(loc, &target, other_installs, runs));
     // The install folder's own name is often the most distinctive token.
     if let Some(loc) = &install_location {
         if let Some(folder) = loc.file_name().and_then(|s| s.to_str()) {
@@ -138,20 +179,44 @@ pub fn build_target(program: &Program) -> ScanTarget {
         }
     }
     target.registry = Some((program.registry_key.clone(), program.source));
-    // Another program's folder only decides anything when this one has no
-    // folder of its own on record.
-    let other_installs: Vec<PathBuf> = if install_location.is_none() {
-        other_program_install_dirs(&target)
-            .into_iter()
-            .filter(|p| !is_protected_path(p))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    target.exe_names = own_exe_names(program, install_location.as_deref(), &other_installs);
+    target.exe_names = own_exe_names(program, install_location.as_deref(), other_installs);
     target.install_location = install_location;
     target.vendor_is_shared = vendor_is_shared(&target);
     target
+}
+
+/// Is the recorded install folder shared rather than the program's own?
+/// Intel's Bluetooth driver records `Program Files (x86)\Intel`, which holds
+/// the Driver & Support Assistant and its two services. A folder is shared
+/// when another program is installed inside it, or when a service or
+/// scheduled task runs from a subfolder of it that names neither this
+/// program nor anything the service or task is called.
+fn shared_install_folder(
+    loc: &Path,
+    target: &ScanTarget,
+    other_installs: &[PathBuf],
+    runs: &[(Vec<String>, PathBuf)],
+) -> bool {
+    let key = norm_path_key(loc);
+    if other_installs
+        .iter()
+        .any(|o| dir_contains(&key, &norm_path_key(o)))
+    {
+        return true;
+    }
+    runs.iter().any(|(names, exe)| {
+        let exe_key = norm_path_key(exe);
+        if !dir_contains(&key, &exe_key) {
+            return false;
+        }
+        let rest = &exe_key[key.len() + 1..];
+        let Some((subfolder, _file)) = rest.split_once('\\') else {
+            // Right in the install folder: the program's own.
+            return false;
+        };
+        score_product(subfolder, target).is_none()
+            && names.iter().all(|n| score_product(n, target).is_none())
+    })
 }
 
 /// A name that says nothing about which product this is. Every Squirrel app
@@ -624,14 +689,11 @@ fn dir_contains(dir: &str, other: &str) -> bool {
 
 /// Install folders of every other program, so a shared parent folder is never
 /// proposed for deletion.
-fn other_program_install_dirs(target: &ScanTarget) -> Vec<PathBuf> {
+fn other_program_install_dirs(own: Option<&(String, RegistrySource)>) -> Vec<PathBuf> {
     registry::enumerate_installed_programs(true)
         .into_iter()
         .filter(|p| {
-            target
-                .registry
-                .as_ref()
-                .map(|(key, source)| !(p.registry_key == *key && p.source == *source))
+            own.map(|(key, source)| !(p.registry_key == *key && p.source == *source))
                 .unwrap_or(true)
         })
         .filter_map(|p| p.install_location)
@@ -872,7 +934,7 @@ fn scan_dir_children(
 
 fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
     let mut out: Vec<Leftover> = Vec::new();
-    let other_installs = other_program_install_dirs(target);
+    let other_installs = other_program_install_dirs(target.registry.as_ref());
 
     // The install folder itself. Its recorded path can be a shared parent
     // (two products under one vendor folder), so it is only flagged whole
@@ -1286,7 +1348,7 @@ pub fn scan(target: &ScanTarget, installed: bool) -> ScanReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{RegistrySource, RegistryView};
+    use crate::model::RegistryView;
 
     fn target() -> ScanTarget {
         let mut t = name_target("Google Chrome", Some("Google LLC"));
@@ -1623,6 +1685,90 @@ mod tests {
             Some("MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}"),
         ));
         assert_eq!(t.exe_names, ["foo.exe"]);
+    }
+
+    #[test]
+    fn a_vendor_folder_recorded_as_the_install_folder_owns_nothing() {
+        // Intel's Bluetooth driver records `Program Files (x86)\Intel`, where
+        // the Driver & Support Assistant keeps its two services.
+        let intel = PathBuf::from(r"C:\Program Files (x86)\Intel");
+        let dsa = intel.join(r"Driver and Support Assistant\x86");
+        let mut bluetooth = registered(
+            "Intel(R) Wireless Bluetooth(R)",
+            Some(r"C:\Program Files (x86)\Intel\"),
+            None,
+            Some("MsiExec.exe /I{00000020-0240-1033-84C8-B8D95FA3C8C3}"),
+        );
+        bluetooth.publisher = Some("Intel Corporation".to_string());
+        let runs = vec![
+            (
+                vec![
+                    "DSAService".to_string(),
+                    "Intel(R) Driver & Support Assistant".to_string(),
+                ],
+                dsa.join("DSAService.exe"),
+            ),
+            (
+                vec![
+                    "DSAUpdateService".to_string(),
+                    "Intel(R) Driver & Support Assistant Updater".to_string(),
+                ],
+                dsa.join("DSAUpdateService.exe"),
+            ),
+        ];
+        let t = build_target_from(&bluetooth, Some(intel.clone()), &[], &runs);
+        assert!(t.install_location.is_none(), "{:?}", t.install_location);
+        for (names, exe) in &runs {
+            for name in names {
+                assert!(
+                    match_exe_item(name, Some(exe.as_path()), &t).is_none(),
+                    "{name}"
+                );
+            }
+        }
+        // Another program installed inside makes a folder shared too.
+        let t = build_target_from(
+            &bluetooth,
+            Some(intel.clone()),
+            &[intel.join("Some Other Product")],
+            &[],
+        );
+        assert!(t.install_location.is_none());
+    }
+
+    #[test]
+    fn a_programs_own_install_folder_keeps_what_runs_from_it() {
+        let dir = PathBuf::from(r"C:\Program Files\Foo Editor");
+        let foo = registered(
+            "Foo Editor",
+            Some(r"C:\Program Files\Foo Editor"),
+            Some(r"C:\Program Files\Foo Editor\foo.exe,0"),
+            None,
+        );
+        // Its own service in a subfolder, another right inside.
+        let runs = vec![
+            (
+                vec![
+                    "FooEditorUpdate".to_string(),
+                    "Foo Editor Update Service".to_string(),
+                ],
+                dir.join(r"updater\fooupdate.exe"),
+            ),
+            (vec!["FooSvc".to_string()], dir.join("foosvc.exe")),
+        ];
+        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs);
+        assert_eq!(t.install_location.as_deref(), Some(dir.as_path()));
+        assert_eq!(t.exe_names, ["foo.exe"]);
+        for (names, exe) in &runs {
+            assert!(
+                matches!(
+                    match_exe_item(&names[0], Some(exe.as_path()), &t),
+                    Some((Confidence::High, _))
+                ),
+                "{}",
+                names[0]
+            );
+        }
     }
 
     #[test]
