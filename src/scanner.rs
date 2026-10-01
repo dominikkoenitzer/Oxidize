@@ -1540,7 +1540,9 @@ mod tests {
             "Foo Editor",
             Some(r"C:\Program Files\Foo Editor"),
             Some(r"C:\Program Files\Foo Editor\foo.exe,0"),
-            Some(r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\Program Files\Foo Editor\remove.ps1""#),
+            Some(
+                r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\Program Files\Foo Editor\remove.ps1""#,
+            ),
         ));
         assert_eq!(t.exe_names, ["foo.exe"]);
     }

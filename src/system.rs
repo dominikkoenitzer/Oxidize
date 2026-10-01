@@ -567,12 +567,14 @@ mod tests {
             PathBuf::from(r"C:\Apps\Foo\foo.exe"),
         ];
         let is_file = |p: &Path| on_disk.iter().any(|f| f == p);
-        let app_path = |file: &str| {
-            (file == "foo.exe").then(|| PathBuf::from(r"C:\Apps\Foo\foo.exe"))
-        };
+        let app_path =
+            |file: &str| (file == "foo.exe").then(|| PathBuf::from(r"C:\Apps\Foo\foo.exe"));
         let find = |exe: &str| find_bare_exe(Path::new(exe), &dirs, app_path, is_file);
 
-        assert_eq!(find("tool.exe"), Some(PathBuf::from(r"C:\W\System32\tool.exe")));
+        assert_eq!(
+            find("tool.exe"),
+            Some(PathBuf::from(r"C:\W\System32\tool.exe"))
+        );
         // Windows adds the extension.
         assert_eq!(find("tool"), Some(PathBuf::from(r"C:\W\System32\tool.exe")));
         assert_eq!(find("foo.exe"), Some(PathBuf::from(r"C:\Apps\Foo\foo.exe")));
