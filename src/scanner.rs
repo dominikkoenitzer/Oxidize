@@ -245,6 +245,8 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         name_tokens,
         publisher_tokens,
         registry: None,
+        exact_names: Vec::new(),
+        lone_words_match: true,
     }
 }
 
@@ -293,8 +295,9 @@ fn name_is_one_word(target: &ScanTarget) -> bool {
         .all(|w| w == *token || target.publisher_tokens.contains(&w) || util::is_noise_word(&w))
 }
 
-/// Is this name the product itself: the display name, or its product words
-/// joined ("GoogleChrome" for "Google Chrome")?
+/// Is this name the product itself: the display name, one of the target's
+/// exact names, or its product words joined ("GoogleChrome" for "Google
+/// Chrome")? One product word is the product only where lone words match.
 fn is_exact_product(name: &str, target: &ScanTarget) -> bool {
     let norm = normalize(name);
     if norm.len() < 3 {
@@ -303,12 +306,18 @@ fn is_exact_product(name: &str, target: &ScanTarget) -> bool {
     if !target.display_name.is_empty() && norm == normalize(&target.display_name) {
         return true;
     }
+    if target.exact_names.contains(&norm) {
+        return true;
+    }
     let product_joined: String = target.name_tokens.concat();
-    product_joined.len() >= 4 && norm == product_joined
+    (target.lone_words_match || target.name_tokens.len() >= 2)
+        && product_joined.len() >= 4
+        && norm == product_joined
 }
 
 /// Score a folder or key name against the product. Word-aware, so "ZoomIt"
-/// does not match "Zoom"; a single coincidental keyword is capped at Medium.
+/// does not match "Zoom"; a single coincidental keyword is capped at Medium,
+/// and counts for nothing where lone words do not match.
 fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
     let norm = normalize(name);
     if norm.len() < 3 {
@@ -333,9 +342,11 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     let one_word = target.name_tokens.len() == 1
         && target.name_tokens[0].len() >= 4
         && name_is_one_word(target);
+    let enough_words = target.name_tokens.len() >= 2
+        || (target.lone_words_match && (same_words || one_word));
     if contains_subslice(&candidate, &target.name_tokens)
         && !target.vendor_is_shared
-        && (target.name_tokens.len() >= 2 || same_words || one_word)
+        && enough_words
     {
         return Some((
             Confidence::High,
@@ -347,6 +358,9 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
         return Some((Confidence::High, "all name words present".to_string()));
     }
 
+    if !target.lone_words_match {
+        return None;
+    }
     if let Some(hit) = target
         .name_tokens
         .iter()
