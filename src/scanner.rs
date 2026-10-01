@@ -315,7 +315,7 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
     if !without_vendor.is_empty() {
         name_tokens = without_vendor;
     }
-    ScanTarget {
+    let mut target = ScanTarget {
         vendor_is_shared: false,
         display_name: name.to_string(),
         publisher: publisher.map(str::to_string),
@@ -326,7 +326,17 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         registry: None,
         exact_names: Vec::new(),
         lone_words_match: true,
+    };
+    // "Python Launcher" by the Python Software Foundation boils down to
+    // "python", the vendor's word, which every product of theirs carries; the
+    // word that says which one it is, "launcher", is too common to match on.
+    // Like a Store app's description, such a name matches only whole.
+    if let [only] = target.name_tokens.as_slice() {
+        if target.publisher_tokens.contains(only) && !name_is_one_word(&target) {
+            target.lone_words_match = false;
+        }
     }
+    target
 }
 
 /// Does the product's name boil down to the vendor's own word, with other
@@ -438,6 +448,14 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     }
 
     if !target.lone_words_match {
+        return None;
+    }
+    // One word of a two-word name is half of it, so it claims only a name
+    // made of the product's and the vendor's words: "Wallpaper" for
+    // "Wallpaper Engine", never `docker-secrets-engine`.
+    let own_word =
+        |w: &String| target.name_tokens.contains(w) || target.publisher_tokens.contains(w);
+    if target.name_tokens.len() >= 2 && !candidate.iter().all(own_word) {
         return None;
     }
     if let Some(hit) = target
@@ -1608,6 +1626,42 @@ mod tests {
                 r#""C:\Program Files\Fooberry\fooberry.exe" --tray"#,
                 &foo
             ),
+            Some((Confidence::High, _))
+        ));
+    }
+
+    #[test]
+    fn one_word_of_a_longer_name_claims_nothing_on_its_own() {
+        // `AppData\Local\docker-secrets-engine` is Docker's.
+        let engine = name_target("Wallpaper Engine", Some("Wallpaper Engine Team"));
+        assert_eq!(engine.name_tokens, ["wallpaper", "engine"]);
+        assert!(score_product("docker-secrets-engine", &engine).is_none());
+        // Its own leftovers are named after it.
+        for name in ["Wallpaper Engine", "wallpaper_engine", "WallpaperEngine"] {
+            assert!(
+                matches!(score_product(name, &engine), Some((Confidence::High, _))),
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            score_product("Wallpaper", &engine),
+            Some((Confidence::Medium, _))
+        ));
+
+        // The firewall rules for Python 3.13's `python.exe` are not the
+        // launcher's, by their name or by their path.
+        let python = r"C:\Users\x\AppData\Local\Programs\Python\Python313\python.exe";
+        let launcher = name_target("Python Launcher", Some("Python Software Foundation"));
+        assert!(score_product("python.exe", &launcher).is_none());
+        assert!(match_exe_item("python.exe", Some(Path::new(python)), &launcher).is_none());
+        assert!(matches!(
+            score_product("Python Launcher", &launcher),
+            Some((Confidence::High, _))
+        ));
+        // Python itself keeps them.
+        let interpreter = name_target("Python 3.13.7 (64-bit)", Some("Python Software Foundation"));
+        assert!(matches!(
+            score_product("python.exe", &interpreter),
             Some((Confidence::High, _))
         ));
     }
