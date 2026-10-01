@@ -1130,7 +1130,7 @@ fn run_package(
         } else {
             env.local_appdata.as_deref()
         };
-        let target = scanner::name_target(name, app.publisher.as_deref());
+        let target = packages::scan_target(app);
         let report = ScanReport {
             program_name: name.clone(),
             installed: false,

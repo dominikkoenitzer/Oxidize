@@ -11,8 +11,9 @@ use windows::core::HSTRING;
 use windows::ApplicationModel::{self as appx, PackageSignatureKind};
 use windows::Management::Deployment::{PackageManager, PackageTypes};
 
-use crate::model::{Confidence, Leftover, LeftoverKind, Package, SignatureKind};
+use crate::model::{Confidence, Leftover, LeftoverKind, Package, ScanTarget, SignatureKind};
 use crate::scanner;
+use crate::util;
 
 /// Where the installed packages come from: Windows, or a fixed list in tests.
 pub trait PackageStore {
@@ -351,6 +352,57 @@ fn is_package_managed(leftover: &Leftover) -> bool {
         .map(str::to_lowercase)
         .any(|p| p.contains("appmodel") || p.contains("appcontainer"));
     in_folder || registry
+}
+
+/// How many words a package name runs together. A word starts after a
+/// separator, at a capital after a small letter, at the capital that ends an
+/// acronym ("MSTeams") and where letters and digits meet:
+/// "XboxSpeechToTextOverlay" is five words, "cli" one.
+fn word_count(name: &str) -> usize {
+    let chars: Vec<char> = name.chars().collect();
+    let mut count = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() {
+            continue;
+        }
+        let starts = match i.checked_sub(1).map(|j| chars[j]) {
+            None => true,
+            Some(p) if !p.is_alphanumeric() => true,
+            Some(p) => {
+                (p.is_lowercase() && c.is_uppercase())
+                    || p.is_alphabetic() != c.is_alphabetic()
+                    || (p.is_uppercase()
+                        && c.is_uppercase()
+                        && chars.get(i + 1).is_some_and(|n| n.is_lowercase()))
+            }
+        };
+        if starts {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// What a scan by name looks for once a Store app is gone. The shown name is
+/// often a description ("Game Speech Window"), so none of its words matches
+/// alone. The package identity is the app's own name: the identity name with
+/// and without the publisher's prefix and the family name each count as an
+/// exact name, as long as they run more than one word together
+/// ("XboxSpeechToTextOverlay", never the "cli" of `ohmyposh.cli`).
+pub fn scan_target(package: &Package) -> ScanTarget {
+    let mut target = scanner::name_target(&package.display_name, package.publisher.as_deref());
+    target.lone_words_match = false;
+    let product = package
+        .name
+        .split_once('.')
+        .map_or(package.name.as_str(), |(_, rest)| rest);
+    for name in [package.name.as_str(), product, package.family_name.as_str()] {
+        let norm = util::normalize(name);
+        if word_count(name) >= 2 && norm.len() >= 4 && !target.exact_names.contains(&norm) {
+            target.exact_names.push(norm);
+        }
+    }
+    target
 }
 
 /// What a removed Store app left: its data folder under `local_appdata`
