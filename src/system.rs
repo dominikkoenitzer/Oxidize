@@ -100,6 +100,65 @@ pub fn command_exe(command: &str) -> Option<PathBuf> {
     Some(PathBuf::from(s))
 }
 
+const APP_PATHS_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
+
+/// Where Windows finds a program named without a folder, such as the
+/// `powershell.exe` of an autostart command: the Windows folder, System32,
+/// SysWOW64 and the PATH, then the program's App Paths entry, the places
+/// `ShellExecuteEx` searches. `None` for a path with a folder in it, and for
+/// a name nothing answers to: where that would run is unknown, which is not
+/// the same as missing.
+pub fn locate_bare_exe(exe: &Path) -> Option<PathBuf> {
+    bare_name(exe)?;
+    let windir = windir();
+    let mut dirs = vec![
+        windir.clone(),
+        windir.join("System32"),
+        windir.join("SysWOW64"),
+    ];
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path).filter(|d| d.is_absolute()));
+    }
+    let app_path = |file: &str| {
+        [Hive::CurrentUser, Hive::LocalMachine]
+            .into_iter()
+            .find_map(|hive| registry::read_string(hive, &format!(r"{APP_PATHS_KEY}\{file}"), ""))
+            .map(|p| PathBuf::from(util::expand_env_vars(p.trim().trim_matches('"'))))
+    };
+    find_bare_exe(exe, &dirs, app_path, |p| p.is_file())
+}
+
+/// The file name of a path that is nothing but one, such as `powershell.exe`.
+fn bare_name(exe: &Path) -> Option<String> {
+    let mut parts = exe.components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(name)), None) => {
+            Some(name.to_string_lossy().to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The search behind `locate_bare_exe`, with the lookups passed in. A name
+/// without an extension gets `.exe`, as Windows gives it one.
+fn find_bare_exe(
+    exe: &Path,
+    dirs: &[PathBuf],
+    app_path: impl Fn(&str) -> Option<PathBuf>,
+    is_file: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let name = bare_name(exe)?;
+    let file = if Path::new(&name).extension().is_some() {
+        name
+    } else {
+        format!("{name}.exe")
+    };
+    dirs.iter()
+        .map(|d| d.join(&file))
+        .find(|p| is_file(p))
+        .or_else(|| app_path(&file).filter(|p| p.is_absolute() && is_file(p)))
+}
+
 // Services
 // --------
 
@@ -498,6 +557,30 @@ mod tests {
             command_exe(r"C:\Program Files\Vendor\svc.exe -k run"),
             Some(PathBuf::from(r"C:\Program Files\Vendor\svc.exe"))
         );
+    }
+
+    #[test]
+    fn a_bare_name_is_found_where_windows_looks() {
+        let dirs = [PathBuf::from(r"C:\W"), PathBuf::from(r"C:\W\System32")];
+        let on_disk = [
+            PathBuf::from(r"C:\W\System32\tool.exe"),
+            PathBuf::from(r"C:\Apps\Foo\foo.exe"),
+        ];
+        let is_file = |p: &Path| on_disk.iter().any(|f| f == p);
+        let app_path = |file: &str| {
+            (file == "foo.exe").then(|| PathBuf::from(r"C:\Apps\Foo\foo.exe"))
+        };
+        let find = |exe: &str| find_bare_exe(Path::new(exe), &dirs, app_path, is_file);
+
+        assert_eq!(find("tool.exe"), Some(PathBuf::from(r"C:\W\System32\tool.exe")));
+        // Windows adds the extension.
+        assert_eq!(find("tool"), Some(PathBuf::from(r"C:\W\System32\tool.exe")));
+        assert_eq!(find("foo.exe"), Some(PathBuf::from(r"C:\Apps\Foo\foo.exe")));
+        // Nothing answers: unknown.
+        assert_eq!(find("nothing.exe"), None);
+        // A path with a folder is not looked up.
+        assert_eq!(find(r"C:\Elsewhere\tool.exe"), None);
+        assert_eq!(find(r"bin\tool.exe"), None);
     }
 
     #[test]

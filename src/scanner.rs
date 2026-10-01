@@ -491,6 +491,21 @@ fn owned_exe(p: &Path, target: &ScanTarget) -> Option<&'static str> {
     None
 }
 
+/// The executable a command runs, with a bare file name such as
+/// `powershell.exe` found where Windows would find it. A name Windows cannot
+/// find stays as it is.
+fn locate_exe(exe: &Path) -> PathBuf {
+    system::locate_bare_exe(exe).unwrap_or_else(|| exe.to_path_buf())
+}
+
+/// Is the file a reference points to gone? Only a full path can say so. A
+/// bare name that nothing answers to, or a path relative to a folder nobody
+/// knows, is unknown, and resolving it against our own current folder would
+/// call nearly every one of them missing.
+fn exe_missing(exe: &Path) -> bool {
+    exe.is_absolute() && !exe.exists()
+}
+
 /// A path whose components name the product, for dangling references.
 fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
     p.components().any(|c| {
@@ -962,11 +977,11 @@ fn match_run_value(name: &str, data: &str, target: &ScanTarget) -> Option<(Confi
     if let Some((conf, reason)) = score_product(name, target) {
         return Some((conf, format!("autostart, {reason}")));
     }
-    let exe = system::command_exe(data)?;
+    let exe = locate_exe(&system::command_exe(data)?);
     if let Some(why) = owned_exe(&exe, target) {
         return Some((Confidence::High, format!("autostart, {why}")));
     }
-    if !exe.exists() && path_names_product(&exe, target) {
+    if exe_missing(&exe) && path_names_product(&exe, target) {
         return Some((
             Confidence::High,
             "autostart, points to a missing file".to_string(),
@@ -1059,10 +1074,11 @@ fn match_exe_item(
         if system::in_windows_dir(exe) {
             return None;
         }
-        if let Some(why) = owned_exe(exe, target) {
+        let exe = locate_exe(exe);
+        if let Some(why) = owned_exe(&exe, target) {
             return Some((Confidence::High, why.to_string()));
         }
-        if !exe.exists() && path_names_product(exe, target) {
+        if exe_missing(&exe) && path_names_product(&exe, target) {
             return Some((Confidence::High, "points to a missing file".to_string()));
         }
     }
@@ -1552,6 +1568,46 @@ mod tests {
             Some("MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}"),
         ));
         assert_eq!(t.exe_names, ["foo.exe"]);
+    }
+
+    #[test]
+    fn a_bare_program_name_is_never_a_missing_file() {
+        let pwsh = build_target(&registered(
+            "PowerShell 7-x64",
+            Some(r"C:\Program Files\PowerShell\7"),
+            Some(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+            Some("MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}"),
+        ));
+        // Autostart values that run Windows PowerShell by its bare name.
+        let runs = [
+            (
+                "DiscordVencord",
+                r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\x\start-discord.ps1""#,
+            ),
+            (
+                "Mochi",
+                r#"powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'C:\Users\x\AppData\Local\Programs\Mochi\bin\mochic.exe' -ArgumentList 'start' -WindowStyle Hidden""#,
+            ),
+        ];
+        for (name, data) in runs {
+            assert!(match_run_value(name, data, &pwsh).is_none(), "{name}");
+        }
+        // A scheduled task's command holds the bare name alone.
+        assert!(match_exe_item("Mochi", Some(Path::new("powershell.exe")), &pwsh).is_none());
+
+        // A bare name nothing answers to is unknown, not missing.
+        let foo = name_target("Fooberry", None);
+        assert!(match_run_value("Helper", "fooberry.exe --tray", &foo).is_none());
+        assert!(match_exe_item("Helper", Some(Path::new("fooberry.exe")), &foo).is_none());
+        // A full path that is gone still is.
+        assert!(matches!(
+            match_run_value(
+                "Helper",
+                r#""C:\Program Files\Fooberry\fooberry.exe" --tray"#,
+                &foo
+            ),
+            Some((Confidence::High, _))
+        ));
     }
 
     #[test]
