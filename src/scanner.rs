@@ -126,42 +126,6 @@ pub fn build_target(program: &Program) -> ScanTarget {
         // the program's, down to Windows' own autostart entries.
         .filter(|p| !is_protected_path(p));
 
-    // Only a name that says which product this is counts. Every Squirrel app
-    // uninstalls through `Update.exe`, and `App Paths\setup.exe` belongs to
-    // nobody, so those names would claim each other's entries.
-    let generic_exe = |base: &str| {
-        matches!(
-            base,
-            "msiexec.exe"
-                | "unins000.exe"
-                | "uninstall.exe"
-                | "setup.exe"
-                | "install.exe"
-                | "rundll32.exe"
-                | "update.exe"
-                | "updater.exe"
-        )
-    };
-    let mut exe_names = Vec::new();
-    if let Some(icon) = &program.display_icon {
-        let without_index = icon.split(',').next().unwrap_or(icon);
-        if let Some(base) = util::file_basename_lower(&util::expand_env_vars(without_index)) {
-            if base.ends_with(".exe") && !generic_exe(&base) {
-                exe_names.push(base);
-            }
-        }
-    }
-    if let Some(us) = &program.uninstall_string {
-        let argv = util::split_command_line(&util::expand_env_vars(us));
-        if let Some(first) = argv.first() {
-            if let Some(base) = util::file_basename_lower(first) {
-                if base.ends_with(".exe") && !generic_exe(&base) && !exe_names.contains(&base) {
-                    exe_names.push(base);
-                }
-            }
-        }
-    }
-
     let mut target = name_target(&program.display_name, program.publisher.as_deref());
     // The install folder's own name is often the most distinctive token.
     if let Some(loc) = &install_location {
@@ -173,11 +137,126 @@ pub fn build_target(program: &Program) -> ScanTarget {
             }
         }
     }
-    target.install_location = install_location;
-    target.exe_names = exe_names;
     target.registry = Some((program.registry_key.clone(), program.source));
+    // Another program's folder only decides anything when this one has no
+    // folder of its own on record.
+    let other_installs: Vec<PathBuf> = if install_location.is_none() {
+        other_program_install_dirs(&target)
+            .into_iter()
+            .filter(|p| !is_protected_path(p))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    target.exe_names = own_exe_names(program, install_location.as_deref(), &other_installs);
+    target.install_location = install_location;
     target.vendor_is_shared = vendor_is_shared(&target);
     target
+}
+
+/// A name that says nothing about which product this is. Every Squirrel app
+/// uninstalls through `Update.exe`, and `App Paths\setup.exe` belongs to
+/// nobody, so those names would claim each other's entries.
+fn generic_exe(base: &str) -> bool {
+    matches!(
+        base,
+        "msiexec.exe"
+            | "unins000.exe"
+            | "uninstall.exe"
+            | "setup.exe"
+            | "install.exe"
+            | "rundll32.exe"
+            | "update.exe"
+            | "updater.exe"
+    )
+}
+
+/// Shells and script hosts an uninstall command runs through. They run
+/// whatever they are given, so they are nobody's own executable.
+fn host_exe(base: &str) -> bool {
+    matches!(
+        base,
+        "cmd.exe"
+            | "powershell.exe"
+            | "pwsh.exe"
+            | "wscript.exe"
+            | "cscript.exe"
+            | "mshta.exe"
+            | "regsvr32.exe"
+    )
+}
+
+/// Is this argument a link such as `steam://uninstall/431960`? A command
+/// that passes one hands the job to the client that owns the scheme.
+fn is_link(arg: &str) -> bool {
+    arg.split_once("://").is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// The executables the program owns, by file name: its icon's and its
+/// uninstaller's, as long as they sit in its own folder. Ownership comes from
+/// where a file is, not from being named in the uninstall entry. A Steam game
+/// uninstalls through `steam.exe steam://uninstall/431960`, and taking that
+/// name for the game's would hand Steam's autostart and firewall rules to
+/// every game. The folder is the recorded install folder; without one, the
+/// folder the program's own uninstaller runs from. Whatever runs the
+/// uninstall on the program's behalf is never its own: a bare name Windows
+/// looks up (`MsiExec.exe`, `powershell.exe`), anything in the Windows
+/// folder, a shell or script host, a client handed a link, or a file inside
+/// another program's install folder.
+fn own_exe_names(
+    program: &Program,
+    install_location: Option<&Path>,
+    other_installs: &[PathBuf],
+) -> Vec<String> {
+    let as_path = |s: &str| PathBuf::from(s.trim().trim_matches('"'));
+    let icon = program.display_icon.as_deref().map(|icon| {
+        let without_index = icon.split(',').next().unwrap_or(icon);
+        as_path(&util::expand_env_vars(without_index))
+    });
+    let argv = program
+        .uninstall_string
+        .as_deref()
+        .map(|us| util::split_command_line(&util::expand_env_vars(us)))
+        .unwrap_or_default();
+    let hands_over = argv.iter().skip(1).any(|a| is_link(a));
+    let uninstaller = argv.first().map(|s| as_path(s)).filter(|_| !hands_over);
+
+    let base_of = |p: &Path| util::file_basename_lower(&p.to_string_lossy());
+    let foreign = |p: &Path| {
+        !p.is_absolute()
+            || system::in_windows_dir(p)
+            || base_of(p).is_some_and(|b| host_exe(&b))
+            || other_installs.iter().any(|o| system::path_under(p, o))
+    };
+    let home: Option<PathBuf> = match install_location {
+        Some(loc) => Some(loc.to_path_buf()),
+        None => uninstaller
+            .as_deref()
+            .filter(|u| !foreign(u))
+            .and_then(Path::parent)
+            .map(Path::to_path_buf),
+    };
+
+    let mut names = Vec::new();
+    for path in [icon, uninstaller].into_iter().flatten() {
+        let Some(base) = base_of(&path) else { continue };
+        if !base.ends_with(".exe") || generic_exe(&base) || names.contains(&base) {
+            continue;
+        }
+        let own = match &home {
+            Some(home) => path.is_absolute() && system::path_under(&path, home),
+            None => !foreign(&path),
+        };
+        if own {
+            names.push(base);
+        }
+    }
+    names
 }
 
 /// Match tokens from the install folder's own name. A word the folder shares
@@ -1376,6 +1455,103 @@ mod tests {
         // A folder that names the product is still the product's.
         let t = build_target(&program(r"D:\Apps\Foo Editor"));
         assert_eq!(install_folder_score("Foo Editor", &t).0, Confidence::High);
+    }
+
+    fn registered(
+        name: &str,
+        install: Option<&str>,
+        icon: Option<&str>,
+        uninstall: Option<&str>,
+    ) -> Program {
+        Program {
+            registry_key: format!("{name} test entry"),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: install.map(str::to_string),
+            display_icon: icon.map(str::to_string),
+            estimated_size_kb: None,
+            uninstall_string: uninstall.map(str::to_string),
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    #[test]
+    fn what_runs_the_uninstall_is_not_the_programs_own() {
+        // A Steam game uninstalls through Steam. Steam's autostart value and
+        // its firewall rules stay Steam's.
+        let steam = r"C:\Program Files (x86)\Steam\steam.exe";
+        let game_dir = r"C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine";
+        let game = build_target(&registered(
+            "Wallpaper Engine",
+            Some(game_dir),
+            Some(r"C:\Program Files (x86)\Steam\steam\games\5b3bd0d9e5800b93.ico"),
+            Some(&format!("\"{steam}\" steam://uninstall/431960")),
+        ));
+        assert!(game.exe_names.is_empty(), "{:?}", game.exe_names);
+        assert!(match_run_value("Steam", &format!("\"{steam}\" -silent"), &game).is_none());
+        for rule in ["Steam", "Steam Web Helper"] {
+            assert!(
+                match_exe_item(rule, Some(Path::new(steam)), &game).is_none(),
+                "{rule}"
+            );
+        }
+        // The game's own rule is still the game's.
+        let launcher = PathBuf::from(game_dir).join("launcher.exe");
+        assert!(matches!(
+            match_exe_item("Wallpaper Engine", Some(launcher.as_path()), &game),
+            Some((Confidence::High, _))
+        ));
+
+        // Without a recorded folder: a client handed a link, a bare name
+        // Windows looks up, the Windows folder, a shell.
+        for uninstall in [
+            r#""C:\Games\Client\client.exe" client://uninstall/7"#,
+            r#"powershell.exe -ExecutionPolicy Bypass -File "C:\Program Files\Foo Editor\remove.ps1""#,
+            r#""C:\Windows\System32\cmd.exe" /c "C:\Program Files\Foo Editor\remove.cmd""#,
+            r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\ProgramData\Foo\remove.ps1""#,
+        ] {
+            let t = build_target(&registered("Foo Editor", None, None, Some(uninstall)));
+            assert!(t.exe_names.is_empty(), "{uninstall}: {:?}", t.exe_names);
+        }
+        // With one, nothing outside it.
+        let t = build_target(&registered(
+            "Foo Editor",
+            Some(r"C:\Program Files\Foo Editor"),
+            Some(r"C:\Program Files\Foo Editor\foo.exe,0"),
+            Some(r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\Program Files\Foo Editor\remove.ps1""#),
+        ));
+        assert_eq!(t.exe_names, ["foo.exe"]);
+    }
+
+    #[test]
+    fn a_programs_own_executables_are_still_its_own() {
+        let icon = Some(r"C:\Program Files\Foo Editor\foo.exe,0");
+        let uninstall = Some(r#""C:\Program Files\Foo Editor\uninst.exe" /S"#);
+        // In the recorded install folder.
+        let t = build_target(&registered(
+            "Foo Editor",
+            Some(r"C:\Program Files\Foo Editor"),
+            icon,
+            uninstall,
+        ));
+        assert_eq!(t.exe_names, ["foo.exe", "uninst.exe"]);
+        // Without one, next to the program's own uninstaller.
+        let t = build_target(&registered("Foo Editor", None, icon, uninstall));
+        assert_eq!(t.exe_names, ["foo.exe", "uninst.exe"]);
+        // An MSI product uninstalls through msiexec; its icon still counts.
+        let t = build_target(&registered(
+            "Foo Editor",
+            None,
+            icon,
+            Some("MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}"),
+        ));
+        assert_eq!(t.exe_names, ["foo.exe"]);
     }
 
     #[test]
