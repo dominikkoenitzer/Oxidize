@@ -391,9 +391,28 @@ fn name_is_one_word(target: &ScanTarget) -> bool {
         .all(|w| w == *token || target.publisher_tokens.contains(&w) || util::is_noise_word(&w))
 }
 
+/// Does `name` carry every word of the product's name, the common ones
+/// included? "Driver and Support Assistant" does for Intel's "Driver & Support
+/// Assistant"; HP's "Support Solutions Framework Updater" does not.
+fn carries_whole_name(name: &str, target: &ScanTarget) -> bool {
+    let words = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .map(str::to_lowercase)
+            .filter(|w| w.len() >= 3 && !w.chars().all(|c| c.is_ascii_digit()))
+            .collect()
+    };
+    let have = words(name);
+    let need: Vec<String> = words(&target.display_name)
+        .into_iter()
+        .filter(|w| !util::is_noise_word(w) && !target.publisher_tokens.contains(w))
+        .collect();
+    !need.is_empty() && need.iter().all(|w| have.contains(w))
+}
+
 /// Is this name the product itself: the display name, one of the target's
 /// exact names, or its product words joined ("GoogleChrome" for "Google
-/// Chrome")? One product word is the product only where lone words match.
+/// Chrome")? One product word is the product only where lone words match
+/// and the name is that word: `desktop.ini` is not "Windows Desktop Runtime".
 fn is_exact_product(name: &str, target: &ScanTarget) -> bool {
     let norm = normalize(name);
     if norm.len() < 3 {
@@ -406,7 +425,7 @@ fn is_exact_product(name: &str, target: &ScanTarget) -> bool {
         return true;
     }
     let product_joined: String = target.name_tokens.concat();
-    (target.lone_words_match || target.name_tokens.len() >= 2)
+    (target.name_tokens.len() >= 2 || (target.lone_words_match && name_is_one_word(target)))
         && product_joined.len() >= 4
         && norm == product_joined
 }
@@ -429,8 +448,13 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
     }
 
     // The same words on both sides, give or take the noise: "CLI" for "GitHub
-    // CLI".
-    let same_words = candidate.len() == target.name_tokens.len();
+    // CLI". Where the one word left is only part of the name, the rest of the
+    // name has to be there too: Intel's "Driver & Support Assistant" keeps
+    // "support", and so does HP's "Support Solutions Framework Updater" task.
+    let same_words = candidate.len() == target.name_tokens.len()
+        && (target.name_tokens.len() >= 2
+            || name_is_one_word(target)
+            || carries_whole_name(name, target));
     // A single word carries the name only when the name really is that one
     // word, and only if it is long enough to mean anything. "Microsoft Visual
     // C++ 2010 Redistributable" boils down to "visual", which would claim
@@ -1688,6 +1712,50 @@ mod tests {
         let interpreter = name_target("Python 3.13.7 (64-bit)", Some("Python Software Foundation"));
         assert!(matches!(
             score_product("python.exe", &interpreter),
+            Some((Confidence::High, _))
+        ));
+    }
+
+    #[test]
+    fn the_one_word_left_of_a_longer_name_is_not_the_whole_name() {
+        // Every .NET Desktop Runtime boils down to "desktop"; the
+        // `desktop.ini` files in Program Files, the Start Menu and on the
+        // desktop are Windows'.
+        let runtime = name_target(
+            "Microsoft Windows Desktop Runtime - 8.0.23 (x64)",
+            Some("Microsoft Corporation"),
+        );
+        assert_eq!(runtime.name_tokens, ["desktop"]);
+        assert!(!is_exact_product("desktop", &runtime));
+        assert!(!matches!(
+            score_product("desktop", &runtime),
+            Some((Confidence::High, _))
+        ));
+        // Intel's "Driver & Support Assistant" and HP's updater task.
+        let dsa = name_target("Intel\u{ae} Driver & Support Assistant", Some("Intel"));
+        assert_eq!(dsa.name_tokens, ["support"]);
+        assert!(!matches!(
+            score_product("HP Support Solutions Framework Updater", &dsa),
+            Some((Confidence::High, _))
+        ));
+        // Their own names still match, the whole name with more around it
+        // too: Intel's folder, HP's own updater task.
+        for name in [
+            "Intel Driver & Support Assistant",
+            "Driver and Support Assistant",
+        ] {
+            assert!(
+                matches!(score_product(name, &dsa), Some((Confidence::High, _))),
+                "{name}"
+            );
+        }
+        let hp = name_target("HP Support Solutions Framework", Some("HP Inc."));
+        assert!(matches!(
+            score_product("HP Support Solutions Framework Updater", &hp),
+            Some((Confidence::High, _))
+        ));
+        assert!(matches!(
+            score_product("Microsoft Windows Desktop Runtime - 8.0.23 (x64)", &runtime),
             Some((Confidence::High, _))
         ));
     }
