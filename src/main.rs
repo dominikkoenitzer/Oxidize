@@ -7,6 +7,9 @@ use oxidize::cli::Cli;
 use oxidize::{commands, safety, term};
 
 fn main() {
+    if std::env::args_os().len() <= 1 {
+        oxidize::cli::handle_bare_start();
+    }
     let cli = Cli::parse();
     term::init(cli.no_color || cli.json);
 
