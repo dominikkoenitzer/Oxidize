@@ -98,6 +98,89 @@ pub(super) fn scan_link_handlers(target: &ScanTarget) -> Vec<Leftover> {
     out
 }
 
+/// Can this be a file type's class (`ExamplePlayer.Project`)? Extensions,
+/// class ids and the `Applications` list cannot.
+fn file_type_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name.starts_with('{')
+        && !name.eq_ignore_ascii_case("Applications")
+}
+
+/// Match the open command of a file type or an open-with entry.
+fn match_opener(command: &str, target: &ScanTarget, inside: &str) -> Option<(Confidence, String)> {
+    match_handler(command, target, inside)
+}
+
+/// The file types the program opens: each class named after the product
+/// whose open command runs from its install folder, its open-with entry under
+/// `Applications`, and the extensions' `OpenWithProgids` values that name one
+/// of those classes. The extension keys themselves are shared and stay.
+pub(super) fn scan_file_types(target: &ScanTarget) -> Vec<Leftover> {
+    let mut out = Vec::new();
+    for (hive, base) in CLASSES_ROOTS {
+        let children = registry::enum_subkeys(hive, base);
+        let mut ours: Vec<String> = Vec::new();
+        for name in &children {
+            // Only classes named after the product have their command read:
+            // reading every class would take seconds.
+            if !file_type_name(name) || score_product(name, target).is_none() {
+                continue;
+            }
+            let key = format!(r"{base}\{name}");
+            // A link type is the link handler step's.
+            if registry::value_exists(hive, &key, "URL Protocol") {
+                continue;
+            }
+            let command = registry::read_string(hive, &format!(r"{key}\shell\open\command"), "");
+            if let Some((conf, reason)) = command
+                .as_deref()
+                .and_then(|c| match_opener(c, target, "file type opened from the install folder"))
+            {
+                out.push(Leftover::reg_key(hive, key, conf, reason));
+                ours.push(name.clone());
+            }
+        }
+
+        let apps = format!(r"{base}\Applications");
+        for exe in registry::enum_subkeys(hive, &apps) {
+            if !target.exe_names.contains(&exe.to_lowercase()) {
+                continue;
+            }
+            let key = format!(r"{apps}\{exe}");
+            let command = registry::read_string(hive, &format!(r"{key}\shell\open\command"), "");
+            if let Some((conf, reason)) = command
+                .as_deref()
+                .and_then(|c| match_opener(c, target, "open-with entry inside the install folder"))
+            {
+                out.push(Leftover::reg_key(hive, key, conf, reason));
+            }
+        }
+
+        if ours.is_empty() {
+            continue;
+        }
+        for ext in children.iter().filter(|n| n.starts_with('.')) {
+            let sub = format!(r"{base}\{ext}\OpenWithProgids");
+            let Some(key) = registry::open_read(hive, &sub) else {
+                continue;
+            };
+            for (value, _) in key.enum_values().flatten() {
+                if ours.iter().any(|p| p.eq_ignore_ascii_case(&value)) {
+                    out.push(Leftover::reg_value(
+                        hive,
+                        sub.clone(),
+                        value,
+                        Confidence::High,
+                        "opens with the program's file type",
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 /// The folders whose shortcuts are read: the Start menu of the user and of
 /// the machine, and the desktop of both.
 fn shortcut_roots() -> Vec<PathBuf> {
@@ -506,6 +589,32 @@ mod tests {
         assert!(stale_uninstall_entry(&entry(None, Some(&icon), Some(HOME)), loc, gone).is_none());
         let msi = "MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}";
         assert!(stale_uninstall_entry(&entry(Some(msi), None, Some(HOME)), loc, gone).is_none());
+    }
+
+    #[test]
+    fn only_class_names_can_be_file_types() {
+        for name in ["Quillmark.Document", "Quillmark.Project.2", "quillmark"] {
+            assert!(file_type_name(name), "{name}");
+        }
+        for name in [
+            ".qmk",
+            "{4D2F086C-6EA3-101B-A2A3-00AA00494A6A}",
+            "Applications",
+            "",
+        ] {
+            assert!(!file_type_name(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_file_type_opened_from_the_install_folder_is_the_programs() {
+        let t = quillmark(Some(HOME));
+        let inside = "file type opened from the install folder";
+        let hit = match_opener(&format!(r#""{HOME}\quillmark.exe" "%1""#), &t, inside);
+        assert_eq!(hit, Some((Confidence::High, inside.to_string())));
+        // Another program opening the same kind of file is not a reason.
+        let other = r#""C:\Program Files\Other Tool\tool.exe" "%1""#;
+        assert!(match_opener(other, &t, inside).is_none());
     }
 
     #[test]

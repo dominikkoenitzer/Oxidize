@@ -1574,6 +1574,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
         Box::new(move || links::scan_link_handlers(target)),
+        Box::new(move || links::scan_file_types(target)),
         Box::new(move || links::scan_shortcuts(target)),
         Box::new(move || links::scan_temp_folders(target, snap)),
         Box::new(move || links::scan_stale_uninstall_entries(target, snap)),
