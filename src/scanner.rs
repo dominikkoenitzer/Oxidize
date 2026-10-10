@@ -7,6 +7,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::thread;
 
 use crate::model::{
     Confidence, Hive, Leftover, LeftoverKind, Program, RegistrySource, ScanReport, ScanTarget,
@@ -105,8 +107,78 @@ pub fn reg_denied(name: &str) -> bool {
 // Targets
 // -------
 
+/// What one run reads from the system, read once and shared by its steps.
+/// Make a new one per run: the GUI and the MCP server live long and must see
+/// the machine as it is now.
+#[derive(Default)]
+pub struct Snapshot {
+    programs: OnceLock<Vec<Program>>,
+    services: OnceLock<Vec<system::ServiceInfo>>,
+    tasks: OnceLock<Vec<system::TaskInfo>>,
+    roots: OnceLock<Vec<PathBuf>>,
+}
+
+impl Snapshot {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start from a list of programs already read, system components
+    /// included.
+    pub fn with_programs(programs: Vec<Program>) -> Self {
+        let snap = Self::default();
+        let _ = snap.programs.set(programs);
+        snap
+    }
+
+    /// Every registered program, system components included.
+    pub fn programs(&self) -> &[Program] {
+        self.programs
+            .get_or_init(|| registry::enumerate_installed_programs(true))
+    }
+
+    pub fn services(&self) -> &[system::ServiceInfo] {
+        self.services.get_or_init(system::services)
+    }
+
+    pub fn tasks(&self) -> &[system::TaskInfo] {
+        self.tasks.get_or_init(system::scheduled_tasks)
+    }
+
+    /// The folders whose children are inspected by name.
+    pub fn roots(&self) -> &[PathBuf] {
+        self.roots.get_or_init(fs_roots)
+    }
+
+    /// Read the programs, and the services and tasks if asked, at the same
+    /// time.
+    fn prefetch(&self, services_and_tasks: bool) {
+        thread::scope(|s| {
+            if self.programs.get().is_none() {
+                s.spawn(|| {
+                    self.programs();
+                });
+            }
+            if services_and_tasks {
+                s.spawn(|| {
+                    self.services();
+                });
+                s.spawn(|| {
+                    self.tasks();
+                });
+            }
+        });
+    }
+}
+
 /// Capture a registered program's identity.
 pub fn build_target(program: &Program) -> ScanTarget {
+    build_target_with(program, &Snapshot::new())
+}
+
+/// `build_target` reading the system through `snap`.
+pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
+    let roots = snap.roots();
     let install_location = program
         .install_location
         .as_deref()
@@ -126,31 +198,32 @@ pub fn build_target(program: &Program) -> ScanTarget {
         // either a broken installer or a hostile one. Either way nothing may
         // be claimed through it: everything under the folder would count as
         // the program's, down to Windows' own autostart entries.
-        .filter(|p| !is_protected_path(p));
+        .filter(|p| !is_protected_path_in(p, roots));
 
+    snap.prefetch(install_location.is_some());
     let own = (program.registry_key.clone(), program.source);
-    let other_installs: Vec<PathBuf> = other_program_install_dirs(Some(&own))
+    let other_installs: Vec<PathBuf> = other_program_install_dirs(Some(&own), snap.programs())
         .into_iter()
-        .filter(|p| !is_protected_path(p))
+        .filter(|p| !is_protected_path_in(p, roots))
         .collect();
     // What services and scheduled tasks run, by name, to tell a folder of the
     // program's own from a vendor folder recorded in its place.
     let runs: Vec<(Vec<String>, PathBuf)> = if install_location.is_some() {
-        let services = system::services().into_iter().filter_map(|s| {
-            let mut names = vec![s.name];
-            names.extend(s.display_name);
-            Some((names, s.exe?))
+        let services = snap.services().iter().filter_map(|s| {
+            let mut names = vec![s.name.clone()];
+            names.extend(s.display_name.clone());
+            Some((names, s.exe.clone()?))
         });
-        let tasks = system::scheduled_tasks().into_iter().filter_map(|t| {
+        let tasks = snap.tasks().iter().filter_map(|t| {
             let leaf = t.name.rsplit('\\').next().unwrap_or(&t.name);
             let leaf = leaf.split('{').next().unwrap_or(leaf).to_string();
-            Some((vec![leaf], t.exe?))
+            Some((vec![leaf], t.exe.clone()?))
         });
         services.chain(tasks).collect()
     } else {
         Vec::new()
     };
-    build_target_from(program, install_location, &other_installs, &runs)
+    build_target_from(program, install_location, &other_installs, &runs, snap)
 }
 
 /// `build_target` with what it reads from the system passed in: the install
@@ -161,6 +234,7 @@ fn build_target_from(
     install_location: Option<PathBuf>,
     other_installs: &[PathBuf],
     runs: &[(Vec<String>, PathBuf)],
+    snap: &Snapshot,
 ) -> ScanTarget {
     let mut target = name_target(&program.display_name, program.publisher.as_deref());
     // A vendor folder recorded as the install folder is no evidence: what is
@@ -181,7 +255,7 @@ fn build_target_from(
     target.registry = Some((program.registry_key.clone(), program.source));
     target.exe_names = own_exe_names(program, install_location.as_deref(), other_installs);
     target.install_location = install_location;
-    target.vendor_is_shared = vendor_is_shared(&target);
+    target.vendor_is_shared = vendor_is_shared(&target, snap);
     target
 }
 
@@ -352,7 +426,7 @@ fn folder_tokens(location: &Path, folder: &str) -> Vec<String> {
 pub fn name_only_target(name: &str, publisher: Option<&str>) -> ScanTarget {
     if publisher.is_some() {
         let mut target = name_target(name, publisher);
-        target.vendor_is_shared = vendor_is_shared(&target);
+        target.vendor_is_shared = vendor_is_shared(&target, &Snapshot::new());
         return target;
     }
     let tokens = significant_tokens(name);
@@ -416,12 +490,12 @@ fn product_tokens(name: &str, publisher_tokens: &[String]) -> Vec<String> {
 /// `ProgramData\NVIDIA` holds the data of five NVIDIA products. A vendor with
 /// nothing else installed is a different matter: `AppData\Roaming\discord` is
 /// Discord's, whatever else the word may mean.
-fn vendor_is_shared(target: &ScanTarget) -> bool {
+fn vendor_is_shared(target: &ScanTarget, snap: &Snapshot) -> bool {
     if target.publisher_tokens.is_empty() || target.name_tokens != target.publisher_tokens {
         return false;
     }
-    registry::enumerate_installed_programs(true)
-        .into_iter()
+    snap.programs()
+        .iter()
         .filter(|p| {
             target
                 .registry
@@ -689,15 +763,18 @@ fn dir_contains(dir: &str, other: &str) -> bool {
 
 /// Install folders of every other program, so a shared parent folder is never
 /// proposed for deletion.
-fn other_program_install_dirs(own: Option<&(String, RegistrySource)>) -> Vec<PathBuf> {
-    registry::enumerate_installed_programs(true)
-        .into_iter()
+fn other_program_install_dirs(
+    own: Option<&(String, RegistrySource)>,
+    programs: &[Program],
+) -> Vec<PathBuf> {
+    programs
+        .iter()
         .filter(|p| {
             own.map(|(key, source)| !(p.registry_key == *key && p.source == *source))
                 .unwrap_or(true)
         })
-        .filter_map(|p| p.install_location)
-        .map(|s| util::expand_env_vars(&s))
+        .filter_map(|p| p.install_location.as_deref())
+        .map(util::expand_env_vars)
         .map(|s| s.trim().trim_matches('"').to_string())
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
@@ -728,6 +805,11 @@ fn resolve_for_guard(p: &Path) -> String {
 /// Paths that are never deletable: drive roots, the Windows folder, the scan
 /// roots themselves and the user-profile tree roots.
 pub fn is_protected_path(p: &Path) -> bool {
+    is_protected_path_in(p, &fs_roots())
+}
+
+/// `is_protected_path` with the scan roots already read.
+fn is_protected_path_in(p: &Path, roots: &[PathBuf]) -> bool {
     let s = resolve_for_guard(p);
     let s = s.as_str();
     if s.len() <= 3 {
@@ -741,7 +823,7 @@ pub fn is_protected_path(p: &Path) -> bool {
             return true;
         }
     }
-    for root in fs_roots() {
+    for root in roots {
         if s == root.to_string_lossy().to_lowercase().trim_end_matches('\\') {
             return true;
         }
@@ -796,8 +878,14 @@ pub fn dir_size(root: &Path) -> u64 {
     total
 }
 
-fn push_dir_leftover(out: &mut Vec<Leftover>, path: PathBuf, conf: Confidence, reason: String) {
-    if is_protected_path(&path) || path_within_shared_dir(&path) {
+fn push_dir_leftover(
+    out: &mut Vec<Leftover>,
+    path: PathBuf,
+    conf: Confidence,
+    reason: String,
+    roots: &[PathBuf],
+) {
+    if is_protected_path_in(&path, roots) || path_within_shared_dir(&path) {
         return;
     }
     let empty = is_dir_empty(&path);
@@ -842,7 +930,13 @@ fn holds_namesake_child(dir: &Path, target: &ScanTarget) -> bool {
 }
 
 /// Flag product-matching children of `parent`, never `parent` itself.
-fn flag_product_children(parent: &Path, target: &ScanTarget, out: &mut Vec<Leftover>, note: &str) {
+fn flag_product_children(
+    parent: &Path,
+    target: &ScanTarget,
+    out: &mut Vec<Leftover>,
+    note: &str,
+    roots: &[PathBuf],
+) {
     let Ok(children) = fs::read_dir(parent) else {
         return;
     };
@@ -853,7 +947,7 @@ fn flag_product_children(parent: &Path, target: &ScanTarget, out: &mut Vec<Lefto
         }
         if child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             if let Some((conf, reason)) = score_product(&cname, target) {
-                push_dir_leftover(out, child.path(), conf, format!("{reason}, {note}"));
+                push_dir_leftover(out, child.path(), conf, format!("{reason}, {note}"), roots);
             }
         }
     }
@@ -863,6 +957,7 @@ fn scan_dir_children(
     root: &Path,
     target: &ScanTarget,
     other_installs: &[PathBuf],
+    roots: &[PathBuf],
     out: &mut Vec<Leftover>,
 ) {
     let Ok(entries) = fs::read_dir(root) else {
@@ -898,9 +993,10 @@ fn scan_dir_children(
                 && !contains_install
                 && !family
             {
-                push_dir_leftover(out, path, Confidence::High, "exact name".to_string());
+                push_dir_leftover(out, path, Confidence::High, "exact name".to_string(), roots);
             } else if matches_publisher(&name, target) {
-                flag_product_children(&path, target, out, &format!("in vendor folder {name}"));
+                let note = format!("in vendor folder {name}");
+                flag_product_children(&path, target, out, &note, roots);
             } else if houses_other || contains_install || family {
                 // Another program is installed inside, and the folder is not
                 // the vendor's, so it is shared whatever its name says:
@@ -909,7 +1005,7 @@ fn scan_dir_children(
                 // recorded install folder, is listed on its own.
                 continue;
             } else if let Some((conf, reason)) = score_product(&name, target) {
-                push_dir_leftover(out, path, conf, reason);
+                push_dir_leftover(out, path, conf, reason, roots);
             }
         } else if ft.is_file() {
             // Mostly Start Menu, Startup and Desktop shortcuts.
@@ -932,15 +1028,20 @@ fn scan_dir_children(
     }
 }
 
-fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
-    let mut out: Vec<Leftover> = Vec::new();
-    let other_installs = other_program_install_dirs(target.registry.as_ref());
+fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
+    let other_installs = other_program_install_dirs(target.registry.as_ref(), snap.programs());
+    let other_installs = other_installs.as_slice();
+    let roots = snap.roots();
 
     // The install folder itself. Its recorded path can be a shared parent
     // (two products under one vendor folder), so it is only flagged whole
     // when its name identifies this product and nothing else lives inside.
-    if let Some(loc) = &target.install_location {
-        if loc.is_dir() && !is_protected_path(loc) {
+    let install_folder = move || {
+        let mut out = Vec::new();
+        let Some(loc) = &target.install_location else {
+            return out;
+        };
+        if loc.is_dir() && !is_protected_path_in(loc, roots) {
             let leaf = loc.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             let note = format!("in install folder {leaf}");
             let loc_key = norm_path_key(loc);
@@ -951,20 +1052,27 @@ fn scan_filesystem(target: &ScanTarget) -> Vec<Leftover> {
             // even if the publisher name contains that word.
             let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
 
-            {
-                if houses_other || vendor_root {
-                    flag_product_children(loc, target, &mut out, &note);
-                } else {
-                    let (conf, reason) = install_folder_score(leaf, target);
-                    push_dir_leftover(&mut out, loc.clone(), conf, reason);
-                }
+            if houses_other || vendor_root {
+                flag_product_children(loc, target, &mut out, &note, roots);
+            } else {
+                let (conf, reason) = install_folder_score(leaf, target);
+                push_dir_leftover(&mut out, loc.clone(), conf, reason, roots);
             }
         }
-    }
+        out
+    };
 
-    for root in fs_roots() {
-        scan_dir_children(&root, target, &other_installs, &mut out);
+    // The install folder and each root are walked at the same time, and
+    // their findings joined in this order.
+    let mut jobs: Vec<Job<Vec<Leftover>>> = vec![Box::new(install_folder)];
+    for root in roots {
+        jobs.push(Box::new(move || {
+            let mut out = Vec::new();
+            scan_dir_children(root, target, other_installs, roots, &mut out);
+            out
+        }));
     }
+    let mut out: Vec<Leftover> = run_all(jobs).into_iter().flatten().collect();
 
     dedupe_by_path(&mut out);
     let mut out = dedupe_nested_fs(out);
@@ -1221,10 +1329,28 @@ fn windows_hosted_service(exe: &Path) -> bool {
         })
 }
 
-fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
+fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
     let mut out = Vec::new();
 
-    for svc in system::services() {
+    // The four lists are independent, so they are read at the same time.
+    let mut paths = Vec::new();
+    let mut rules = Vec::new();
+    run_all::<()>(vec![
+        Box::new(|| {
+            snap.services();
+        }),
+        Box::new(|| {
+            snap.tasks();
+        }),
+        Box::new(|| {
+            paths = [Hive::CurrentUser, Hive::LocalMachine]
+                .map(|hive| (hive, system::path_entries(hive)))
+                .to_vec();
+        }),
+        Box::new(|| rules = system::firewall_rules()),
+    ]);
+
+    for svc in snap.services() {
         if svc
             .exe
             .as_deref()
@@ -1242,11 +1368,11 @@ fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
                 .as_deref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            out.push(Leftover::service(svc.name, &image, conf, reason));
+            out.push(Leftover::service(svc.name.clone(), &image, conf, reason));
         }
     }
 
-    for task in system::scheduled_tasks() {
+    for task in snap.tasks() {
         let leaf = task.name.rsplit('\\').next().unwrap_or(&task.name);
         // Strip a trailing GUID so "UpdaterTask{GUID}" scores by its words.
         let leaf = leaf.split('{').next().unwrap_or(leaf);
@@ -1256,12 +1382,12 @@ fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
                 .as_deref()
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_default();
-            out.push(Leftover::task(task.name, &command, conf, reason));
+            out.push(Leftover::task(task.name.clone(), &command, conf, reason));
         }
     }
 
-    for hive in [Hive::CurrentUser, Hive::LocalMachine] {
-        for entry in system::path_entries(hive) {
+    for (hive, entries) in paths {
+        for entry in entries {
             let dir = PathBuf::from(util::expand_env_vars(&entry));
             if system::in_windows_dir(&dir) {
                 continue;
@@ -1289,7 +1415,7 @@ fn scan_system(target: &ScanTarget) -> Vec<Leftover> {
         }
     }
 
-    for rule in system::firewall_rules() {
+    for rule in rules {
         if let Some((conf, reason)) = match_exe_item(&rule.name, Some(&rule.app), target) {
             let app = rule.app.to_string_lossy().to_string();
             out.push(Leftover::firewall_rule(
@@ -1332,12 +1458,37 @@ fn dedupe_by_path(items: &mut Vec<Leftover>) {
 // Entry point
 // -----------
 
+/// Work for one thread of `run_all`.
+type Job<'a, T> = Box<dyn FnOnce() -> T + Send + 'a>;
+
+/// Run each job on its own thread and return the results in the jobs' order.
+/// A job that panics panics the caller, as if it had run there.
+fn run_all<'a, T: Send + 'a>(jobs: Vec<Job<'a, T>>) -> Vec<T> {
+    thread::scope(|s| {
+        let handles: Vec<_> = jobs.into_iter().map(|job| s.spawn(job)).collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+            .collect()
+    })
+}
+
 /// Run a full scan. `installed` says whether the program is still registered,
 /// in which case its own uninstall entry is not a leftover.
 pub fn scan(target: &ScanTarget, installed: bool) -> ScanReport {
-    let mut items = scan_registry(target, installed);
-    items.extend(scan_filesystem(target));
-    items.extend(scan_system(target));
+    scan_with(target, installed, &Snapshot::new())
+}
+
+/// `scan` reading the system through `snap`.
+pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanReport {
+    // The phases only read, so they run at the same time. Their findings are
+    // joined in this order, whichever finishes first.
+    let phases: Vec<Job<Vec<Leftover>>> = vec![
+        Box::new(move || scan_registry(target, installed)),
+        Box::new(move || scan_filesystem(target, snap)),
+        Box::new(move || scan_system(target, snap)),
+    ];
+    let items = run_all(phases).into_iter().flatten().collect();
     ScanReport {
         program_name: target.display_name.clone(),
         installed,
@@ -1550,13 +1701,19 @@ mod tests {
 
         // On its own the folder is Steam's, by name.
         let mut out = Vec::new();
-        scan_dir_children(&root, &steam, &[], &mut out);
+        scan_dir_children(&root, &steam, &[], &fs_roots(), &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].confidence, Confidence::High);
 
         // With another program installed inside it, it is shared and stays.
         let mut out = Vec::new();
-        scan_dir_children(&root, &steam, std::slice::from_ref(&game), &mut out);
+        scan_dir_children(
+            &root,
+            &steam,
+            std::slice::from_ref(&game),
+            &fs_roots(),
+            &mut out,
+        );
         assert!(out.is_empty(), "{out:?}");
 
         let _ = fs::remove_dir_all(&root);
@@ -1716,7 +1873,8 @@ mod tests {
                 dsa.join("DSAUpdateService.exe"),
             ),
         ];
-        let t = build_target_from(&bluetooth, Some(intel.clone()), &[], &runs);
+        let snap = Snapshot::new();
+        let t = build_target_from(&bluetooth, Some(intel.clone()), &[], &runs, &snap);
         assert!(t.install_location.is_none(), "{:?}", t.install_location);
         for (names, exe) in &runs {
             for name in names {
@@ -1732,6 +1890,7 @@ mod tests {
             Some(intel.clone()),
             &[intel.join("Some Other Product")],
             &[],
+            &snap,
         );
         assert!(t.install_location.is_none());
     }
@@ -1756,7 +1915,7 @@ mod tests {
             ),
             (vec!["FooSvc".to_string()], dir.join("foosvc.exe")),
         ];
-        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs);
+        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs, &Snapshot::new());
         assert_eq!(t.install_location.as_deref(), Some(dir.as_path()));
         assert_eq!(t.exe_names, ["foo.exe"]);
         for (names, exe) in &runs {
@@ -2135,7 +2294,7 @@ mod tests {
         }
 
         let mut out = Vec::new();
-        scan_dir_children(&root, &game_speech_window(), &[], &mut out);
+        scan_dir_children(&root, &game_speech_window(), &[], &fs_roots(), &mut out);
         let mut found: Vec<String> = out
             .iter()
             .map(|l| {
