@@ -10,13 +10,14 @@ use anyhow::Result;
 use super::{Inspect, Remove};
 use crate::backup::{self, BackupInfo};
 use crate::commands;
+use crate::complete::{self, Closed, Running};
 use crate::hunter::{self, HunterMatch};
 use crate::model::{Leftover, Package, Program, ScanReport, ScanTarget};
 use crate::orphans::{self, OrphanReport};
 use crate::packages::{PackageStore, RemovalOutcome, WindowsPackageStore};
 use crate::safety::{self, DeletionOutcome, SafetyContext};
 use crate::uninstall::{self, UninstallPlan};
-use crate::{registry, scanner};
+use crate::{registry, scanner, system};
 
 /// This PC, read only.
 pub struct ThisPc;
@@ -65,6 +66,10 @@ impl Inspect for ThisPc {
     fn is_elevated(&self) -> bool {
         safety::is_elevated()
     }
+
+    fn running(&self) -> Vec<Running> {
+        system::running_processes()
+    }
 }
 
 /// The steps `oxidize uninstall` takes, always with a backup. The
@@ -83,6 +88,10 @@ impl Remove for Remover {
 
     fn remove_app(&self, app: &Package) -> Result<bool> {
         Ok(commands::remove_package(&WindowsPackageStore, app)? == RemovalOutcome::Removed)
+    }
+
+    fn close(&self, procs: &[Running]) -> Vec<Closed> {
+        system::close_processes(procs, complete::CLOSE_GRACE)
     }
 
     fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome> {

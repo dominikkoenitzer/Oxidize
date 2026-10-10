@@ -29,6 +29,7 @@ use serde_json::{json, Value};
 use crate::backup::BackupInfo;
 use crate::cli::{LevelOpts, ListArgs, SortKey};
 use crate::commands::{self, Planned, Resolved, Step};
+use crate::complete::{self, Closed, Running};
 use crate::hunter::HunterMatch;
 use crate::model::{Group, Leftover, Package, Program, ScanReport, ScanTarget};
 use crate::orphans::OrphanReport;
@@ -53,6 +54,8 @@ pub trait Inspect: Send + Sync {
     fn backups_folder(&self) -> Option<PathBuf>;
     fn local_appdata(&self) -> Option<PathBuf>;
     fn is_elevated(&self) -> bool;
+    /// Every running process with a known image.
+    fn running(&self) -> Vec<Running>;
 }
 
 /// The one way the server changes anything: carrying out an approved plan.
@@ -64,6 +67,8 @@ pub trait Remove: Send + Sync {
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove a Store app; true once Windows no longer lists it.
     fn remove_app(&self, app: &Package) -> Result<bool>;
+    /// Close these processes: their windows first, then end them.
+    fn close(&self, procs: &[Running]) -> Vec<Closed>;
     /// Remove leftovers, each one backed up first.
     fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome>;
 }
@@ -234,7 +239,8 @@ fn list_backups(m: &dyn Inspect) -> Result<Value> {
 /// One entry of a removal plan, with what carrying it out needs.
 #[derive(Debug, Clone)]
 enum PlanStep {
-    /// Run the program's uninstaller, then remove the leftovers listed.
+    /// Close what runs from the program's folders, run its uninstaller,
+    /// then remove the leftovers listed.
     Program {
         program: Box<Program>,
         uninstaller: UninstallPlan,
@@ -350,6 +356,25 @@ fn make_plan(m: &dyn Inspect, p: &PlanParams) -> Result<RemovalPlan> {
     })
 }
 
+/// Close the processes that run from a step's folders. Returns what was
+/// closed; nothing when no folder of its own is known.
+fn close_running(
+    m: &dyn Inspect,
+    r: &dyn Remove,
+    target: &ScanTarget,
+    planned: &[Leftover],
+) -> Vec<Closed> {
+    let dirs = complete::owned_dirs(target, planned);
+    if dirs.is_empty() {
+        return Vec::new();
+    }
+    let picked = complete::processes_in(&m.running(), &dirs, std::process::id());
+    if picked.is_empty() {
+        return Vec::new();
+    }
+    r.close(&picked)
+}
+
 /// The commands a user would run for the same plan.
 fn user_commands(
     steps: &[PlanStep],
@@ -459,8 +484,9 @@ fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
         "needs_admin": safety::needs_elevation(&all),
         "elevated": m.is_elevated(),
         "backup_folder": m.backups_folder(),
-        "how": "Each uninstaller runs in turn and Oxidize waits up to two minutes for it to finish. \
-    Then exactly the leftovers listed are removed, each one backed up first. Nothing else is touched.",
+        "how": "Running copies of each program are closed first, then each uninstaller runs in turn \
+    and Oxidize waits up to two minutes for it to finish. Then exactly the leftovers listed are \
+    removed, each one backed up first. Nothing else is touched.",
         "apply": "apply_removal_plan with this plan_id, once the user agrees",
         "commands": plan.commands,
     })
@@ -530,9 +556,11 @@ fn apply_step(
         PlanStep::Program {
             program,
             uninstaller,
-            ..
+            target,
+            leftovers,
         } => {
             out["kind"] = json!("program");
+            out["closed"] = json!(close_running(m, r, target, leftovers));
             let registered = m
                 .programs(true)
                 .iter()
@@ -562,11 +590,16 @@ fn apply_step(
                 r.remove_app(app)
             }
         }
-        PlanStep::Leftovers { .. } => {
+        PlanStep::Leftovers {
+            target, leftovers, ..
+        } => {
             out["kind"] = json!("leftovers");
             let programs = m.programs(true);
             match commands::scan_subject(&programs, Vec::new, &name) {
-                Ok(None) => Ok(true),
+                Ok(None) => {
+                    out["closed"] = json!(close_running(m, r, target, leftovers));
+                    Ok(true)
+                }
                 Ok(Some(_)) => Err(anyhow!("{name} is installed now. Plan its removal again.")),
                 Err(e) => Err(e.context(format!(
                     "{name} now answers to an installed program, so nothing was removed. Plan again"
@@ -744,11 +777,12 @@ impl Server {
     }
 
     /// Carry out a plan from plan_removal in this session, exactly as it
-    /// was shown and only once: run each uninstaller, then remove the
-    /// leftovers it listed, each one backed up first. Returns what was
-    /// removed, what was not and why, what a fresh scan still finds, and
-    /// the backup with the command that restores it. Call it only after
-    /// the user agreed to that plan.
+    /// was shown and only once: close what runs from each program's
+    /// folders, run each uninstaller, then remove the leftovers it listed,
+    /// each one backed up first. Returns what was closed and removed, what
+    /// was not and why, what a fresh scan still finds, and the backup with
+    /// the command that restores it. Call it only after the user agreed to
+    /// that plan.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -890,12 +924,15 @@ mod tests {
         );
         found.insert(
             "Game Service".to_string(),
-            vec![Leftover::reg_key(
-                Hive::LocalMachine,
-                r"SOFTWARE\Game Service",
-                Confidence::High,
-                "the program's own key",
-            )],
+            vec![
+                Leftover::reg_key(
+                    Hive::LocalMachine,
+                    r"SOFTWARE\Game Service",
+                    Confidence::High,
+                    "the program's own key",
+                ),
+                folder(r"C:\Program Files\Game Service", Confidence::High, 30),
+            ],
         );
         FakePc {
             programs: vec![
@@ -965,6 +1002,20 @@ mod tests {
         fn is_elevated(&self) -> bool {
             false
         }
+        fn running(&self) -> Vec<Running> {
+            [
+                (100, r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe"),
+                (200, r"C:\Users\me\AppData\Local\Other\player.exe"),
+                (300, r"C:\Games\OldGame\game.exe"),
+                (400, r"C:\Program Files\Game Service\service.exe"),
+            ]
+            .into_iter()
+            .map(|(pid, exe)| Running {
+                pid,
+                exe: PathBuf::from(exe),
+            })
+            .collect()
+        }
     }
 
     /// Writes down what it is asked to do and does none of it. A machine-wide
@@ -995,6 +1046,19 @@ mod tests {
         fn remove_app(&self, app: &Package) -> Result<bool> {
             self.log(format!("remove app {}", app.family_name));
             Ok(true)
+        }
+        fn close(&self, procs: &[Running]) -> Vec<Closed> {
+            let pids: Vec<String> = procs.iter().map(|p| p.pid.to_string()).collect();
+            self.log(format!("close {}", pids.join(",")));
+            procs
+                .iter()
+                .map(|p| Closed {
+                    pid: p.pid,
+                    exe: p.exe.display().to_string(),
+                    how: complete::CloseHow::Closed,
+                    error: None,
+                })
+                .collect()
         }
         fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome> {
             for l in items {
@@ -1299,6 +1363,7 @@ mod tests {
         );
         assert_eq!(plan["leftovers"], 3);
         assert_eq!(plan["bytes"], 970);
+        assert!(plan["how"].as_str().unwrap().starts_with("Running copies"));
         assert_eq!(plan["needs_admin"], false);
         assert_eq!(
             plan["backup_folder"],
@@ -1332,9 +1397,11 @@ mod tests {
             .call("apply_removal_plan", json!({ "plan_id": id }))
             .await;
         assert_ne!(done["isError"], true, "{done}");
+        // What runs from its folder closes before anything else.
         assert_eq!(
             recorder.calls(),
             [
+                "close 100",
                 r"uninstall C:\Apps\example-player\uninstall.exe",
                 "wait Example Player",
                 r"remove C:\Users\me\AppData\Local\ExamplePlayer",
@@ -1344,6 +1411,10 @@ mod tests {
         let step = &done["structuredContent"]["steps"][0];
         assert_eq!(step["still_installed"], false, "{step}");
         assert_eq!(step["failed"], false, "{step}");
+        assert_eq!(
+            step["closed"],
+            json!([{ "pid": 100, "exe": r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe", "how": "closed" }])
+        );
         assert_eq!(step["removal"]["removed"], 2);
         assert_eq!(step["backup"], "2026-10-10_150000_Example Player");
         assert_eq!(
@@ -1357,7 +1428,7 @@ mod tests {
             .call("apply_removal_plan", json!({ "plan_id": id }))
             .await;
         assert_eq!(again["isError"], true, "{again}");
-        assert_eq!(recorder.calls().len(), 4, "a plan runs once");
+        assert_eq!(recorder.calls().len(), 5, "a plan runs once");
     }
 
     #[tokio::test]
@@ -1429,9 +1500,59 @@ mod tests {
             recorder.calls(),
             [
                 "remove app Vendor.Notes_8wekyb3d8bbwe",
+                "close 300",
                 r"remove C:\Games\OldGame",
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn a_programs_processes_close_before_its_uninstaller_runs() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call("plan_removal", json!({ "programs": ["Game Service"] }))
+            .await;
+        let id = plan_id(&plan);
+        let done = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        assert_eq!(
+            recorder.calls(),
+            [
+                "close 400",
+                r"uninstall C:\Apps\game-service\uninstall.exe",
+                "wait Game Service",
+                r"remove HKLM\SOFTWARE\Game Service",
+                r"remove C:\Program Files\Game Service",
+            ]
+        );
+        let step = &done["structuredContent"]["steps"][0];
+        assert_eq!(step["still_installed"], false, "{step}");
+        // The machine key needed administrator rights and stayed.
+        assert_eq!(step["remaining"][0]["path"], r"HKLM\SOFTWARE\Game Service");
+    }
+
+    #[tokio::test]
+    async fn a_process_outside_the_programs_folders_is_never_closed() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call(
+                "plan_removal",
+                json!({ "programs": ["Example", "Paper Browser", "OldGame"], "level": "all" }),
+            )
+            .await;
+        let id = plan_id(&plan);
+        session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        let closed: Vec<String> = recorder
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("close"))
+            .collect();
+        assert_eq!(closed, ["close 100", "close 300"]);
     }
 
     /// The command line each tool does the work of.
@@ -1475,6 +1596,8 @@ mod tests {
     /// Engine calls that change the machine.
     const ENGINE_CHANGES: &[&str] = &[
         "remove_leftovers",
+        "close_processes",
+        "TerminateProcess",
         "uninstall::run",
         "remove_package",
         "restore::",
