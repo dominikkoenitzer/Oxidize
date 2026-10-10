@@ -2132,6 +2132,10 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         items.extend(links::into_removed(handlers, &removed, &others));
     }
     dedupe_by_path(&mut items);
+    // A link type that goes takes its permission to open without asking with
+    // it, and one that is already gone leaves only that permission behind.
+    let allowed = links::scan_allowed_link_types(&items, target);
+    items.extend(allowed);
     ScanReport {
         program_name: target.display_name.clone(),
         installed,

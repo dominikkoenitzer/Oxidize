@@ -28,6 +28,11 @@
   publisher, folders, uninstall key and uninstaller. A vendor's folder that a
   service or task runs from is listed at medium, and one on the desktop is
   left alone.
+- A link type's permission to open without asking (`ProtocolExecute`, for the
+  user and the machine in both views) goes with its handler when no other
+  handler of the link type stays, at the handler's level. With the handler
+  already gone it goes when the link type is named after the program. Web,
+  mail and Windows' own link types keep theirs.
 - A folder in the Start menu can be a leftover, never one of Windows' own;
   folders named after the product that hold a longer namesake are kept only
   while another installed program carries the name; shortcuts to a missing

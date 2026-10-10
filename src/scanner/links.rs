@@ -1,13 +1,14 @@
 //! Leftovers that point at a program from outside its own folders and keys:
-//! link types, shortcuts, temp folders and the uninstall entries of its
-//! parts. Where a command or a shortcut leads counts before its name.
+//! link types and their permission to open without asking, shortcuts, temp
+//! folders and the uninstall entries of its parts. Where a command or a
+//! shortcut leads counts before its name.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    dir_contains, env_dir, exe_missing, fs_denied, is_brand_name, is_exact_product, locate_exe,
-    matches_publisher, norm_path_key, other_program_install_dirs, own_install_folder,
+    carries_brand, dir_contains, env_dir, exe_missing, fs_denied, is_brand_name, is_exact_product,
+    locate_exe, matches_publisher, norm_path_key, other_program_install_dirs, own_install_folder,
     owned_folders, path_names_product, path_within_shared_dir, push_dir_leftover, score_product,
     Snapshot,
 };
@@ -23,6 +24,67 @@ const CLASSES_ROOTS: [(Hive, &str); 2] = [
 
 /// Where Windows records the handler picked for a link type.
 const URL_CHOICES: &str = r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations";
+
+/// Where a link type is marked to open without asking first: for the user,
+/// and for the machine in both views.
+const OPEN_WITHOUT_ASKING: [(Hive, &str); 3] = [
+    (
+        Hive::CurrentUser,
+        r"Software\Microsoft\Internet Explorer\ProtocolExecute",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\Microsoft\Internet Explorer\ProtocolExecute",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\WOW6432Node\Microsoft\Internet Explorer\ProtocolExecute",
+    ),
+];
+
+/// Link types every program can open, and Windows' own.
+const SHARED_SCHEMES: &[&str] = &[
+    "about",
+    "callto",
+    "feed",
+    "feeds",
+    "file",
+    "ftp",
+    "ftps",
+    "http",
+    "https",
+    "irc",
+    "ircs",
+    "javascript",
+    "ldap",
+    "lpa",
+    "magnet",
+    "mailto",
+    "mms",
+    "news",
+    "nntp",
+    "res",
+    "search",
+    "search-ms",
+    "shell",
+    "sip",
+    "sips",
+    "sms",
+    "snews",
+    "tbauth",
+    "tel",
+    "telnet",
+    "vbscript",
+    "webcal",
+    "webcals",
+    "wifi",
+    "wpc",
+    "xmpp",
+];
+
+/// How Windows' own link types begin: `ms-settings`, `microsoft-edge`,
+/// `windows.tbauth`.
+const SHARED_SCHEME_PREFIXES: &[&str] = &["ms-", "microsoft", "windows"];
 
 /// Can this be the name of a link type such as `example-player://`? File
 /// types (`.txt`) and class ids (`{...}`) cannot, which skips most of the
@@ -128,11 +190,20 @@ fn match_link_handler(command: &str, target: &ScanTarget) -> Option<(Confidence,
     match_handler(command, target, "link handler inside the install folder")
 }
 
-/// Is a handler choice recorded for this link type? Windows keeps one for
-/// the types several programs can open, such as web and mail links. Such a
-/// key is the machine's, whatever its command runs now.
+/// Is this a link type every program can open, or one of Windows' own?
+fn well_known_scheme(scheme: &str) -> bool {
+    let lower = scheme.to_ascii_lowercase();
+    SHARED_SCHEMES.contains(&lower.as_str())
+        || SHARED_SCHEME_PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
+/// Is this link type shared: well known, or with a handler choice recorded
+/// for it? Windows keeps one for the types several programs can open, such
+/// as web and mail links. Such a key is the machine's, whatever its command
+/// runs now.
 fn shared_scheme(scheme: &str) -> bool {
-    registry::key_exists(Hive::CurrentUser, &format!(r"{URL_CHOICES}\{scheme}"))
+    well_known_scheme(scheme)
+        || registry::key_exists(Hive::CurrentUser, &format!(r"{URL_CHOICES}\{scheme}"))
 }
 
 /// Link types whose handler runs the program: the whole key of each. Only
@@ -180,6 +251,110 @@ pub(super) fn scan_link_handlers(target: &ScanTarget) -> (Vec<Leftover>, Vec<Poi
         }
     }
     (out, pointers)
+}
+
+/// A link type's entry under `OPEN_WITHOUT_ASKING`.
+struct Allowed {
+    hive: Hive,
+    key: String,
+    scheme: String,
+}
+
+/// Is a link type named after the program: it carries the vendor's word
+/// with nothing else of theirs installed, or the product's name for sure?
+fn scheme_names_program(scheme: &str, target: &ScanTarget) -> bool {
+    target
+        .brand
+        .as_deref()
+        .filter(|_| target.brand_alone)
+        .is_some_and(|brand| carries_brand(scheme, brand))
+        || matches!(score_product(scheme, target), Some((Confidence::High, _)))
+}
+
+/// The entries that let a link type open without asking, once the link type
+/// is gone. `handlers` are the keys of the link types that are there now and
+/// `items` what the scan removes. An entry goes when every handler of its
+/// link type goes, at the least sure of their levels, or when its link type
+/// has no handler left and is named after the program. A shared link type's
+/// entry stays.
+fn allowed_leftovers(
+    allowed: Vec<Allowed>,
+    handlers: &[(Hive, String)],
+    items: &[Leftover],
+    target: &ScanTarget,
+) -> Vec<Leftover> {
+    let going = |hive: Hive, key: &str| {
+        items
+            .iter()
+            .filter(|l| {
+                l.kind == LeftoverKind::RegistryKey
+                    && l.hive == Some(hive)
+                    && l.subpath
+                        .as_deref()
+                        .is_some_and(|p| p.eq_ignore_ascii_case(key))
+            })
+            .map(|l| l.confidence)
+            .min()
+    };
+    allowed
+        .into_iter()
+        .filter(|a| !shared_scheme(&a.scheme))
+        .filter_map(|a| {
+            let mut levels = Vec::new();
+            for (hive, key) in handlers {
+                let scheme = key.rsplit('\\').next().unwrap_or(key);
+                if scheme.eq_ignore_ascii_case(&a.scheme) {
+                    // A handler that stays still opens it.
+                    levels.push(going(*hive, key)?);
+                }
+            }
+            let (conf, reason) = match levels.into_iter().max() {
+                Some(conf) => (conf, "lets the program's link type open without asking"),
+                None if scheme_names_program(&a.scheme, target) => (
+                    Confidence::High,
+                    "lets the program's link type open without asking, its handler is gone",
+                ),
+                None => return None,
+            };
+            Some(Leftover::reg_key(a.hive, a.key, conf, reason))
+        })
+        .collect()
+}
+
+/// The entries that let one of the program's link types open without asking:
+/// those of a link type whose handlers all go with `items`, the scan's
+/// findings, and those of a link type named after the program that has no
+/// handler left.
+pub(super) fn scan_allowed_link_types(items: &[Leftover], target: &ScanTarget) -> Vec<Leftover> {
+    let allowed: Vec<Allowed> = OPEN_WITHOUT_ASKING
+        .into_iter()
+        .flat_map(|(hive, base)| {
+            registry::enum_subkeys(hive, base)
+                .into_iter()
+                .filter(|s| scheme_name(s))
+                .map(move |scheme| Allowed {
+                    hive,
+                    key: format!(r"{base}\{scheme}"),
+                    scheme,
+                })
+        })
+        .collect();
+    let mut schemes: Vec<String> = allowed
+        .iter()
+        .map(|a| a.scheme.to_ascii_lowercase())
+        .collect();
+    schemes.sort();
+    schemes.dedup();
+    let mut handlers = Vec::new();
+    for scheme in &schemes {
+        for (hive, base) in CLASSES_ROOTS {
+            let key = format!(r"{base}\{scheme}");
+            if registry::value_exists(hive, &key, "URL Protocol") {
+                handlers.push((hive, key));
+            }
+        }
+    }
+    allowed_leftovers(allowed, &handlers, items, target)
 }
 
 /// Can this be a program's own file type class? Programs name theirs
@@ -763,6 +938,155 @@ mod tests {
         // Nothing goes, nothing is pointed into.
         let none = into_removed(vec![shortcut(r"C:\x.lnk", build.join("a.exe"))], &[], &[]);
         assert!(none.is_empty());
+    }
+
+    const SCHEMES: [&str; 3] = ["brightway", "brightway-player", "brightway-studio"];
+
+    /// An entry that lets `scheme` open without asking, under one of
+    /// `OPEN_WITHOUT_ASKING`.
+    fn allowed((hive, base): (Hive, &str), scheme: &str) -> Allowed {
+        Allowed {
+            hive,
+            key: format!(r"{base}\{scheme}"),
+            scheme: scheme.to_string(),
+        }
+    }
+
+    fn user_handler(scheme: &str) -> (Hive, String) {
+        (Hive::CurrentUser, format!(r"Software\Classes\{scheme}"))
+    }
+
+    fn machine_handler(scheme: &str) -> (Hive, String) {
+        (Hive::LocalMachine, format!(r"SOFTWARE\Classes\{scheme}"))
+    }
+
+    /// The scan's finding for a handler that goes.
+    fn going((hive, key): (Hive, String), conf: Confidence) -> Leftover {
+        Leftover::reg_key(hive, key, conf, "link handler inside the install folder")
+    }
+
+    fn paths(found: &[Leftover]) -> Vec<&str> {
+        found.iter().map(|l| l.path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_link_types_permission_to_open_goes_with_its_handler() {
+        let [user, _, machine32] = OPEN_WITHOUT_ASKING;
+        let mut entries: Vec<Allowed> = SCHEMES.iter().map(|s| allowed(user, s)).collect();
+        entries.push(allowed(machine32, "brightway"));
+        let handlers: Vec<_> = SCHEMES.iter().map(|s| user_handler(s)).collect();
+        let items: Vec<_> = handlers
+            .iter()
+            .map(|h| going(h.clone(), Confidence::High))
+            .collect();
+        // The handler going is what counts, not the link type's name.
+        let found = allowed_leftovers(entries, &handlers, &items, &quillmark(Some(HOME)));
+        assert_eq!(
+            paths(&found),
+            [
+                r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway",
+                r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway-player",
+                r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway-studio",
+                r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Internet Explorer\ProtocolExecute\brightway",
+            ]
+        );
+        assert!(found.iter().all(|l| l.confidence == Confidence::High
+            && l.reason == "lets the program's link type open without asking"));
+
+        // Two handlers that both go: the less sure one sets the level.
+        let handlers = vec![user_handler("brightway"), machine_handler("brightway")];
+        let items = vec![
+            going(handlers[0].clone(), Confidence::High),
+            going(handlers[1].clone(), Confidence::Medium),
+        ];
+        let found = allowed_leftovers(
+            vec![allowed(user, "brightway")],
+            &handlers,
+            &items,
+            &brightway(true),
+        );
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn a_link_types_permission_to_open_outlives_its_handler_only_by_the_programs_name() {
+        let [user, machine, _] = OPEN_WITHOUT_ASKING;
+        let entries = || {
+            let mut v: Vec<Allowed> = SCHEMES.iter().map(|s| allowed(user, s)).collect();
+            v.push(allowed(machine, "example-notes"));
+            v
+        };
+        let found = allowed_leftovers(entries(), &[], &[], &brightway(true));
+        assert_eq!(
+            paths(&found),
+            [
+                r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway",
+                r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway-player",
+                r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway-studio",
+            ]
+        );
+        assert!(found.iter().all(|l| l.confidence == Confidence::High
+            && l.reason
+                == "lets the program's link type open without asking, its handler is gone"));
+
+        // With another product of the vendor's installed, only the program's
+        // own name counts.
+        let found = allowed_leftovers(entries(), &[], &[], &brightway(false));
+        assert_eq!(
+            paths(&found),
+            [r"HKCU\Software\Microsoft\Internet Explorer\ProtocolExecute\brightway-player"]
+        );
+    }
+
+    #[test]
+    fn a_link_types_permission_to_open_stays_while_another_handler_opens_it() {
+        let [user, machine, _] = OPEN_WITHOUT_ASKING;
+        let t = brightway(true);
+        // The user's handler goes, the machine's stays.
+        let handlers = vec![user_handler("brightway"), machine_handler("brightway")];
+        let items = vec![going(handlers[0].clone(), Confidence::High)];
+        let entries = vec![allowed(user, "brightway"), allowed(machine, "brightway")];
+        assert!(allowed_leftovers(entries, &handlers, &items, &t).is_empty());
+
+        // A handler nothing removes, whatever the link type is called.
+        let entries: Vec<Allowed> = SCHEMES.iter().map(|s| allowed(user, s)).collect();
+        let handlers: Vec<_> = SCHEMES.iter().map(|s| machine_handler(s)).collect();
+        assert!(allowed_leftovers(entries, &handlers, &[], &t).is_empty());
+    }
+
+    #[test]
+    fn a_shared_link_types_permission_to_open_stays() {
+        let [user, machine, _] = OPEN_WITHOUT_ASKING;
+        let t = brightway(true);
+        let shared = [
+            "http",
+            "HTTPS",
+            "ftp",
+            "mailto",
+            "file",
+            "ms-settings",
+            "ms-brightway",
+            "microsoft-edge",
+            "windows.tbauth",
+        ];
+        let entries = || {
+            shared
+                .iter()
+                .flat_map(|s| [allowed(user, s), allowed(machine, s)])
+                .collect::<Vec<_>>()
+        };
+        // Their handlers go, or there are none, even named after the program.
+        let handlers: Vec<_> = shared.iter().map(|s| user_handler(s)).collect();
+        let items: Vec<_> = handlers
+            .iter()
+            .map(|h| going(h.clone(), Confidence::High))
+            .collect();
+        assert!(allowed_leftovers(entries(), &handlers, &items, &t).is_empty());
+        assert!(allowed_leftovers(entries(), &[], &[], &t).is_empty());
+        for scheme in SCHEMES.iter().chain(&["example-notes"]) {
+            assert!(!well_known_scheme(scheme), "{scheme}");
+        }
     }
 
     fn entry(uninstall: Option<&str>, icon: Option<&str>, folder: Option<&str>) -> Program {
