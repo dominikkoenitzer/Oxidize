@@ -15,8 +15,9 @@ use eframe::egui::{self, Color32, RichText};
 
 use oxidize::complete::{self, CloseHow, Outcome, VendorStep};
 use oxidize::model::{Confidence, Group, Leftover, Program, ScanReport};
+use oxidize::restore::RestoreItem;
 use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
-use oxidize::{registry, scanner, uninstall, util};
+use oxidize::{backup, registry, restore, scanner, uninstall, util};
 
 /// The lowest confidence "Remove completely" removes.
 const COMPLETE_LEVEL: Confidence = Confidence::High;
@@ -64,6 +65,11 @@ enum Msg {
         outcome: Box<Outcome>,
         dry_run: bool,
     },
+    /// An undo from a backup ended.
+    Restored {
+        backup: String,
+        result: Result<Vec<RestoreItem>, String>,
+    },
     /// An extracted program icon (raw RGBA), keyed by the program's id.
     Icon {
         id: String,
@@ -98,6 +104,8 @@ enum Action {
     Uninstall(Program),
     Remove(Vec<Leftover>, String),
     RemoveCompletely(Program),
+    /// Restore the named backup.
+    Undo(String),
     RestartAdmin,
 }
 
@@ -335,6 +343,22 @@ impl OxidizeApp {
         });
     }
 
+    fn start_undo(&mut self, ctx: &egui::Context, name: String) {
+        self.busy = true;
+        let line = format!("Restoring {name}...");
+        self.log.push(line.clone());
+        self.status = line;
+        self.spawn(ctx, move || {
+            let result = backup::find_backup(&name)
+                .and_then(|info| restore::restore(&info, false))
+                .map_err(|e| format!("{e:#}"));
+            Msg::Restored {
+                backup: name,
+                result,
+            }
+        });
+    }
+
     /// Take in a finished complete removal. True when the program list
     /// should be read again because something changed.
     fn on_completed(&mut self, program: Program, outcome: Outcome, dry_run: bool) -> bool {
@@ -354,6 +378,54 @@ impl OxidizeApp {
             dry_run,
         });
         !dry_run
+    }
+
+    /// Take in a finished undo. True when the program list should be read
+    /// again.
+    fn on_restored(&mut self, name: &str, result: Result<Vec<RestoreItem>, String>) -> bool {
+        self.busy = false;
+        match result {
+            Ok(items) => {
+                let mut restored = 0;
+                let mut failed = 0;
+                for item in &items {
+                    match &item.result {
+                        Ok(()) => {
+                            restored += 1;
+                            self.log.push(format!("restored {}", item.path));
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            self.log.push(format!("failed {}: {e}", item.path));
+                        }
+                    }
+                }
+                let mut line = format!("Restored {restored} items from {name}");
+                if failed > 0 {
+                    line.push_str(&format!(", {failed} failed"));
+                }
+                self.log.push(line.clone());
+                self.status = line;
+                // The result on screen no longer holds.
+                self.complete = None;
+                true
+            }
+            Err(e) => {
+                self.log.push(format!("ERROR: Undo failed: {e}"));
+                self.status = format!("Undo failed: {e}");
+                false
+            }
+        }
+    }
+
+    /// The backup the last complete removal of the selected program made,
+    /// which "Undo" restores. None after a dry run or without backups.
+    fn undo_backup(&self) -> Option<&str> {
+        let done = self.complete.as_ref()?;
+        if done.dry_run || self.selected.as_deref() != Some(done.program.id()) {
+            return None;
+        }
+        done.outcome.removal.as_ref()?.backup_name.as_deref()
     }
 
     /// The complete removal to show for the selected program, if any.
@@ -475,6 +547,11 @@ impl OxidizeApp {
                     dry_run,
                 } => {
                     if self.on_completed(program, *outcome, dry_run) {
+                        self.load_programs(ctx);
+                    }
+                }
+                Msg::Restored { backup, result } => {
+                    if self.on_restored(&backup, result) {
                         self.load_programs(ctx);
                     }
                 }
@@ -950,9 +1027,12 @@ impl eframe::App for OxidizeApp {
             ui.separator();
 
             // The last complete removal of this program, until it is scanned
-            // again.
+            // again or undone.
             if let Some(done) = self.shown_complete() {
-                show_complete(ui, done);
+                let undo = self.undo_backup().map(str::to_string);
+                if show_complete(ui, done, undo.is_some(), !self.busy) {
+                    action = undo.map(Action::Undo);
+                }
                 return;
             }
 
@@ -1085,6 +1165,7 @@ impl eframe::App for OxidizeApp {
                 }
                 // A question is already on screen: let the user answer it first.
                 Action::Uninstall(_) | Action::Remove(..) | Action::RemoveCompletely(_) => {}
+                Action::Undo(name) => self.start_undo(ctx, name),
                 Action::RestartAdmin => match safety::relaunch_elevated() {
                     Ok(()) => std::process::exit(0),
                     Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
@@ -1094,10 +1175,12 @@ impl eframe::App for OxidizeApp {
     }
 }
 
-/// Render how a complete removal ended.
-fn show_complete(ui: &mut egui::Ui, done: &Completed) {
+/// Render how a complete removal ended. True when "Undo" was clicked; the
+/// button shows only when `undo` is true and works only when `idle`.
+fn show_complete(ui: &mut egui::Ui, done: &Completed, undo: bool, idle: bool) -> bool {
     let out = &done.outcome;
     let v = &out.verdict;
+    let mut clicked = false;
     if done.dry_run {
         ui.label(format!(
             "Dry run: {} items would be removed, {} would be closed.",
@@ -1105,7 +1188,7 @@ fn show_complete(ui: &mut egui::Ui, done: &Completed) {
             running_processes(out.would_close.len())
         ));
         render_items(ui, &out.selected);
-        return;
+        return false;
     }
     if out.complete() {
         ui.label(RichText::new("Nothing left.").color(conf_color(Confidence::High)));
@@ -1132,11 +1215,16 @@ fn show_complete(ui: &mut egui::Ui, done: &Completed) {
     if let Some(e) = &out.error {
         ui.colored_label(Color32::from_rgb(210, 70, 70), e);
     }
+    if undo {
+        ui.add_space(4.0);
+        clicked = ui.add_enabled(idle, egui::Button::new("Undo")).clicked();
+    }
     if !v.remaining.is_empty() {
         ui.add_space(6.0);
         ui.label(RichText::new("Still there:").strong());
         render_items(ui, &v.remaining);
     }
+    clicked
 }
 
 /// A list of leftovers without checkboxes, grouped like a scan.
@@ -1533,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_removal_is_stored_and_logged() {
+    fn a_complete_removal_is_stored_with_its_undo_backup() {
         let program = example_program();
         let mut app = app();
         app.selected = Some(program.id().to_string());
@@ -1545,6 +1633,7 @@ mod tests {
         assert!(!app.busy);
         let done = app.shown_complete().expect("the result is shown");
         assert!(done.outcome.complete());
+        assert_eq!(app.undo_backup(), Some("example-player-1"));
         // It stays reachable once it leaves the installed list.
         assert_eq!(app.selected_program().map(Program::id), Some(program.id()));
         assert_eq!(app.status, "Example Player: nothing left.");
@@ -1590,6 +1679,62 @@ mod tests {
             app.status,
             "dry run: 1 items of Example Player would be removed"
         );
+    }
+
+    #[test]
+    fn undo_shows_only_with_a_backup() {
+        let program = example_program();
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+
+        app.on_completed(program.clone(), finished(None), false);
+        assert_eq!(app.undo_backup(), None, "no backup was made");
+
+        app.on_completed(program.clone(), finished(Some("example-player-1")), true);
+        assert_eq!(app.undo_backup(), None, "a dry run made none");
+
+        app.on_completed(program.clone(), finished(Some("example-player-1")), false);
+        assert_eq!(app.undo_backup(), Some("example-player-1"));
+        app.selected = Some("other-program".to_string());
+        assert_eq!(
+            app.undo_backup(),
+            None,
+            "only for the program it belongs to"
+        );
+    }
+
+    #[test]
+    fn undo_logs_each_item_and_clears_the_result() {
+        let program = example_program();
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+        app.on_completed(program, finished(Some("example-player-1")), false);
+
+        let items = vec![
+            RestoreItem {
+                path: r"C:\Users\me\AppData\Local\ExamplePlayer".to_string(),
+                result: Ok(()),
+            },
+            RestoreItem {
+                path: r"HKCU\Software\Example Studio".to_string(),
+                result: Err("access denied".to_string()),
+            },
+        ];
+        assert!(app.on_restored("example-player-1", Ok(items)));
+        assert!(app.complete.is_none());
+        assert_eq!(
+            app.status,
+            "Restored 1 items from example-player-1, 1 failed"
+        );
+        assert!(app
+            .log
+            .iter()
+            .any(|l| l == r"failed HKCU\Software\Example Studio: access denied"));
+
+        // A backup that cannot be found changes nothing and keeps the result.
+        app.on_completed(example_program(), finished(Some("example-player-1")), false);
+        assert!(!app.on_restored("example-player-1", Err("no backup named that".to_string())));
+        assert!(app.undo_backup().is_some());
     }
 
     #[test]
