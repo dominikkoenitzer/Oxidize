@@ -92,50 +92,156 @@ pub fn is_elevated() -> bool {
 }
 
 /// Relaunch the current process through the shell "runas" verb (UAC prompt),
-/// forwarding our arguments. Exit after this returns `Ok`.
+/// forwarding our arguments, without waiting for it. Exit after this
+/// returns `Ok`.
 #[cfg(windows)]
 pub fn relaunch_elevated() -> Result<()> {
+    use windows::Win32::Foundation::CloseHandle;
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let process = shell_runas(&elevated_params(None, &args))?;
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    Ok(())
+}
+
+/// Run this command line again as administrator (UAC prompt) and wait for
+/// it. With `result_file` the elevated run writes its stdout there. Returns
+/// the run's exit code.
+#[cfg(windows)]
+pub fn run_elevated(result_file: Option<&Path>) -> Result<i32> {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject, INFINITE};
+
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let process = shell_runas(&elevated_params(result_file, &args))?;
+    let mut code = 1u32;
+    let read = unsafe {
+        WaitForSingleObject(process, INFINITE);
+        let read = GetExitCodeProcess(process, &mut code);
+        let _ = CloseHandle(process);
+        read
+    };
+    read.context("reading the exit code of the elevated run")?;
+    Ok(code as i32)
+}
+
+/// Start this program through the "runas" verb with `params` and return
+/// its process handle. A declined UAC prompt is [`Failure::cancelled`].
+#[cfg(windows)]
+fn shell_runas(params: &str) -> Result<windows::Win32::Foundation::HANDLE> {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{w, PCWSTR};
-    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::Foundation::ERROR_CANCELLED;
+    use windows::Win32::UI::Shell::{
+        ShellExecuteExW, SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
+    };
     use windows::Win32::UI::WindowsAndMessaging::SW_NORMAL;
 
+    let wide = |s: &OsStr| -> Vec<u16> { s.encode_wide().chain(std::iter::once(0)).collect() };
     let exe = std::env::current_exe().context("resolving current executable path")?;
-    let exe_w: Vec<u16> = exe
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    let joined = std::env::args()
-        .skip(1)
-        .map(|a| quote_arg(&a))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let params_w: Vec<u16> = OsStr::new(&joined)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-
-    unsafe {
-        let result = ShellExecuteW(
-            None,
-            w!("runas"),
-            PCWSTR(exe_w.as_ptr()),
-            if joined.is_empty() {
-                PCWSTR::null()
-            } else {
-                PCWSTR(params_w.as_ptr())
-            },
-            PCWSTR::null(),
-            SW_NORMAL,
-        );
-        if (result.0 as isize) <= 32 {
-            bail!("could not relaunch elevated; the UAC prompt may have been declined");
+    let exe_w = wide(exe.as_os_str());
+    let params_w = wide(OsStr::new(params));
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: w!("runas"),
+        lpFile: PCWSTR(exe_w.as_ptr()),
+        lpParameters: if params.is_empty() {
+            PCWSTR::null()
+        } else {
+            PCWSTR(params_w.as_ptr())
+        },
+        nShow: SW_NORMAL.0,
+        ..Default::default()
+    };
+    if let Err(e) = unsafe { ShellExecuteExW(&mut info) } {
+        if e.code() == ERROR_CANCELLED.to_hresult() {
+            return Err(
+                crate::exit::Failure::cancelled("the UAC prompt was declined", false).into(),
+            );
         }
+        bail!("could not relaunch elevated: {e}");
     }
+    if info.hProcess.is_invalid() {
+        bail!("could not relaunch elevated: Windows returned no process");
+    }
+    Ok(info.hProcess)
+}
+
+/// The arguments of an elevated run: the result file first, so it comes
+/// before the subcommand and any `--`, then ours unchanged.
+#[cfg(windows)]
+fn elevated_params(result_file: Option<&Path>, args: &[String]) -> String {
+    let mut all = Vec::with_capacity(args.len() + 2);
+    if let Some(path) = result_file {
+        all.push(quote_arg("--result-file"));
+        all.push(quote_arg(&path.to_string_lossy()));
+    }
+    all.extend(args.iter().map(|a| quote_arg(a)));
+    all.join(" ")
+}
+
+/// Start of the name of every file an elevated run writes its stdout to.
+const RESULT_FILE_PREFIX: &str = "oxidize-elevated-";
+
+/// A new empty file in `%TEMP%` for an elevated run's stdout.
+pub fn new_result_file() -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let name = format!("{RESULT_FILE_PREFIX}{}-{stamp}.out", std::process::id());
+    let path = std::env::temp_dir().join(name);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    Ok(path)
+}
+
+/// Whether `path` is named like a file [`new_result_file`] makes. An
+/// elevated run writes to no other.
+pub fn is_result_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(RESULT_FILE_PREFIX) && n.ends_with(".out"))
+}
+
+/// Send this process's stdout to `path`, an existing result file. Call it
+/// before anything is printed. Rust's stdout asks Windows for the handle on
+/// every write, so `println!` follows.
+#[cfg(windows)]
+pub fn send_stdout_to(path: &Path) -> Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::{SetStdHandle, STD_OUTPUT_HANDLE};
+
+    if !is_result_file(path) {
+        bail!("{} is not a result file", path.display());
+    }
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    // Stays open until the process ends.
+    let handle = HANDLE(file.into_raw_handle());
+    unsafe { SetStdHandle(STD_OUTPUT_HANDLE, handle) }.context("redirecting stdout")?;
     Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn run_elevated(_result_file: Option<&Path>) -> Result<i32> {
+    bail!("elevation is only supported on Windows")
+}
+
+#[cfg(not(windows))]
+pub fn send_stdout_to(_path: &Path) -> Result<()> {
+    bail!("redirecting stdout is only supported on Windows")
 }
 
 /// Quote one argument so `CommandLineToArgvW` parses it back unchanged.
@@ -558,5 +664,98 @@ mod tests {
         assert_eq!(quote_arg("plain"), "plain");
         assert_eq!(quote_arg("two words"), "\"two words\"");
         assert_eq!(quote_arg(r"C:\Program Files\"), r#""C:\Program Files\\""#);
+    }
+
+    /// Split a command line the way the elevated run's Windows does.
+    #[cfg(windows)]
+    fn split_like_windows(line: &str) -> Vec<String> {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{LocalFree, HLOCAL};
+        use windows::Win32::UI::Shell::CommandLineToArgvW;
+
+        let wide: Vec<u16> = line.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut n = 0i32;
+        unsafe {
+            let argv = CommandLineToArgvW(PCWSTR(wide.as_ptr()), &mut n);
+            assert!(!argv.is_null());
+            let out = (0..n as usize)
+                .map(|i| (*argv.add(i)).to_string().unwrap())
+                .collect();
+            let _ = LocalFree(Some(HLOCAL(argv as _)));
+            out
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_result_file_survives_the_relaunch_command_line() {
+        use crate::cli::{Cli, Commands};
+        use clap::Parser;
+
+        let path = Path::new(r"C:\Users\Example User\AppData\Local\Temp\oxidize-elevated-7-9.out");
+        let args: Vec<String> = [
+            "uninstall",
+            "Example Player",
+            r#"Odd "quoted" name\"#,
+            "--json",
+            "--yes",
+            "--elevate",
+            "--",
+            "--not-a-flag",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let params = elevated_params(Some(path), &args);
+        let argv = split_like_windows(&format!("oxidize.exe {params}"));
+        assert_eq!(
+            argv[1..3],
+            ["--result-file".to_string(), path.display().to_string()]
+        );
+        assert_eq!(argv[3..], args[..]);
+
+        let cli = Cli::try_parse_from(&argv).unwrap();
+        assert_eq!(cli.result_file.as_deref(), Some(path));
+        assert!(cli.json && cli.yes && cli.elevate);
+        let Commands::Uninstall(u) = cli.command else {
+            panic!("not uninstall");
+        };
+        assert_eq!(
+            u.targets,
+            ["Example Player", r#"Odd "quoted" name\"#, "--not-a-flag"]
+        );
+
+        // Without a result file the arguments go through unchanged.
+        let argv = split_like_windows(&format!("oxidize.exe {}", elevated_params(None, &args)));
+        assert_eq!(argv[1..], args[..]);
+    }
+
+    #[test]
+    fn only_a_result_file_takes_the_elevated_output() {
+        assert!(is_result_file(Path::new(
+            r"C:\Temp\oxidize-elevated-12-345.out"
+        )));
+        for path in [
+            r"C:\Windows\System32\drivers\etc\hosts",
+            r"C:\Temp\oxidize-elevated-12-345.txt",
+            r"C:\Temp\other-12-345.out",
+            r"C:\Temp\",
+        ] {
+            assert!(!is_result_file(Path::new(path)), "{path}");
+            // Refused before anything is opened or redirected.
+            assert!(send_stdout_to(Path::new(path)).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_result_file_is_new_and_empty() {
+        let a = new_result_file().unwrap();
+        let b = new_result_file().unwrap();
+        assert_ne!(a, b);
+        assert!(is_result_file(&a));
+        assert_eq!(std::fs::metadata(&a).unwrap().len(), 0);
+        assert!(a.starts_with(std::env::temp_dir()));
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 }

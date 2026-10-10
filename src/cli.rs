@@ -34,6 +34,10 @@ pub struct Cli {
     /// Relaunch as administrator (UAC prompt) first.
     #[arg(long, global = true)]
     pub elevate: bool,
+
+    /// File the elevated run writes its stdout to. `--elevate` sets it.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub result_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -241,6 +245,13 @@ pub enum SortKey {
     Publisher,
 }
 
+/// Whether `--elevate` brings the elevated run's stdout back. Only when
+/// nothing will be asked: with `--json` or `--yes`. Otherwise the run keeps
+/// its own window, where its questions can be answered.
+pub fn captures_elevated_output(json: bool, yes: bool) -> bool {
+    json || yes
+}
+
 /// What `oxidize` does when it is started without arguments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BareStart {
@@ -413,6 +424,36 @@ mod tests {
             let parsed = Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')));
             assert!(parsed.is_err(), "{args}");
         }
+    }
+
+    #[test]
+    fn the_result_file_is_hidden_and_comes_before_the_command() {
+        let path = r"C:\Users\Example User\AppData\Local\Temp\oxidize-elevated-1-2.out";
+        let cli = Cli::try_parse_from([
+            "oxidize",
+            "--result-file",
+            path,
+            "uninstall",
+            "Example Player",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(cli.result_file.as_deref(), Some(std::path::Path::new(path)));
+        assert!(cli.json);
+        assert!(Cli::try_parse_from(["oxidize", "list"])
+            .unwrap()
+            .result_file
+            .is_none());
+        let help = Cli::command().render_long_help().to_string();
+        assert!(!help.contains("result-file"), "{help}");
+        assert!(help.contains("--elevate"));
+    }
+
+    #[test]
+    fn elevated_output_comes_back_only_when_nothing_is_asked() {
+        assert!(captures_elevated_output(true, false));
+        assert!(captures_elevated_output(false, true));
+        assert!(!captures_elevated_output(false, false));
     }
 
     #[test]
