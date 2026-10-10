@@ -1615,6 +1615,7 @@ mod tests {
                 still_installed: false,
                 remaining: Vec::new(),
                 below_level: 1,
+                kept: Vec::new(),
             },
             error: None,
             seconds: 4.2,

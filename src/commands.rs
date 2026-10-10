@@ -1084,6 +1084,7 @@ fn complete_json(
         json_out["still_installed"] = json!(v.still_installed);
         json_out["remaining"] = json!(v.remaining);
         json_out["below_level"] = json!(v.below_level);
+        json_out["kept"] = json!(v.kept);
         json_out["nothing_left"] = json!(out.complete());
     }
     if out.removal.is_some() {
@@ -2954,6 +2955,7 @@ mod tests {
                 still_installed: dry_run,
                 remaining: Vec::new(),
                 below_level: 2,
+                kept: Vec::new(),
             },
             error: None,
             seconds: 1.234,

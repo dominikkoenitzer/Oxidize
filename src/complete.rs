@@ -183,6 +183,8 @@ pub struct Verdict {
     pub remaining: Vec<Leftover>,
     /// Items found below the chosen level, which were never meant to go.
     pub below_level: usize,
+    /// Those items, with their reasons.
+    pub kept: Vec<Leftover>,
 }
 
 /// Judge the scan made after the removal. `level` is the lowest confidence
@@ -198,6 +200,7 @@ pub fn verdict(still_installed: bool, rescan: &ScanReport, level: Confidence) ->
         still_installed,
         remaining,
         below_level: below.len(),
+        kept: below,
     }
 }
 
@@ -958,6 +961,9 @@ mod tests {
         let v = verdict(false, &rescan, Confidence::High);
         assert!(v.nothing_left);
         assert_eq!(v.below_level, 1);
+        // What was kept is named, not only counted.
+        assert_eq!(v.kept.len(), 1);
+        assert_eq!(v.kept[0].path, r"C:\x\Example");
 
         let v = verdict(false, &rescan, Confidence::Low);
         assert!(!v.nothing_left);

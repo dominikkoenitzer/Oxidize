@@ -509,6 +509,19 @@ pub struct ScanTarget {
     /// listed under its brand; a Store app often under a description ("Game
     /// Speech Window") whose words belong to everyone.
     pub lone_words_match: bool,
+    /// The vendor's word, when at least two of the program's name, publisher,
+    /// install path, uninstall key and uninstaller agree on it and it is long
+    /// and uncommon enough to mean something.
+    pub brand: Option<String>,
+    /// No other installed program carries the brand anywhere in its entry,
+    /// so the vendor's folders and keys are this program's alone.
+    pub brand_alone: bool,
+    /// The recorded install folder is the program's own: a folder on its
+    /// path below the install root carries the brand.
+    pub install_vouched: bool,
+    /// The vendor's folder the install folder sits in, when nothing else
+    /// installed is in it and nothing else of the vendor's is installed.
+    pub vendor_dir: Option<PathBuf>,
 }
 
 #[cfg(test)]

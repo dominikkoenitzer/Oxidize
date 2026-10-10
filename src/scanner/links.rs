@@ -6,9 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    dir_contains, env_dir, exe_missing, fs_denied, is_exact_product, locate_exe, matches_publisher,
-    norm_path_key, other_program_install_dirs, own_install_folder, path_names_product,
-    path_within_shared_dir, push_dir_leftover, score_product, Snapshot,
+    dir_contains, env_dir, exe_missing, fs_denied, is_brand_name, is_exact_product, locate_exe,
+    matches_publisher, norm_path_key, other_program_install_dirs, own_install_folder,
+    owned_folders, path_names_product, path_within_shared_dir, push_dir_leftover, score_product,
+    Snapshot,
 };
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanTarget};
 use crate::{lnk, registry, system, util};
@@ -46,15 +47,72 @@ fn match_handler(command: &str, target: &ScanTarget, inside: &str) -> Option<(Co
     if system::in_windows_dir(&exe) {
         return None;
     }
-    if let Some(loc) = own_install_folder(target) {
-        if exe.is_absolute() && system::path_under(&exe, loc) {
-            return Some((Confidence::High, inside.to_string()));
-        }
+    if exe.is_absolute()
+        && owned_folders(target)
+            .iter()
+            .any(|dir| system::path_under(&exe, dir))
+    {
+        return Some((Confidence::High, inside.to_string()));
     }
     if exe_missing(&exe) && path_names_product(&exe, target) {
         return Some((Confidence::High, "points to a missing file".to_string()));
     }
     None
+}
+
+/// A link type or shortcut that did not match on its own, and the file it
+/// leads to. It still goes when that file is in a folder the scan removes.
+pub(super) struct Pointer {
+    what: Pointee,
+    to: PathBuf,
+}
+
+enum Pointee {
+    Link {
+        hive: Hive,
+        key: String,
+        scheme: String,
+    },
+    Shortcut {
+        path: PathBuf,
+        size: Option<u64>,
+    },
+}
+
+/// The link types and shortcuts that lead into `dirs`, the folders that go
+/// with the program, but not into another program's install folder: once
+/// those folders are gone they lead nowhere. Whatever they are called, a
+/// sibling product's shortcut or link type into the vendor's folder goes too.
+pub(super) fn into_removed(
+    pointers: Vec<Pointer>,
+    dirs: &[PathBuf],
+    other_installs: &[PathBuf],
+) -> Vec<Leftover> {
+    let inside = |p: &Path, list: &[PathBuf]| list.iter().any(|d| system::path_under(p, d));
+    pointers
+        .into_iter()
+        .filter(|p| inside(&p.to, dirs) && !inside(&p.to, other_installs))
+        .filter_map(|p| match p.what {
+            Pointee::Link { hive, key, scheme } => (!shared_scheme(&scheme)).then(|| {
+                Leftover::reg_key(
+                    hive,
+                    key,
+                    Confidence::High,
+                    "link handler into a folder that goes with the program",
+                )
+            }),
+            // One inside a folder that goes, goes with it.
+            Pointee::Shortcut { path, .. } if inside(&path, dirs) => None,
+            Pointee::Shortcut { path, size } => Some(Leftover::fs(
+                LeftoverKind::File,
+                path,
+                Confidence::High,
+                "shortcut into a folder that goes with the program",
+                size,
+                false,
+            )),
+        })
+        .collect()
 }
 
 /// Match the command of a link type's handler.
@@ -71,9 +129,11 @@ fn shared_scheme(scheme: &str) -> bool {
 
 /// Link types whose handler runs the program: the whole key of each. Only
 /// keys that carry `URL Protocol` are link types, and only theirs have their
-/// command read.
-pub(super) fn scan_link_handlers(target: &ScanTarget) -> Vec<Leftover> {
+/// command read. The others that run a file by its full path come back as
+/// pointers.
+pub(super) fn scan_link_handlers(target: &ScanTarget) -> (Vec<Leftover>, Vec<Pointer>) {
     let mut out = Vec::new();
+    let mut pointers = Vec::new();
     for (hive, base) in CLASSES_ROOTS {
         for scheme in registry::enum_subkeys(hive, base) {
             if !scheme_name(&scheme) {
@@ -84,10 +144,19 @@ pub(super) fn scan_link_handlers(target: &ScanTarget) -> Vec<Leftover> {
                 continue;
             }
             let command = registry::read_string(hive, &format!(r"{key}\shell\open\command"), "");
-            let Some((conf, reason)) = command
-                .as_deref()
-                .and_then(|c| match_link_handler(c, target))
-            else {
+            let Some(command) = command else {
+                continue;
+            };
+            let Some((conf, reason)) = match_link_handler(&command, target) else {
+                if let Some(to) = system::command_exe(&command)
+                    .map(|exe| locate_exe(&exe))
+                    .filter(|exe| exe.is_absolute() && !system::in_windows_dir(exe))
+                {
+                    pointers.push(Pointer {
+                        what: Pointee::Link { hive, key, scheme },
+                        to,
+                    });
+                }
                 continue;
             };
             if !shared_scheme(&scheme) {
@@ -95,7 +164,7 @@ pub(super) fn scan_link_handlers(target: &ScanTarget) -> Vec<Leftover> {
             }
         }
     }
-    out
+    (out, pointers)
 }
 
 /// Can this be a program's own file type class? Programs name theirs
@@ -200,24 +269,32 @@ fn shortcut_roots() -> Vec<PathBuf> {
     .collect()
 }
 
-/// Does a shortcut lead into the program's install folder? Its file name
-/// says nothing here, so a shortcut called "Start" is found as well.
+/// Does a shortcut lead into the program's folders, or to a file that is
+/// gone from a path that names the product? Its file name says nothing
+/// here, so a shortcut called "Start" is found as well.
 fn match_shortcut(link_target: &Path, target: &ScanTarget) -> Option<(Confidence, String)> {
-    let loc = own_install_folder(target)?;
     if !link_target.is_absolute() || system::in_windows_dir(link_target) {
         return None;
     }
-    system::path_under(link_target, loc)
-        .then(|| (Confidence::High, "shortcut to the program".to_string()))
+    if owned_folders(target)
+        .iter()
+        .any(|dir| system::path_under(link_target, dir))
+    {
+        return Some((Confidence::High, "shortcut to the program".to_string()));
+    }
+    (exe_missing(link_target) && path_names_product(link_target, target))
+        .then(|| (Confidence::High, "shortcut to a missing file".to_string()))
 }
 
 /// Shortcuts in `root` and in its subfolders two levels down whose target is
-/// inside the install folder. A subfolder whose name marks a shared place is
-/// not entered.
-fn scan_shortcuts_in(root: &Path, target: &ScanTarget, out: &mut Vec<Leftover>) {
-    if target.install_location.is_none() {
-        return;
-    }
+/// the program's. A subfolder whose name marks a shared place is not
+/// entered. The other shortcuts with a full path come back as pointers.
+fn scan_shortcuts_in(
+    root: &Path,
+    target: &ScanTarget,
+    out: &mut Vec<Leftover>,
+    pointers: &mut Vec<Pointer>,
+) {
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         let Ok(entries) = fs::read_dir(&dir) else {
@@ -245,8 +322,8 @@ fn scan_shortcuts_in(root: &Path, target: &ScanTarget, out: &mut Vec<Leftover>) 
             let Some(link_target) = lnk::target_of(&path) else {
                 continue;
             };
+            let size = entry.metadata().map(|m| m.len()).ok();
             if let Some((conf, reason)) = match_shortcut(&link_target, target) {
-                let size = entry.metadata().map(|m| m.len()).ok();
                 out.push(Leftover::fs(
                     LeftoverKind::File,
                     path,
@@ -255,19 +332,25 @@ fn scan_shortcuts_in(root: &Path, target: &ScanTarget, out: &mut Vec<Leftover>) 
                     size,
                     false,
                 ));
+            } else if link_target.is_absolute() && !system::in_windows_dir(&link_target) {
+                pointers.push(Pointer {
+                    what: Pointee::Shortcut { path, size },
+                    to: link_target,
+                });
             }
         }
     }
 }
 
 /// Shortcuts in the Start menu and on the desktop that lead into the
-/// program's install folder, whatever they are called.
-pub(super) fn scan_shortcuts(target: &ScanTarget) -> Vec<Leftover> {
+/// program's folders, whatever they are called, and the others as pointers.
+pub(super) fn scan_shortcuts(target: &ScanTarget) -> (Vec<Leftover>, Vec<Pointer>) {
     let mut out = Vec::new();
+    let mut pointers = Vec::new();
     for root in shortcut_roots() {
-        scan_shortcuts_in(&root, target, &mut out);
+        scan_shortcuts_in(&root, target, &mut out, &mut pointers);
     }
-    out
+    (out, pointers)
 }
 
 /// Folders in `root` named after the product. Only a folder named exactly
@@ -285,11 +368,7 @@ fn scan_temp_dir(root: &Path, target: &ScanTarget, snap: &Snapshot) -> Vec<Lefto
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
-        // Shared names, and a folder named after the vendor rather than the
-        // product, are not the product's, here as everywhere else.
-        if fs_denied(&name)
-            || (matches_publisher(&name, target) && !is_exact_product(&name, target))
-        {
+        if fs_denied(&name) {
             continue;
         }
         let path = entry.path();
@@ -299,6 +378,22 @@ fn scan_temp_dir(root: &Path, target: &ScanTarget, snap: &Snapshot) -> Vec<Lefto
             .chain(target.install_location.as_ref())
             .any(|o| dir_contains(&key, &norm_path_key(o)));
         if holds_install {
+            continue;
+        }
+        // The vendor's own temp folder, with nothing else of theirs installed.
+        if is_brand_name(&name, target) {
+            push_dir_leftover(
+                &mut out,
+                path,
+                Confidence::High,
+                "the vendor's temp folder, nothing else of theirs is installed".to_string(),
+                snap.roots(),
+            );
+            continue;
+        }
+        // A folder named after the vendor rather than the product is not the
+        // product's, here as everywhere else.
+        if matches_publisher(&name, target) && !is_exact_product(&name, target) {
             continue;
         }
         let hit = if is_exact_product(&name, target) && !target.vendor_is_shared {
@@ -439,28 +534,40 @@ mod tests {
         write(&root, "Other.lnk", r"C:\Program Files\Other Tool\tool.exe");
         write(&root, "Quillmark.txt", &ours);
 
+        let names = |out: &[Leftover]| {
+            let mut found: Vec<String> = out
+                .iter()
+                .map(|l| {
+                    Path::new(&l.path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .to_string()
+                })
+                .collect();
+            found.sort();
+            found
+        };
         let mut out = Vec::new();
-        scan_shortcuts_in(&root, &quillmark(Some(HOME)), &mut out);
-        let mut found: Vec<String> = out
-            .iter()
-            .map(|l| {
-                Path::new(&l.path)
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string()
-            })
-            .collect();
-        found.sort();
-        assert_eq!(found, ["Start.lnk", "Writer.lnk"]);
+        let mut pointers = Vec::new();
+        scan_shortcuts_in(&root, &quillmark(Some(HOME)), &mut out, &mut pointers);
+        assert_eq!(names(&out), ["Start.lnk", "Writer.lnk"]);
         assert!(out
             .iter()
             .all(|l| l.confidence == Confidence::High && l.reason == "shortcut to the program"));
+        // The other one is kept as a pointer, in case its folder goes.
+        assert_eq!(pointers.len(), 1);
+        assert_eq!(
+            pointers[0].to,
+            Path::new(r"C:\Program Files\Other Tool\tool.exe")
+        );
 
-        // Without a recorded folder there is nothing to point into.
+        // Without a recorded folder, a shortcut still names the product by
+        // the path of a file that is gone.
         let mut out = Vec::new();
-        scan_shortcuts_in(&root, &quillmark(None), &mut out);
-        assert!(out.is_empty());
+        scan_shortcuts_in(&root, &quillmark(None), &mut out, &mut Vec::new());
+        assert_eq!(names(&out), ["Start.lnk", "Writer.lnk"]);
+        assert!(out.iter().all(|l| l.reason == "shortcut to a missing file"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -543,6 +650,86 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn brightway(alone: bool) -> ScanTarget {
+        let mut t = name_target("Brightway Player", Some("Brightway Corporation"));
+        t.brand = Some("brightway".to_string());
+        t.brand_alone = alone;
+        t
+    }
+
+    #[test]
+    fn the_vendors_temp_folder_goes_only_when_nothing_else_of_theirs_is_installed() {
+        let root =
+            std::env::temp_dir().join(format!("oxidize_brand_temp_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(r"Brightway\http")).unwrap();
+        fs::create_dir_all(root.join("Other Tool")).unwrap();
+        let snap = Snapshot::with_programs(Vec::new());
+
+        let found = scan_temp_dir(&root, &brightway(true), &snap);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(Path::new(&found[0].path), root.join("Brightway"));
+        assert_eq!(found[0].confidence, Confidence::High);
+
+        // Another product of theirs is installed: the vendor's folder stays.
+        assert!(scan_temp_dir(&root, &brightway(false), &snap).is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn link_types_and_shortcuts_into_a_removed_folder_go_with_it() {
+        let vendor = PathBuf::from(r"C:\Program Files\Brightway");
+        let build = vendor.join(r"Versions\version-cec3ad5889b447cf");
+        let engine = vendor.join("Shared Engine");
+        let shortcut = |path: &str, to: PathBuf| Pointer {
+            what: Pointee::Shortcut {
+                path: PathBuf::from(path),
+                size: Some(1),
+            },
+            to,
+        };
+        let pointers = vec![
+            // A sibling product's link type and shortcut into the build.
+            Pointer {
+                what: Pointee::Link {
+                    hive: Hive::LocalMachine,
+                    key: r"SOFTWARE\Classes\brightway-studio".to_string(),
+                    scheme: "brightway-studio".to_string(),
+                },
+                to: build.join("BrightwayStudioBeta.exe"),
+            },
+            shortcut(
+                r"C:\Users\x\Desktop\Brightway Studio.lnk",
+                build.join("BrightwayStudioBeta.exe"),
+            ),
+            // Elsewhere, or into another program's folder: they stay.
+            shortcut(
+                r"C:\Users\x\Desktop\Other.lnk",
+                PathBuf::from(r"C:\Program Files\Other Tool\tool.exe"),
+            ),
+            shortcut(r"C:\Users\x\Desktop\Engine.lnk", engine.join("engine.exe")),
+            // Inside the folder itself: it goes with the folder.
+            shortcut(
+                r"C:\Program Files\Brightway\Studio.lnk",
+                build.join("BrightwayStudioBeta.exe"),
+            ),
+        ];
+        let found = into_removed(pointers, std::slice::from_ref(&vendor), &[engine]);
+        let paths: Vec<&str> = found.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                r"HKLM\SOFTWARE\Classes\brightway-studio",
+                r"C:\Users\x\Desktop\Brightway Studio.lnk"
+            ]
+        );
+        assert!(found.iter().all(|l| l.confidence == Confidence::High));
+
+        // Nothing goes, nothing is pointed into.
+        let none = into_removed(vec![shortcut(r"C:\x.lnk", build.join("a.exe"))], &[], &[]);
+        assert!(none.is_empty());
     }
 
     fn entry(uninstall: Option<&str>, icon: Option<&str>, folder: Option<&str>) -> Program {

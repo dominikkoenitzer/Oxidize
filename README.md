@@ -233,7 +233,8 @@ needs `-y` as well; without it the answer is no.
 
 `oxidize uninstall <program> --yes --json` prints `nothing_left`,
 `still_installed`, `remaining` (what the second scan still found, with
-reasons), `below_level`, `closed` (the processes it closed), `uninstaller`,
+reasons), `below_level` and `kept` (the items below the chosen level, with
+reasons), `closed` (the processes it closed), `uninstaller`,
 `uninstaller_step`, `removal` (with the `backup` name) and `seconds`. A dry
 run has `would_close` and `would_remove` instead. With several names a batch
 prints `{"programs": [...], "uninstalled", "failed", "cancelled"}`; a single

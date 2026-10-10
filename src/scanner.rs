@@ -102,6 +102,18 @@ pub fn path_within_shared_dir(p: &Path) -> bool {
     })
 }
 
+/// `path_within_shared_dir` for the part of `p` below the deepest scan root
+/// it is in. The Start menu lives in `Microsoft\Windows`, and a vendor's
+/// folder in it is still the vendor's.
+fn shared_below_root(p: &Path, roots: &[PathBuf]) -> bool {
+    match below_root(p, roots) {
+        Some((_, segments)) => segments
+            .iter()
+            .any(|s| SHARED_DIR_DENY.contains(&s.to_lowercase().as_str())),
+        None => path_within_shared_dir(p),
+    }
+}
+
 pub fn reg_denied(name: &str) -> bool {
     REG_DENY.contains(&name.to_lowercase().as_str())
 }
@@ -254,11 +266,364 @@ fn build_target_from(
             }
         }
     }
-    target.registry = Some((program.registry_key.clone(), program.source));
+    let own = (program.registry_key.clone(), program.source);
+    target.registry = Some(own.clone());
     target.exe_names = own_exe_names(program, install_location.as_deref(), other_installs);
     target.install_location = install_location;
     target.vendor_is_shared = vendor_is_shared(&target, snap);
+
+    let roots = install_roots();
+    target.brand = derive_brand(program, target.install_location.as_deref(), &roots);
+    if let Some(brand) = target.brand.clone() {
+        target.brand_alone = !others_carry(&brand, Some(&own), snap.programs());
+        if let Some(loc) = target.install_location.clone() {
+            let mut others = other_program_paths(Some(&own), snap.programs());
+            others.extend(other_installs.iter().cloned());
+            target.install_vouched = install_vouched(&loc, &target, &others, &roots);
+            target.vendor_dir = vendor_dir_of(&loc, &target, &others, runs, &roots, snap.roots());
+        }
+    }
     target
+}
+
+// Brand
+// -----
+
+/// Words that are never a vendor's own, however often an entry repeats
+/// them: what a product is, how it ships and where it goes.
+const BRAND_STOP: &[&str] = &[
+    "player",
+    "launcher",
+    "update",
+    "updater",
+    "setup",
+    "studio",
+    "studios",
+    "client",
+    "microsoft",
+    "windows",
+    "corporation",
+    "games",
+    "digital",
+    "online",
+    "mobile",
+    "cloud",
+    "desktop",
+    "versions",
+    "version",
+    "current",
+    "latest",
+    "stable",
+    "shared",
+    "local",
+    "roaming",
+    "users",
+    "admin",
+    "machine",
+    "uninstall",
+    "uninstaller",
+    "unins",
+    "installer",
+    "appdata",
+    "browser",
+    "entertainment",
+    "interactive",
+    "system",
+    "device",
+    "devices",
+    "network",
+    "security",
+    "office",
+    "portable",
+];
+
+/// The words of a name, split at punctuation and where lower case turns to
+/// upper case: `ExampleViewerSetup` is three words.
+fn words(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for part in s.split(|c: char| !c.is_alphanumeric()) {
+        let mut word = String::new();
+        let mut after_lower = false;
+        for c in part.chars() {
+            if c.is_uppercase() && after_lower {
+                out.push(word.to_lowercase());
+                word.clear();
+            }
+            after_lower = c.is_lowercase() || c.is_ascii_digit();
+            word.push(c);
+        }
+        if !word.is_empty() {
+            out.push(word.to_lowercase());
+        }
+    }
+    out
+}
+
+/// Can this word be a vendor's? Long enough, letters only (a version or a
+/// hash is not a name), and not one of the words every vendor uses.
+fn brand_word(w: &str) -> bool {
+    w.len() >= 5
+        && w.chars().all(char::is_alphabetic)
+        && !util::is_stopword(w)
+        && !BRAND_STOP.contains(&w)
+        && !fs_denied(w)
+        && !reg_denied(w)
+}
+
+/// Does this name or path carry the brand: one of its words is it, or
+/// starts with it (`ExampleSoft`)?
+fn carries_brand(s: &str, brand: &str) -> bool {
+    words(s).iter().any(|w| w.starts_with(brand))
+}
+
+/// The folders programs install into and keep their data in. Where a folder
+/// sits below one of them says whose it is.
+fn install_roots() -> Vec<PathBuf> {
+    let local = env_dir("LOCALAPPDATA");
+    [
+        env_dir("ProgramFiles"),
+        env_dir("ProgramFiles(x86)"),
+        env_dir("ProgramW6432"),
+        env_dir("ProgramData"),
+        env_dir("APPDATA"),
+        local.clone(),
+        local.map(|p| p.join("Programs")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The deepest of `roots` that `p` is inside, and the folder names from
+/// there down to `p`. `None` when `p` is in none of them, or is one.
+fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
+    let key = norm_path_key(p);
+    let root = roots
+        .iter()
+        .filter(|r| dir_contains(&norm_path_key(r), &key))
+        .max_by_key(|r| norm_path_key(r).len())?;
+    let segments = p
+        .components()
+        .skip(root.components().count())
+        .filter_map(|c| c.as_os_str().to_str())
+        .map(str::to_string)
+        .collect();
+    Some((root.clone(), segments))
+}
+
+/// The vendor's word, from what the program says about itself: its name,
+/// its publisher, the folders of its install path, uninstaller and icon below
+/// the install root, its uninstall key and the names of its executables. A
+/// word counts when at least two of those carry it; of several, the
+/// publisher's wins, then the one most of them carry.
+fn derive_brand(
+    program: &Program,
+    install_location: Option<&Path>,
+    roots: &[PathBuf],
+) -> Option<String> {
+    let as_path = |s: &str| PathBuf::from(util::expand_env_vars(s).trim().trim_matches('"'));
+    let uninstaller = program
+        .uninstall_string
+        .as_deref()
+        .and_then(system::command_exe)
+        .filter(|p| p.is_absolute() && !system::in_windows_dir(p));
+    let icon = program
+        .display_icon
+        .as_deref()
+        .map(|i| as_path(i.split(',').next().unwrap_or(i)))
+        .filter(|p| p.is_absolute() && !system::in_windows_dir(p));
+
+    let mut paths = Vec::new();
+    let mut exes = Vec::new();
+    if let Some((_, segments)) = install_location.and_then(|loc| below_root(loc, roots)) {
+        paths.extend(segments.iter().flat_map(|s| words(s)));
+    }
+    for file in [uninstaller, icon].into_iter().flatten() {
+        if let Some((_, segments)) = file.parent().and_then(|dir| below_root(dir, roots)) {
+            paths.extend(segments.iter().flat_map(|s| words(s)));
+        }
+        if let Some(stem) = file.file_stem().and_then(|s| s.to_str()) {
+            exes.extend(words(stem));
+        }
+    }
+    let sources = [
+        words(&program.display_name),
+        program.publisher.as_deref().map(words).unwrap_or_default(),
+        paths,
+        words(&program.registry_key),
+        exes,
+    ];
+
+    let mut best: Option<(bool, usize, &String)> = None;
+    for word in sources.iter().flatten() {
+        if !brand_word(word) {
+            continue;
+        }
+        let count = sources.iter().filter(|s| s.contains(word)).count();
+        if count < 2 {
+            continue;
+        }
+        let rank = (sources[1].contains(word), count);
+        if best.is_none_or(|(p, c, _)| rank > (p, c)) {
+            best = Some((rank.0, rank.1, word));
+        }
+    }
+    best.map(|(_, _, w)| w.clone())
+}
+
+/// Does any other registered program carry the brand: in its name,
+/// publisher, uninstall key, install folder, uninstaller or icon?
+fn others_carry(brand: &str, own: Option<&(String, RegistrySource)>, programs: &[Program]) -> bool {
+    programs
+        .iter()
+        .filter(|p| {
+            own.is_none_or(|(key, source)| !(p.registry_key == *key && p.source == *source))
+        })
+        .any(|p| {
+            [
+                Some(&p.display_name),
+                p.publisher.as_ref(),
+                Some(&p.registry_key),
+                p.install_location.as_ref(),
+                p.uninstall_string.as_ref(),
+                p.quiet_uninstall_string.as_ref(),
+                p.display_icon.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|s| carries_brand(s, brand))
+        })
+}
+
+/// The install folders, uninstallers and icons of every other program.
+fn other_program_paths(
+    own: Option<&(String, RegistrySource)>,
+    programs: &[Program],
+) -> Vec<PathBuf> {
+    let as_path = |s: &str| PathBuf::from(util::expand_env_vars(s).trim().trim_matches('"'));
+    programs
+        .iter()
+        .filter(|p| {
+            own.is_none_or(|(key, source)| !(p.registry_key == *key && p.source == *source))
+        })
+        .flat_map(|p| {
+            [
+                p.install_location.as_deref().map(as_path),
+                p.uninstall_string.as_deref().and_then(system::command_exe),
+                p.display_icon
+                    .as_deref()
+                    .map(|i| as_path(i.split(',').next().unwrap_or(i))),
+            ]
+        })
+        .flatten()
+        .filter(|p| p.is_absolute() && !system::in_windows_dir(p))
+        .collect()
+}
+
+/// Is a folder or key named after the vendor, with nothing else of the
+/// vendor's installed? Only the brand itself counts, with or without its
+/// company form, or the publisher's whole name when that carries the brand.
+fn is_brand_name(name: &str, target: &ScanTarget) -> bool {
+    let Some(brand) = target.brand.as_deref().filter(|_| target.brand_alone) else {
+        return false;
+    };
+    normalize(name) == brand
+        || without_company_form(name) == brand
+        || (target
+            .publisher
+            .as_deref()
+            .is_some_and(|p| carries_brand(p, brand))
+            && is_publisher_exactly(name, target))
+}
+
+/// Is the recorded install folder the program's own? Its path has to be
+/// below an install root, nothing another program records may be in it, and
+/// a folder on the way down has to carry the brand: `Vendor\Versions\
+/// version-3f2a` is the vendor's version folder. A folder that is itself
+/// named after the vendor is the program's only when nothing else of the
+/// vendor's is installed.
+fn install_vouched(loc: &Path, target: &ScanTarget, others: &[PathBuf], roots: &[PathBuf]) -> bool {
+    let Some(brand) = target.brand.as_deref() else {
+        return false;
+    };
+    if others.iter().any(|o| system::path_under(o, loc)) {
+        return false;
+    }
+    let Some((_, segments)) = below_root(loc, roots) else {
+        return false;
+    };
+    let Some((leaf, above)) = segments.split_last() else {
+        return false;
+    };
+    if above.iter().any(|s| carries_brand(s, brand)) {
+        return true;
+    }
+    let vendors = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
+    carries_brand(leaf, brand) && (!vendors || target.brand_alone)
+}
+
+/// The vendor's folder right below the install root that the install folder
+/// sits in, when it is this program's to remove: nothing else of the
+/// vendor's is installed, nothing another program records is inside, and
+/// nothing runs from it that carries neither the brand nor the product.
+fn vendor_dir_of(
+    loc: &Path,
+    target: &ScanTarget,
+    others: &[PathBuf],
+    runs: &[(Vec<String>, PathBuf)],
+    roots: &[PathBuf],
+    protected: &[PathBuf],
+) -> Option<PathBuf> {
+    let brand = target
+        .brand
+        .as_deref()
+        .filter(|_| target.brand_alone && target.install_vouched)?;
+    let (root, segments) = below_root(loc, roots)?;
+    let [first, _, ..] = segments.as_slice() else {
+        return None;
+    };
+    if !carries_brand(first, brand) || fs_denied(first) || path_within_shared_dir(Path::new(first))
+    {
+        return None;
+    }
+    let dir = root.join(first);
+    if is_protected_path_in(&dir, protected) || others.iter().any(|o| system::path_under(o, &dir)) {
+        return None;
+    }
+    let foreign = runs.iter().any(|(names, exe)| {
+        system::path_under(exe, &dir)
+            && !system::path_under(exe, loc)
+            && !names
+                .iter()
+                .any(|n| carries_brand(n, brand) || score_product(n, target).is_some())
+    });
+    (!foreign).then_some(dir)
+}
+
+/// Does another registered program carry the product's name? Then a folder
+/// that holds a longer namesake can hold that program's version too.
+fn name_in_use(target: &ScanTarget, programs: &[Program]) -> bool {
+    let joined: String = target.name_tokens.concat();
+    programs
+        .iter()
+        .filter(|p| {
+            target
+                .registry
+                .as_ref()
+                .is_none_or(|(key, source)| !(p.registry_key == *key && p.source == *source))
+        })
+        .any(|p| {
+            let mut tokens = significant_tokens(&p.display_name);
+            tokens.extend(
+                p.publisher
+                    .as_deref()
+                    .map(significant_tokens)
+                    .unwrap_or_default(),
+            );
+            (!target.name_tokens.is_empty()
+                && target.name_tokens.iter().all(|t| tokens.contains(t)))
+                || (joined.len() >= 4 && normalize(&p.display_name).contains(&joined))
+        })
 }
 
 /// Is the recorded install folder shared rather than the program's own?
@@ -417,8 +782,16 @@ fn folder_tokens(location: &Path, folder: &str) -> Vec<String> {
         .unwrap_or_default();
     significant_tokens(folder)
         .into_iter()
-        .filter(|t| !container.contains(t) && !fs_denied(t) && !reg_denied(t))
+        .filter(|t| !container.contains(t) && !fs_denied(t) && !reg_denied(t) && !is_hash(t))
         .collect()
+}
+
+/// A build id such as `3f2a9c0d7b1e4a65`: hex digits only, some of them
+/// numbers, and long. It names one build, never the product.
+fn is_hash(token: &str) -> bool {
+    token.len() >= 8
+        && token.chars().all(|c| c.is_ascii_hexdigit())
+        && token.chars().any(|c| c.is_ascii_digit())
 }
 
 /// A target for a program that is no longer registered: all we have is what
@@ -457,6 +830,10 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         registry: None,
         exact_names: Vec::new(),
         lone_words_match: true,
+        brand: None,
+        brand_alone: false,
+        install_vouched: false,
+        vendor_dir: None,
     };
     // "Python Launcher" by the Python Software Foundation boils down to
     // "python", the vendor's word, which every product of theirs carries; the
@@ -749,6 +1126,11 @@ fn owned_exe(p: &Path, target: &ScanTarget) -> Option<&'static str> {
             return Some("inside the install folder");
         }
     }
+    if let Some(dir) = &target.vendor_dir {
+        if system::path_under(p, dir) {
+            return Some("inside the vendor's folder");
+        }
+    }
     let base = util::file_basename_lower(&p.to_string_lossy())?;
     if target.exe_names.contains(&base) {
         return Some("runs the program's executable");
@@ -771,14 +1153,34 @@ fn exe_missing(exe: &Path) -> bool {
     exe.is_absolute() && !exe.exists()
 }
 
-/// A path whose components name the product, for dangling references.
+/// A path whose components name the product, for dangling references. Below
+/// an install root, one that carries the brand does too when nothing else of
+/// the vendor's is installed.
 fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
-    p.components().any(|c| {
+    let named = p.components().any(|c| {
         c.as_os_str()
             .to_str()
             .map(|s| matches!(score_product(s, target), Some((Confidence::High, _))))
             .unwrap_or(false)
-    })
+    });
+    named || path_names_brand(p, target)
+}
+
+fn path_names_brand(p: &Path, target: &ScanTarget) -> bool {
+    let Some(brand) = target.brand.as_deref().filter(|_| target.brand_alone) else {
+        return false;
+    };
+    below_root(p, &install_roots())
+        .is_some_and(|(_, segments)| segments.iter().any(|s| carries_brand(s, brand)))
+}
+
+/// The folders that are wholly the program's: its own install folder and
+/// the vendor's folder around it.
+pub fn owned_folders(target: &ScanTarget) -> Vec<&Path> {
+    own_install_folder(target)
+        .into_iter()
+        .chain(target.vendor_dir.as_deref())
+        .collect()
 }
 
 // Filesystem
@@ -958,7 +1360,7 @@ fn push_dir_leftover(
     reason: String,
     roots: &[PathBuf],
 ) {
-    if is_protected_path_in(&path, roots) || path_within_shared_dir(&path) {
+    if is_protected_path_in(&path, roots) || shared_below_root(&path, roots) {
         return;
     }
     let empty = is_dir_empty(&path);
@@ -1026,10 +1428,13 @@ fn flag_product_children(
     }
 }
 
+/// `name_shared`: another registered program carries the product's name, so
+/// a folder holding a longer namesake may hold its version too.
 fn scan_dir_children(
     root: &Path,
     target: &ScanTarget,
     other_installs: &[PathBuf],
+    name_shared: bool,
     roots: &[PathBuf],
     out: &mut Vec<Leftover>,
 ) {
@@ -1061,8 +1466,20 @@ fn scan_dir_children(
                 .any(|o| dir_contains(&key, &norm_path_key(o)));
             // Reading the folder is only worth it where its name counts.
             let family = std::cell::OnceCell::new();
-            let family = |p: &Path| *family.get_or_init(|| holds_namesake_child(p, target));
-            if is_exact_product(&name, target)
+            let family =
+                |p: &Path| *family.get_or_init(|| name_shared && holds_namesake_child(p, target));
+            if is_brand_name(&name, target) && !houses_other {
+                // The vendor's own folder, with nothing else of theirs
+                // installed and no other program inside: all of it goes,
+                // whatever the vendor's other products left in it.
+                push_dir_leftover(
+                    out,
+                    path,
+                    Confidence::High,
+                    "the vendor's folder, nothing else of theirs is installed".to_string(),
+                    roots,
+                );
+            } else if is_exact_product(&name, target)
                 && !target.vendor_is_shared
                 && !houses_other
                 && !contains_install
@@ -1110,15 +1527,27 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
     let other_installs = other_program_install_dirs(target.registry.as_ref(), snap.programs());
     let other_installs = other_installs.as_slice();
     let roots = snap.roots();
+    let name_shared = name_in_use(target, snap.programs());
 
     // The install folder itself. Its recorded path can be a shared parent
     // (two products under one vendor folder), so it is only flagged whole
-    // when its name identifies this product and nothing else lives inside.
+    // when its name or its path identifies this product and nothing else
+    // lives inside.
     let install_folder = move || {
         let mut out = Vec::new();
         let Some(loc) = &target.install_location else {
             return out;
         };
+        if let Some(dir) = target.vendor_dir.as_ref().filter(|d| d.is_dir()) {
+            push_dir_leftover(
+                &mut out,
+                dir.clone(),
+                Confidence::High,
+                "the vendor's folder around the install folder, nothing else of theirs is installed"
+                    .to_string(),
+                roots,
+            );
+        }
         if loc.is_dir() && !is_protected_path_in(loc, roots) {
             let leaf = loc.file_name().and_then(|s| s.to_str()).unwrap_or_default();
             let note = format!("in install folder {leaf}");
@@ -1130,7 +1559,17 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             // even if the publisher name contains that word.
             let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
 
-            if houses_other || vendor_root {
+            if houses_other {
+                flag_product_children(loc, target, &mut out, &note, roots);
+            } else if target.install_vouched {
+                push_dir_leftover(
+                    &mut out,
+                    loc.clone(),
+                    Confidence::High,
+                    "install folder, in the vendor's folder".to_string(),
+                    roots,
+                );
+            } else if vendor_root {
                 flag_product_children(loc, target, &mut out, &note, roots);
             } else {
                 let (conf, reason) = install_folder_score(leaf, target);
@@ -1146,7 +1585,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
     for root in roots {
         jobs.push(Box::new(move || {
             let mut out = Vec::new();
-            scan_dir_children(root, target, other_installs, roots, &mut out);
+            scan_dir_children(root, target, other_installs, name_shared, roots, &mut out);
             out
         }));
     }
@@ -1170,6 +1609,9 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
 /// more than this program, so being inside it proves nothing.
 pub fn own_install_folder(target: &ScanTarget) -> Option<&Path> {
     let loc = target.install_location.as_deref()?;
+    if target.install_vouched {
+        return Some(loc);
+    }
     let leaf = loc.file_name()?.to_str()?;
     let vendors = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
     (!vendors && install_folder_score(leaf, target).0 == Confidence::High).then_some(loc)
@@ -1253,8 +1695,12 @@ fn scan_software_root(
         }
         let child_path = format!("{base}\\{child}");
         // The user's own settings from a vendor with nothing else installed
-        // belong to this program, whatever the subkeys are called.
-        if hive == Hive::CurrentUser && vendor_alone && is_publisher_exactly(&child, target) {
+        // belong to this program, whatever the subkeys are called. So does
+        // the machine's key named after the brand when no other program
+        // carries it.
+        if (hive == Hive::CurrentUser && vendor_alone && is_publisher_exactly(&child, target))
+            || is_brand_name(&child, target)
+        {
             out.push(Leftover::reg_key(
                 hive,
                 child_path,
@@ -1590,17 +2036,42 @@ pub fn scan(target: &ScanTarget, installed: bool) -> ScanReport {
 pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanReport {
     // The phases only read, so they run at the same time. Their findings are
     // joined in this order, whichever finishes first.
+    let mut handlers = Vec::new();
+    let mut shortcuts = Vec::new();
+    let (handlers_out, shortcuts_out) = (&mut handlers, &mut shortcuts);
     let phases: Vec<Job<Vec<Leftover>>> = vec![
         Box::new(move || scan_registry(target, installed, vendor_alone(target, snap.programs()))),
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
-        Box::new(move || links::scan_link_handlers(target)),
+        Box::new(move || {
+            let (found, rest) = links::scan_link_handlers(target);
+            *handlers_out = rest;
+            found
+        }),
         Box::new(move || links::scan_file_types(target)),
-        Box::new(move || links::scan_shortcuts(target)),
+        Box::new(move || {
+            let (found, rest) = links::scan_shortcuts(target);
+            *shortcuts_out = rest;
+            found
+        }),
         Box::new(move || links::scan_temp_folders(target, snap)),
         Box::new(move || links::scan_stale_uninstall_entries(target, snap)),
     ];
-    let mut items = run_all(phases).into_iter().flatten().collect();
+    let mut items: Vec<Leftover> = run_all(phases).into_iter().flatten().collect();
+
+    // Link types and shortcuts that lead into a folder this scan removes
+    // lead nowhere once it is gone, whatever product they were made for.
+    let removed: Vec<PathBuf> = items
+        .iter()
+        .filter(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High)
+        .map(|l| PathBuf::from(&l.path))
+        .chain(owned_folders(target).into_iter().map(Path::to_path_buf))
+        .collect();
+    if !removed.is_empty() {
+        let others = other_program_install_dirs(target.registry.as_ref(), snap.programs());
+        handlers.append(&mut shortcuts);
+        items.extend(links::into_removed(handlers, &removed, &others));
+    }
     dedupe_by_path(&mut items);
     ScanReport {
         program_name: target.display_name.clone(),
@@ -1883,7 +2354,7 @@ mod tests {
 
         // On its own the folder is Steam's, by name.
         let mut out = Vec::new();
-        scan_dir_children(&root, &steam, &[], &fs_roots(), &mut out);
+        scan_dir_children(&root, &steam, &[], false, &fs_roots(), &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].confidence, Confidence::High);
 
@@ -1893,6 +2364,7 @@ mod tests {
             &root,
             &steam,
             std::slice::from_ref(&game),
+            false,
             &fs_roots(),
             &mut out,
         );
@@ -2476,7 +2948,14 @@ mod tests {
         }
 
         let mut out = Vec::new();
-        scan_dir_children(&root, &game_speech_window(), &[], &fs_roots(), &mut out);
+        scan_dir_children(
+            &root,
+            &game_speech_window(),
+            &[],
+            false,
+            &fs_roots(),
+            &mut out,
+        );
         let mut found: Vec<String> = out
             .iter()
             .map(|l| {
@@ -2492,6 +2971,257 @@ mod tests {
         assert!(out.iter().all(|l| l.confidence == Confidence::High));
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A machine-wide install that keeps each build in its own folder below
+    /// the vendor's: `Program Files\Brightway\Versions\version-<hash>`, with
+    /// the uninstaller in there and no folder named after the product.
+    const BUILD: &str = "version-cec3ad5889b447cf";
+
+    fn program_files() -> PathBuf {
+        env_dir("ProgramFiles").expect("ProgramFiles")
+    }
+
+    fn vendor_program(name: &str, key: &str, loc: &Path, exe: &str) -> Program {
+        Program {
+            registry_key: key.to_string(),
+            source: RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: Some("Brightway Corporation".to_string()),
+            install_date: None,
+            install_location: Some(loc.display().to_string()),
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: Some(format!("\"{}\" -uninstall", loc.join(exe).display())),
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    fn player_loc() -> PathBuf {
+        program_files()
+            .join("Brightway")
+            .join("Versions")
+            .join(BUILD)
+    }
+
+    fn player() -> Program {
+        vendor_program(
+            "Brightway Player",
+            "brightway-player-admin",
+            &player_loc(),
+            "BrightwayPlayerInstaller.exe",
+        )
+    }
+
+    /// The target the uninstall builds, with `others` registered next to it.
+    fn player_target(others: Vec<Program>) -> ScanTarget {
+        let mut programs = vec![player()];
+        programs.extend(others);
+        let snap = Snapshot::with_programs(programs);
+        build_target_from(&player(), Some(player_loc()), &[], &[], &snap)
+    }
+
+    #[test]
+    fn the_brand_comes_from_what_the_entry_agrees_on() {
+        let t = player_target(vec![listed(
+            "Other Tool",
+            "other-tool",
+            Some("Other Vendor"),
+        )]);
+        assert_eq!(t.brand.as_deref(), Some("brightway"));
+        assert!(t.brand_alone);
+        // The build id is no word of the product's.
+        assert!(
+            !t.name_tokens.iter().any(|w| w.contains("cec3")),
+            "{:?}",
+            t.name_tokens
+        );
+        assert!(folder_tokens(&player_loc(), BUILD).is_empty());
+
+        // One source alone is no brand, and neither are the common words.
+        let mut bare = player();
+        bare.publisher = None;
+        bare.install_location = None;
+        bare.uninstall_string = None;
+        bare.registry_key = "{6A1F0E52-0000-0000-0000-000000000000}".to_string();
+        assert_eq!(derive_brand(&bare, None, &install_roots()), None);
+        let generic = vendor_program(
+            "Media Player",
+            "media-player",
+            &program_files().join("Player").join("app-1.0"),
+            "Update.exe",
+        );
+        let mut generic = generic;
+        generic.publisher = Some("Studio Launcher Inc.".to_string());
+        assert_eq!(
+            derive_brand(
+                &generic,
+                generic.install_location.as_deref().map(Path::new),
+                &install_roots()
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_build_folder_below_the_vendors_folder_is_the_programs_with_the_vendors_folder() {
+        let t = player_target(Vec::new());
+        assert!(t.install_vouched);
+        assert_eq!(own_install_folder(&t), Some(player_loc().as_path()));
+        assert_eq!(t.vendor_dir, Some(program_files().join("Brightway")));
+        assert_eq!(owned_folders(&t).len(), 2);
+
+        // The vendor's folders and keys, by the brand or the publisher's name.
+        for name in [
+            "Brightway",
+            "brightway",
+            "Brightway Corporation",
+            "Brightway Corp.",
+        ] {
+            assert!(is_brand_name(name, &t), "{name}");
+        }
+        // A sibling product's folder is not the vendor's own.
+        for name in ["Brightway Studio", "Brightwayish", "Other Vendor"] {
+            assert!(!is_brand_name(name, &t), "{name}");
+        }
+        // Something of the vendor's that runs from its folder is the program's.
+        let helper = program_files().join(r"Brightway\Helper\helper.exe");
+        assert!(matches!(
+            match_exe_item("Brightway Helper", Some(helper.as_path()), &t),
+            Some((Confidence::High, _))
+        ));
+        // Once the folder is gone, a path into it names the program.
+        let gone = program_files().join(r"Brightway\Versions\version-0000\StudioBeta.exe");
+        assert!(path_names_product(&gone, &t));
+    }
+
+    #[test]
+    fn the_vendors_folders_go_whole_and_the_start_menu_folder_is_not_windows() {
+        let t = player_target(Vec::new());
+        let root = std::env::temp_dir().join(format!("oxidize_brand_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        // `AppData\Local\Brightway` holds a longer namesake; that does not
+        // make it a family folder when nothing else carries the name.
+        for dir in [
+            r"Brightway\Downloads\brightway-player",
+            r"Brightway\logs",
+            r"Brightway\BrightwayPlayerInstaller",
+            r"Other Vendor\Brightway",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        let found: Vec<(String, Confidence)> =
+            out.iter().map(|l| (l.path.clone(), l.confidence)).collect();
+        assert_eq!(
+            found,
+            [(
+                root.join("Brightway").display().to_string(),
+                Confidence::High
+            )]
+        );
+
+        // The same for a scan by the word alone.
+        let word = name_only_target("brightway", None);
+        let mut out = Vec::new();
+        scan_dir_children(&root, &word, &[], false, &fs_roots(), &mut out);
+        assert!(out
+            .iter()
+            .any(|l| Path::new(&l.path) == root.join("Brightway")));
+        let _ = fs::remove_dir_all(&root);
+
+        // The Start menu sits in `Microsoft\Windows`; a vendor's folder in it
+        // is still the vendor's, and Windows' own folders still are not.
+        if let Some(data) = env_dir("ProgramData") {
+            let menu = data.join(r"Microsoft\Windows\Start Menu\Programs");
+            let roots = vec![data.clone(), menu.clone()];
+            assert!(!shared_below_root(&menu.join("Brightway"), &roots));
+            assert!(shared_below_root(
+                &data.join(r"Microsoft\Brightway"),
+                &roots
+            ));
+            assert!(shared_below_root(
+                &program_files().join(r"Common Files\Brightway"),
+                &[program_files()]
+            ));
+        }
+    }
+
+    #[test]
+    fn another_installed_product_of_the_vendor_keeps_the_vendors_folders() {
+        // Its own build folder next to ours: ours is still ours, the vendor's
+        // folder and everything named after the vendor stay.
+        let studio_loc = program_files().join(r"Brightway\Versions\version-0aa1bb2cc3dd4ee5");
+        let studio = vendor_program(
+            "Brightway Studio",
+            "brightway-studio",
+            &studio_loc,
+            "BrightwayStudioInstaller.exe",
+        );
+        let t = player_target(vec![studio.clone()]);
+        assert_eq!(t.brand.as_deref(), Some("brightway"));
+        assert!(!t.brand_alone);
+        assert!(t.install_vouched);
+        assert_eq!(t.vendor_dir, None);
+        for name in ["Brightway", "Brightway Corporation"] {
+            assert!(!is_brand_name(name, &t), "{name}");
+        }
+        let studio_exe = studio_loc.join("BrightwayStudio.exe");
+        assert!(match_exe_item("Brightway Studio", Some(studio_exe.as_path()), &t).is_none());
+        assert!(!path_names_product(&studio_exe, &t));
+
+        // Both in one build folder: that folder is not ours alone.
+        let shared = vendor_program(
+            "Brightway Studio",
+            "brightway-studio",
+            &player_loc(),
+            "BrightwayStudioInstaller.exe",
+        );
+        let t = player_target(vec![shared]);
+        assert!(!t.install_vouched);
+        assert_eq!(own_install_folder(&t), None);
+        assert_eq!(t.vendor_dir, None);
+
+        // A folder with a longer namesake stays when another program carries
+        // the name.
+        let word = name_only_target("brightway", None);
+        assert!(name_in_use(&word, &[studio]));
+    }
+
+    #[test]
+    fn a_shared_root_or_a_generic_name_vouches_for_nothing() {
+        // Recorded as Program Files itself: protected, so not recorded at all.
+        let mut at_root = player();
+        at_root.install_location = Some(program_files().display().to_string());
+        let t = build_target_with(&at_root, &Snapshot::with_programs(vec![at_root.clone()]));
+        assert!(t.install_location.is_none());
+        assert!(!t.install_vouched);
+        assert_eq!(t.vendor_dir, None);
+
+        // A general folder outside the install roots, named otherwise.
+        let games = PathBuf::from(r"D:\Games");
+        let mut general = player();
+        general.install_location = Some(games.display().to_string());
+        let snap = Snapshot::with_programs(vec![general.clone()]);
+        let t = build_target_from(&general, Some(games), &[], &[], &snap);
+        assert!(!t.install_vouched);
+        assert_eq!(own_install_folder(&t), None);
+
+        // A generic display name with a generic folder: no brand, no claim.
+        let loc = program_files().join(r"Player\Versions").join(BUILD);
+        let mut generic = vendor_program("Player", "player", &loc, "Setup.exe");
+        generic.publisher = None;
+        let snap = Snapshot::with_programs(vec![generic.clone()]);
+        let t = build_target_from(&generic, Some(loc), &[], &[], &snap);
+        assert_eq!(t.brand, None);
+        assert!(!t.install_vouched);
+        assert_eq!(t.vendor_dir, None);
+        assert!(!is_brand_name("Player", &t));
     }
 
     /// A root like `Program Files`: a few hundred unrelated folders, the
@@ -2514,7 +3244,7 @@ mod tests {
         let root = many_folders("oxidize_many_folders_test", 300);
         let target = name_target("Tindral Notes", Some("Quillhaven"));
         let mut out = Vec::new();
-        scan_dir_children(&root, &target, &[], &fs_roots(), &mut out);
+        scan_dir_children(&root, &target, &[], true, &fs_roots(), &mut out);
         let mut found: Vec<String> = out
             .iter()
             .map(|l| {
@@ -2541,7 +3271,7 @@ mod tests {
         let start = std::time::Instant::now();
         for _ in 0..20 {
             let mut out = Vec::new();
-            scan_dir_children(&root, &target, &[], &roots, &mut out);
+            scan_dir_children(&root, &target, &[], true, &roots, &mut out);
             assert_eq!(out.len(), 2);
         }
         eprintln!("20 walks of 2000 folders: {:?}", start.elapsed());
