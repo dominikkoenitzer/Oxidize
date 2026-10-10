@@ -349,37 +349,9 @@ impl OxidizeApp {
                     self.load_programs(ctx);
                 }
                 Msg::Removed(outcome) => {
-                    for item in &outcome.items {
-                        match &item.status {
-                            ItemStatus::Removed => self.log.push(format!("removed {}", item.path)),
-                            ItemStatus::AlreadyGone => {
-                                self.log.push(format!("already gone {}", item.path))
-                            }
-                            ItemStatus::Failed(e) => {
-                                self.log.push(format!("failed {}: {e}", item.path))
-                            }
-                        }
-                    }
-                    for p in &outcome.emptied_parents {
-                        self.log
-                            .push(format!("removed {} (emptied folder)", p.display()));
-                    }
-                    for k in &outcome.emptied_keys {
-                        self.log.push(format!("removed {k} (emptied key)"));
-                    }
-                    let line = if self.dry_run {
-                        format!("dry run: {} items would be removed", outcome.attempted)
-                    } else {
-                        let mut parts = vec![format!("{} removed", outcome.deleted)];
-                        if outcome.skipped > 0 {
-                            parts.push(format!("{} already gone", outcome.skipped));
-                        }
-                        if outcome.failed > 0 {
-                            parts.push(format!("{} failed", outcome.failed));
-                        }
-                        parts.join(", ")
-                    };
-                    self.log.push(line.clone());
+                    let lines = removal_log(&outcome, self.dry_run);
+                    let line = lines.last().cloned().unwrap_or_default();
+                    self.log.extend(lines);
                     if let Some(name) = &outcome.backup_name {
                         self.log.push(format!(
                             "Undo from the command line: oxidize restore \"{name}\""
@@ -526,6 +498,37 @@ fn conf_tag(conf: Confidence) -> &'static str {
         Confidence::Medium => "med",
         Confidence::Low => "low",
     }
+}
+
+/// The log lines for one removal: each item, then a summary line last.
+fn removal_log(outcome: &DeletionOutcome, dry_run: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    for item in &outcome.items {
+        match &item.status {
+            ItemStatus::Removed => lines.push(format!("removed {}", item.path)),
+            ItemStatus::AlreadyGone => lines.push(format!("already gone {}", item.path)),
+            ItemStatus::Failed(e) => lines.push(format!("failed {}: {e}", item.path)),
+        }
+    }
+    for p in &outcome.emptied_parents {
+        lines.push(format!("removed {} (emptied folder)", p.display()));
+    }
+    for k in &outcome.emptied_keys {
+        lines.push(format!("removed {k} (emptied key)"));
+    }
+    lines.push(if dry_run {
+        format!("dry run: {} items would be removed", outcome.attempted)
+    } else {
+        let mut parts = vec![format!("{} removed", outcome.deleted)];
+        if outcome.skipped > 0 {
+            parts.push(format!("{} already gone", outcome.skipped));
+        }
+        if outcome.failed > 0 {
+            parts.push(format!("{} failed", outcome.failed));
+        }
+        parts.join(", ")
+    });
+    lines
 }
 
 impl eframe::App for OxidizeApp {
