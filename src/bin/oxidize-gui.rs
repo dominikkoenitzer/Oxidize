@@ -13,9 +13,13 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 
 use eframe::egui::{self, Color32, RichText};
 
+use oxidize::complete::{self, CloseHow, Outcome, VendorStep};
 use oxidize::model::{Confidence, Group, Leftover, Program, ScanReport};
 use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
 use oxidize::{registry, scanner, uninstall, util};
+
+/// The lowest confidence "Remove completely" removes.
+const COMPLETE_LEVEL: Confidence = Confidence::High;
 
 /// The Oxidize mark for the window, the same artwork the executables embed.
 fn window_icon() -> egui::IconData {
@@ -54,6 +58,12 @@ enum Msg {
         still_installed: bool,
     },
     Removed(DeletionOutcome),
+    /// A complete removal ended.
+    Completed {
+        program: Program,
+        outcome: Box<Outcome>,
+        dry_run: bool,
+    },
     /// An extracted program icon (raw RGBA), keyed by the program's id.
     Icon {
         id: String,
@@ -69,6 +79,14 @@ enum Msg {
 enum Confirm {
     Uninstall(Program, bool),
     Remove(Vec<Leftover>, String, SafetyContext),
+    Complete(Program, SafetyContext),
+}
+
+/// The last complete removal, shown for its program until the user moves on.
+struct Completed {
+    program: Program,
+    outcome: Outcome,
+    dry_run: bool,
 }
 
 /// An action requested during rendering, executed after the panels are drawn
@@ -79,6 +97,7 @@ enum Action {
     Scan(Program),
     Uninstall(Program),
     Remove(Vec<Leftover>, String),
+    RemoveCompletely(Program),
     RestartAdmin,
 }
 
@@ -94,6 +113,7 @@ struct OxidizeApp {
     /// The program whose uninstaller ran last. Once it leaves the installed
     /// list it can only be reached through this, for its leftovers.
     uninstalled: Option<Program>,
+    complete: Option<Completed>,
 
     // UI state.
     filter: String,
@@ -127,6 +147,7 @@ impl OxidizeApp {
             scan_for: None,
             checked: Vec::new(),
             uninstalled: None,
+            complete: None,
             filter: String::new(),
             selected: None,
             sort_by_size: false,
@@ -271,6 +292,77 @@ impl OxidizeApp {
         });
     }
 
+    fn start_remove_completely(
+        &mut self,
+        ctx: &egui::Context,
+        program: Program,
+        safety_ctx: SafetyContext,
+    ) {
+        self.busy = true;
+        self.complete = None;
+        let dry_run = safety_ctx.dry_run;
+        let line = if dry_run {
+            format!("dry run: removing {} completely...", program.display_name)
+        } else {
+            format!("Removing {} completely...", program.display_name)
+        };
+        self.log.push(line.clone());
+        self.status = line;
+        self.spawn(ctx, move || {
+            // The footprint and the uninstaller are read before anything runs.
+            let target = scanner::build_target(&program);
+            let plan = match uninstall::plan(&program, true) {
+                Ok(plan) => plan,
+                Err(e) => {
+                    return Msg::Error(format!("Cannot remove {}: {e:#}", program.display_name))
+                }
+            };
+            let pc = complete::ThisPc {
+                safety: safety_ctx,
+                quiet: true,
+            };
+            let opts = complete::Options {
+                level: COMPLETE_LEVEL,
+                dry_run,
+                use_uninstaller: false,
+            };
+            let outcome = complete::remove_completely(&pc, &program, &target, &plan, &opts);
+            Msg::Completed {
+                program,
+                outcome: Box::new(outcome),
+                dry_run,
+            }
+        });
+    }
+
+    /// Take in a finished complete removal. True when the program list
+    /// should be read again because something changed.
+    fn on_completed(&mut self, program: Program, outcome: Outcome, dry_run: bool) -> bool {
+        self.log
+            .extend(complete_log(&program.display_name, &outcome, dry_run));
+        self.status = complete_status(&program.display_name, &outcome, dry_run);
+        self.busy = false;
+        if !dry_run {
+            // Keeps it selected once it leaves the installed list.
+            self.uninstalled = Some(program.clone());
+            self.scan = None;
+            self.scan_for = None;
+        }
+        self.complete = Some(Completed {
+            program,
+            outcome,
+            dry_run,
+        });
+        !dry_run
+    }
+
+    /// The complete removal to show for the selected program, if any.
+    fn shown_complete(&self) -> Option<&Completed> {
+        self.complete
+            .as_ref()
+            .filter(|c| self.selected.as_deref() == Some(c.program.id()))
+    }
+
     /// Drain any pending messages from worker threads.
     fn drain_messages(&mut self, ctx: &egui::Context) {
         while let Ok(msg) = self.rx.try_recv() {
@@ -289,7 +381,9 @@ impl OxidizeApp {
                         if !self.programs.iter().any(|p| p.id() == id) {
                             match self.uninstalled.clone().filter(|p| p.id() == id) {
                                 Some(program) => {
-                                    if was_listed {
+                                    // After a complete removal its own
+                                    // second scan is already on screen.
+                                    if was_listed && self.shown_complete().is_none() {
                                         self.scan = None;
                                         self.start_scan(ctx, program);
                                     }
@@ -375,6 +469,15 @@ impl OxidizeApp {
                         self.load_programs(ctx);
                     }
                 }
+                Msg::Completed {
+                    program,
+                    outcome,
+                    dry_run,
+                } => {
+                    if self.on_completed(program, *outcome, dry_run) {
+                        self.load_programs(ctx);
+                    }
+                }
                 Msg::Icon { id, rgba, w, h } => {
                     let image =
                         egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba);
@@ -451,6 +554,7 @@ impl OxidizeApp {
                     format!("Remove {} items permanently?", items.len())
                 }
             }
+            Confirm::Complete(p, ctx) => complete_confirm_text(&p.display_name, ctx),
         };
 
         let mut decision: Option<bool> = None;
@@ -477,6 +581,7 @@ impl OxidizeApp {
                 Confirm::Remove(items, label, safety) => {
                     self.start_remove(ctx, items, label, safety)
                 }
+                Confirm::Complete(p, safety) => self.start_remove_completely(ctx, p, safety),
             },
             Some(false) => self.confirm = None,
             None => {}
@@ -497,6 +602,40 @@ fn conf_tag(conf: Confidence) -> &'static str {
         Confidence::High => "high",
         Confidence::Medium => "med",
         Confidence::Low => "low",
+    }
+}
+
+/// The question "Remove completely" asks, worded from the window's settings.
+fn complete_confirm_text(name: &str, ctx: &SafetyContext) -> String {
+    let level = match COMPLETE_LEVEL {
+        Confidence::High => "high",
+        Confidence::Medium => "medium",
+        Confidence::Low => "low",
+    };
+    if ctx.dry_run {
+        format!(
+            "Preview removing {name} completely? Dry run is on: nothing is closed or removed, \
+             the result lists what would go at {level} confidence."
+        )
+    } else if ctx.make_backups {
+        format!(
+            "Remove {name} completely? Running copies are closed, everything found at {level} \
+             confidence is removed, a backup is kept."
+        )
+    } else {
+        format!(
+            "Remove {name} completely? Running copies are closed, everything found at {level} \
+             confidence is removed permanently, no backup is kept."
+        )
+    }
+}
+
+/// "1 running process", "2 running processes".
+fn running_processes(n: usize) -> String {
+    if n == 1 {
+        "1 running process".to_string()
+    } else {
+        format!("{n} running processes")
     }
 }
 
@@ -529,6 +668,95 @@ fn removal_log(outcome: &DeletionOutcome, dry_run: bool) -> Vec<String> {
         parts.join(", ")
     });
     lines
+}
+
+/// The log lines for a complete removal, in the order its steps ran.
+fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
+    let mut lines = Vec::new();
+    if dry_run {
+        if !out.would_close.is_empty() {
+            lines.push(format!(
+                "dry run: would close {}",
+                running_processes(out.would_close.len())
+            ));
+        }
+        lines.push(match &out.vendor {
+            VendorStep::Skip { reason } => format!("dry run: would skip the uninstaller: {reason}"),
+            VendorStep::Run { reason, .. } => {
+                format!("dry run: would run the uninstaller: {reason}")
+            }
+        });
+        lines.push(format!(
+            "dry run: {} items would be removed",
+            out.selected.len()
+        ));
+        return lines;
+    }
+    let closed = out
+        .closed
+        .iter()
+        .filter(|c| c.how != CloseHow::Failed)
+        .count();
+    if closed > 0 {
+        lines.push(format!("Closed {}", running_processes(closed)));
+    }
+    for c in out.closed.iter().filter(|c| c.how == CloseHow::Failed) {
+        lines.push(format!(
+            "Could not close {}: {}",
+            c.exe,
+            c.error.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    match (&out.vendor, &out.uninstaller) {
+        (VendorStep::Skip { reason }, _) => {
+            lines.push(format!("Skipped the uninstaller: {reason}"))
+        }
+        (VendorStep::Run { .. }, Some(how)) => lines.push(format!("Uninstaller {how}")),
+        // It did not start; the error says why.
+        (VendorStep::Run { .. }, None) => {}
+    }
+    if let Some(removal) = &out.removal {
+        lines.extend(removal_log(removal, false));
+        if let Some(backup) = &removal.backup_name {
+            lines.push(format!("Backup kept: {backup}"));
+        }
+    }
+    if let Some(e) = &out.error {
+        lines.push(format!("ERROR: {e}"));
+    }
+    lines.push(complete_status(name, out, false));
+    lines
+}
+
+/// One line on how a complete removal ended, for the status bar.
+fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
+    if dry_run {
+        format!(
+            "dry run: {} items of {name} would be removed",
+            out.selected.len()
+        )
+    } else if out.complete() {
+        format!("{name}: nothing left.")
+    } else if out.verdict.still_installed {
+        format!(
+            "{name} is still registered. The uninstaller may have been cancelled or is still running."
+        )
+    } else if !out.verdict.remaining.is_empty() {
+        format!(
+            "{name}: {} items are still there.",
+            out.verdict.remaining.len()
+        )
+    } else {
+        format!("{name}: some items could not be removed.")
+    }
+}
+
+/// How many items a complete removal took: each removed item and every
+/// folder or key it left empty.
+fn removed_count(out: &Outcome) -> usize {
+    out.removal.as_ref().map_or(0, |o| {
+        o.deleted + o.emptied_parents.len() + o.emptied_keys.len()
+    })
 }
 
 impl eframe::App for OxidizeApp {
@@ -705,6 +933,12 @@ impl eframe::App for OxidizeApp {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new(RichText::new("Remove completely").strong()))
+                    .clicked()
+                {
+                    action = Some(Action::RemoveCompletely(program.clone()));
+                }
                 if ui.button(RichText::new("Run uninstaller").strong()).clicked() {
                     action = Some(Action::Uninstall(program.clone()));
                 }
@@ -714,6 +948,13 @@ impl eframe::App for OxidizeApp {
             });
 
             ui.separator();
+
+            // The last complete removal of this program, until it is scanned
+            // again.
+            if let Some(done) = self.shown_complete() {
+                show_complete(ui, done);
+                return;
+            }
 
             // Scan results, only when they belong to the selected program.
             let belongs = scan_for.as_deref() == Some(program.id());
@@ -812,7 +1053,11 @@ impl eframe::App for OxidizeApp {
         if let Some(action) = action {
             match action {
                 Action::Refresh => self.load_programs(ctx),
-                Action::Scan(p) => self.start_scan(ctx, p),
+                Action::Scan(p) => {
+                    // The scan replaces the result of a complete removal.
+                    self.complete = None;
+                    self.start_scan(ctx, p);
+                }
                 Action::Uninstall(p) if self.confirm.is_none() => {
                     if self.dry_run {
                         match uninstall::plan(&p, self.silent) {
@@ -835,8 +1080,11 @@ impl eframe::App for OxidizeApp {
                         self.confirm = Some(Confirm::Remove(items, label, self.safety_ctx()));
                     }
                 }
+                Action::RemoveCompletely(p) if self.confirm.is_none() => {
+                    self.confirm = Some(Confirm::Complete(p, self.safety_ctx()));
+                }
                 // A question is already on screen: let the user answer it first.
-                Action::Uninstall(_) | Action::Remove(..) => {}
+                Action::Uninstall(_) | Action::Remove(..) | Action::RemoveCompletely(_) => {}
                 Action::RestartAdmin => match safety::relaunch_elevated() {
                     Ok(()) => std::process::exit(0),
                     Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
@@ -846,8 +1094,75 @@ impl eframe::App for OxidizeApp {
     }
 }
 
+/// Render how a complete removal ended.
+fn show_complete(ui: &mut egui::Ui, done: &Completed) {
+    let out = &done.outcome;
+    let v = &out.verdict;
+    if done.dry_run {
+        ui.label(format!(
+            "Dry run: {} items would be removed, {} would be closed.",
+            out.selected.len(),
+            running_processes(out.would_close.len())
+        ));
+        render_items(ui, &out.selected);
+        return;
+    }
+    if out.complete() {
+        ui.label(RichText::new("Nothing left.").color(conf_color(Confidence::High)));
+        ui.label(format!(
+            "Removed {} items in {:.1} s",
+            removed_count(out),
+            out.seconds
+        ));
+    } else if v.still_installed {
+        ui.label(
+            RichText::new(format!(
+                "{} is still registered. The uninstaller may have been cancelled or is still running.",
+                done.program.display_name
+            ))
+            .color(conf_color(Confidence::Medium)),
+        );
+    }
+    if v.below_level > 0 {
+        ui.label(format!(
+            "{} lower-confidence items were kept",
+            v.below_level
+        ));
+    }
+    if let Some(e) = &out.error {
+        ui.colored_label(Color32::from_rgb(210, 70, 70), e);
+    }
+    if !v.remaining.is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new("Still there:").strong());
+        render_items(ui, &v.remaining);
+    }
+}
+
+/// A list of leftovers without checkboxes, grouped like a scan.
+fn render_items(ui: &mut egui::Ui, items: &[Leftover]) {
+    egui::ScrollArea::vertical()
+        .id_salt("complete_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for group in Group::ALL {
+                let indices: Vec<usize> = items
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l.kind.group() == group)
+                    .map(|(i, _)| i)
+                    .collect();
+                if indices.is_empty() {
+                    continue;
+                }
+                render_group(ui, group.title(), items, &indices, &mut []);
+                ui.add_space(6.0);
+            }
+        });
+}
+
 /// Render one group of leftovers with checkboxes. `indices` are positions
-/// into `items` and into `checked`.
+/// into `items` and into `checked`; an empty `checked` shows no checkboxes.
 fn render_group(
     ui: &mut egui::Ui,
     title: &str,
@@ -1095,6 +1410,7 @@ mod tests {
             scan_for: None,
             checked: Vec::new(),
             uninstalled: None,
+            complete: None,
             filter: String::new(),
             selected: None,
             sort_by_size: false,
@@ -1161,6 +1477,162 @@ mod tests {
         assert_eq!(app.scan_for.as_deref(), Some(program.id()));
         assert!(!report.installed);
         assert_eq!(app.selected.as_deref(), Some(program.id()));
+    }
+
+    fn example_program() -> Program {
+        Program {
+            registry_key: "example-player".to_string(),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: "Example Player".to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    /// A complete removal that closed one process, skipped the uninstaller
+    /// and removed two items, with `backup` as its backup.
+    fn finished(backup: Option<&str>) -> Outcome {
+        Outcome {
+            closed: vec![complete::Closed {
+                pid: 100,
+                exe: r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe".to_string(),
+                how: CloseHow::Closed,
+                error: None,
+            }],
+            would_close: Vec::new(),
+            vendor: VendorStep::Skip {
+                reason: "installed for this user only".to_string(),
+            },
+            uninstaller: None,
+            report: ScanReport::default(),
+            selected: Vec::new(),
+            removal: Some(DeletionOutcome {
+                attempted: 2,
+                deleted: 2,
+                backup_name: backup.map(str::to_string),
+                ..DeletionOutcome::default()
+            }),
+            verdict: complete::Verdict {
+                nothing_left: true,
+                still_installed: false,
+                remaining: Vec::new(),
+                below_level: 1,
+            },
+            error: None,
+            seconds: 4.2,
+        }
+    }
+
+    #[test]
+    fn a_complete_removal_is_stored_and_logged() {
+        let program = example_program();
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+        app.busy = true;
+
+        let reload = app.on_completed(program.clone(), finished(Some("example-player-1")), false);
+
+        assert!(reload, "the program list is read again");
+        assert!(!app.busy);
+        let done = app.shown_complete().expect("the result is shown");
+        assert!(done.outcome.complete());
+        // It stays reachable once it leaves the installed list.
+        assert_eq!(app.selected_program().map(Program::id), Some(program.id()));
+        assert_eq!(app.status, "Example Player: nothing left.");
+        for line in [
+            "Closed 1 running process",
+            "Skipped the uninstaller: installed for this user only",
+            "2 removed",
+            "Example Player: nothing left.",
+        ] {
+            assert!(app.log.iter().any(|l| l == line), "{line} in {:?}", app.log);
+        }
+        assert_eq!(removed_count(&done.outcome), 2);
+    }
+
+    #[test]
+    fn a_dry_run_comes_through_the_channel_and_changes_nothing() {
+        let program = example_program();
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+        let mut outcome = finished(Some("example-player-1"));
+        outcome.closed.clear();
+        outcome.removal = None;
+        outcome.selected = vec![Leftover::reg_key(
+            Hive::CurrentUser,
+            r"Software\Example Studio",
+            Confidence::High,
+            "the vendor's key",
+        )];
+        app.tx
+            .send(Msg::Completed {
+                program,
+                outcome: Box::new(outcome),
+                dry_run: true,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+
+        assert!(app.shown_complete().is_some());
+        assert!(app.uninstalled.is_none());
+        assert!(!app.busy, "no reload was started");
+        assert_eq!(
+            app.status,
+            "dry run: 1 items of Example Player would be removed"
+        );
+    }
+
+    #[test]
+    fn the_confirm_text_follows_the_settings() {
+        let ctx = |dry_run, make_backups| SafetyContext {
+            dry_run,
+            make_backups,
+        };
+        assert_eq!(
+            complete_confirm_text("Example Player", &ctx(false, true)),
+            "Remove Example Player completely? Running copies are closed, everything found at \
+             high confidence is removed, a backup is kept."
+        );
+        assert_eq!(
+            complete_confirm_text("Example Player", &ctx(false, false)),
+            "Remove Example Player completely? Running copies are closed, everything found at \
+             high confidence is removed permanently, no backup is kept."
+        );
+        assert!(complete_confirm_text("Example Player", &ctx(true, true))
+            .contains("nothing is closed or removed"));
+    }
+
+    #[test]
+    fn a_failed_uninstaller_and_stuck_items_are_named() {
+        let mut out = finished(None);
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.uninstaller = Some("finished with exit code 0".to_string());
+        out.verdict.nothing_left = false;
+        out.verdict.remaining = vec![Leftover::reg_key(
+            Hive::CurrentUser,
+            r"Software\Example Studio",
+            Confidence::High,
+            "the vendor's key",
+        )];
+        let lines = complete_log("Example Player", &out, false);
+        assert!(lines.contains(&"Uninstaller finished with exit code 0".to_string()));
+        assert_eq!(
+            lines.last().map(String::as_str),
+            Some("Example Player: 1 items are still there.")
+        );
     }
 
     #[test]
