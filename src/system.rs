@@ -558,7 +558,8 @@ pub fn running_processes() -> Vec<crate::complete::Running> {
 }
 
 /// Ask each process to close its windows, give them all `grace` together,
-/// then end whatever still runs.
+/// then end whatever still runs. A process without a window cannot be
+/// asked, so it is ended right away.
 #[cfg(windows)]
 pub fn close_processes(
     procs: &[crate::complete::Running],
@@ -573,11 +574,21 @@ pub fn close_processes(
         EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
     };
 
-    unsafe extern "system" fn ask_to_close(hwnd: HWND, pid: LPARAM) -> windows::core::BOOL {
+    /// One process being asked, and how many of its windows were.
+    struct Ask {
+        pid: u32,
+        windows: u32,
+    }
+
+    unsafe extern "system" fn ask_to_close(hwnd: HWND, ask: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `ask` points to the `Ask` that outlives the EnumWindows call.
+        let ask = unsafe { &mut *(ask.0 as *mut Ask) };
         let mut owner = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-        if owner as isize == pid.0 {
-            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        if owner == ask.pid
+            && unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok()
+        {
+            ask.windows += 1;
         }
         true.into()
     }
@@ -588,8 +599,14 @@ pub fn close_processes(
         let exe = p.exe.display().to_string();
         match unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, p.pid) } {
             Ok(h) => {
-                let _ = unsafe { EnumWindows(Some(ask_to_close), LPARAM(p.pid as isize)) };
-                handles.push((p.pid, exe, h));
+                let mut ask = Ask {
+                    pid: p.pid,
+                    windows: 0,
+                };
+                let _ = unsafe {
+                    EnumWindows(Some(ask_to_close), LPARAM(&mut ask as *mut Ask as isize))
+                };
+                handles.push((p.pid, exe, h, ask.windows > 0));
             }
             Err(e) => out.push(Closed {
                 pid: p.pid,
@@ -600,8 +617,12 @@ pub fn close_processes(
         }
     }
     let deadline = std::time::Instant::now() + grace;
-    for (pid, exe, h) in handles {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
+    for (pid, exe, h, asked) in handles {
+        let left = if asked {
+            deadline.saturating_duration_since(std::time::Instant::now())
+        } else {
+            std::time::Duration::ZERO
+        };
         let exited = unsafe { WaitForSingleObject(h, left.as_millis() as u32) } == WAIT_OBJECT_0;
         let closed = if exited {
             Closed {
