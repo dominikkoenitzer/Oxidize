@@ -56,8 +56,8 @@ pub struct Closed {
 /// locations never count, so nothing outside the program is touched.
 pub fn owned_dirs(target: &ScanTarget, footprint: &[Leftover]) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(loc) = &target.install_location {
-        dirs.push(loc.clone());
+    if let Some(loc) = scanner::own_install_folder(target) {
+        dirs.push(loc.to_path_buf());
     }
     dirs.extend(
         footprint
@@ -125,7 +125,7 @@ pub fn vendor_step(
     if program.source.hive != Hive::CurrentUser {
         return run("installed for all users");
     }
-    let has_folder = target.install_location.is_some()
+    let has_folder = scanner::own_install_folder(target).is_some()
         || footprint
             .iter()
             .any(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
@@ -905,6 +905,21 @@ mod tests {
         assert_eq!(picked, [100, 101]);
         // No folders, nothing picked.
         assert!(processes_in(&running, &[], 7).is_empty());
+    }
+
+    #[test]
+    fn a_recorded_folder_named_otherwise_is_not_the_programs_to_close() {
+        let mut t = target();
+        // Recorded, but its name says nothing about the program: whatever
+        // else runs from there stays untouched.
+        t.install_location = Some(PathBuf::from(r"D:\Apps"));
+        assert!(owned_dirs(&t, &[]).is_empty());
+        // The vendor's folder is not the program's either.
+        t.install_location = Some(PathBuf::from(r"C:\Users\me\AppData\Local\Example Studio"));
+        assert!(owned_dirs(&t, &[]).is_empty());
+        // Its own folder is.
+        t.install_location = Some(PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer"));
+        assert_eq!(owned_dirs(&t, &[]).len(), 1);
     }
 
     #[test]

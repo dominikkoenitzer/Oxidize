@@ -694,7 +694,10 @@ fn without_company_form(name: &str) -> String {
 /// Does no other installed program come from this program's publisher?
 /// Programs without a publisher say nothing either way.
 fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
-    if target.publisher.is_none() || target.publisher_tokens.is_empty() {
+    let Some(publisher) = target.publisher.as_deref() else {
+        return false;
+    };
+    if target.publisher_tokens.is_empty() {
         return false;
     }
     !programs
@@ -709,8 +712,16 @@ fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
         .any(|p| {
             p.publisher
                 .as_deref()
-                .is_some_and(|pubr| significant_tokens(pubr) == target.publisher_tokens)
+                .is_some_and(|pubr| same_vendor(pubr, publisher))
         })
+}
+
+/// Two publisher names for one vendor: the same words, or one the start of
+/// the other once the company form is gone ("Example Studio" and "Example
+/// Studio Games Pty Ltd").
+fn same_vendor(a: &str, b: &str) -> bool {
+    let (a, b) = (without_company_form(a), without_company_form(b));
+    !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
 }
 
 fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
@@ -1154,6 +1165,16 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
 /// How sure the recorded install folder is the product's own, by its name.
 /// The target's words include the folder's own, which would match any folder
 /// at all, so the name is checked against the program's name alone.
+/// The install folder when it is the program's own: its name says so and it
+/// is not the vendor's folder. A folder recorded under another name may hold
+/// more than this program, so being inside it proves nothing.
+pub fn own_install_folder(target: &ScanTarget) -> Option<&Path> {
+    let loc = target.install_location.as_deref()?;
+    let leaf = loc.file_name()?.to_str()?;
+    let vendors = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
+    (!vendors && install_folder_score(leaf, target).0 == Confidence::High).then_some(loc)
+}
+
 fn install_folder_score(leaf: &str, target: &ScanTarget) -> (Confidence, String) {
     let mut own_name = name_target(&target.display_name, target.publisher.as_deref());
     own_name.vendor_is_shared = target.vendor_is_shared;
@@ -1642,7 +1663,19 @@ mod tests {
             "example-editor",
             Some("Example Studio Inc"),
         );
-        assert!(!vendor_alone(&t, &[own, other, sibling]));
+        assert!(!vendor_alone(&t, &[own.clone(), other.clone(), sibling]));
+        // Written another way, still the same vendor.
+        for publisher in [
+            "ExampleStudio",
+            "Example Studio Games Pty Ltd",
+            "Example Studio GmbH",
+        ] {
+            let sibling = listed("Example Editor", "example-editor", Some(publisher));
+            assert!(
+                !vendor_alone(&t, &[own.clone(), other.clone(), sibling]),
+                "{publisher}"
+            );
+        }
 
         // No publisher, no claim.
         let bare = name_target("Example Player", None);

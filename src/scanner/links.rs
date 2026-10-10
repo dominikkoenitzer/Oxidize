@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 
 use super::{
     dir_contains, env_dir, exe_missing, fs_denied, is_exact_product, locate_exe, matches_publisher,
-    norm_path_key, other_program_install_dirs, path_names_product, path_within_shared_dir,
-    push_dir_leftover, score_product, Snapshot,
+    norm_path_key, other_program_install_dirs, own_install_folder, path_names_product,
+    path_within_shared_dir, push_dir_leftover, score_product, Snapshot,
 };
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanTarget};
 use crate::{lnk, registry, system, util};
@@ -46,7 +46,7 @@ fn match_handler(command: &str, target: &ScanTarget, inside: &str) -> Option<(Co
     if system::in_windows_dir(&exe) {
         return None;
     }
-    if let Some(loc) = &target.install_location {
+    if let Some(loc) = own_install_folder(target) {
         if exe.is_absolute() && system::path_under(&exe, loc) {
             return Some((Confidence::High, inside.to_string()));
         }
@@ -203,7 +203,7 @@ fn shortcut_roots() -> Vec<PathBuf> {
 /// Does a shortcut lead into the program's install folder? Its file name
 /// says nothing here, so a shortcut called "Start" is found as well.
 fn match_shortcut(link_target: &Path, target: &ScanTarget) -> Option<(Confidence, String)> {
-    let loc = target.install_location.as_deref()?;
+    let loc = own_install_folder(target)?;
     if !link_target.is_absolute() || system::in_windows_dir(link_target) {
         return None;
     }
@@ -359,7 +359,7 @@ fn stale_uninstall_entry(
 /// Other uninstall entries left pointing into the program's folder with
 /// their uninstaller gone.
 pub(super) fn scan_stale_uninstall_entries(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
-    let Some(loc) = target.install_location.as_deref() else {
+    let Some(loc) = own_install_folder(target) else {
         return Vec::new();
     };
     snap.programs()
