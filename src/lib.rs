@@ -4,6 +4,7 @@ pub mod backup;
 pub mod cli;
 pub mod commands;
 pub mod complete;
+pub mod exit;
 pub mod hunter;
 pub mod lnk;
 pub mod mcp;
