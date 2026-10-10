@@ -137,7 +137,8 @@ pub fn vendor_step(
         LeftoverKind::RegistryKey | LeftoverKind::RegistryValue | LeftoverKind::PathEntry => {
             l.hive == Some(Hive::LocalMachine)
         }
-        LeftoverKind::ScheduledTask => true,
+        // A task a per-user installer made is the user's to delete.
+        LeftoverKind::ScheduledTask => false,
         LeftoverKind::File | LeftoverKind::Directory => machine_dirs
             .iter()
             .any(|root| system::path_under(Path::new(&l.path), root)),
