@@ -13,3 +13,11 @@
   command was recorded.
 - A scan reads the installed programs, services and tasks once and runs its
   registry, file and system parts at the same time.
+- New leftovers: link types and file types whose command runs from the
+  program's folder, open-with entries, shortcuts by where they lead, folders
+  in the user's temp folder, other uninstall entries left pointing into the
+  program's folder, and the vendor's key under `HKCU\Software` when nothing
+  else of theirs is installed.
+- The MCP server and the window close a program's running copies first and
+  say whether anything is left. The window has a "Remove completely" button
+  and an Undo.
