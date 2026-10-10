@@ -216,17 +216,11 @@ impl OxidizeApp {
     /// Extract icons (on a background thread) for any programs we don't have a
     /// texture for yet, sending each back as it's ready.
     fn spawn_icon_load(&self, ctx: &egui::Context) {
-        let items: Vec<(String, Option<String>, Option<String>)> = self
+        let items: Vec<Program> = self
             .programs
             .iter()
             .filter(|p| !self.icons.contains_key(p.id()))
-            .map(|p| {
-                (
-                    p.id().to_string(),
-                    p.display_icon.clone(),
-                    p.install_location.clone(),
-                )
-            })
+            .cloned()
             .collect();
         if items.is_empty() {
             return;
@@ -234,10 +228,9 @@ impl OxidizeApp {
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            for (id, display_icon, install_location) in items {
-                if let Some((rgba, w, h)) =
-                    extract_icon_rgba(display_icon.as_deref(), install_location.as_deref())
-                {
+            for program in items {
+                if let Some((_, (rgba, w, h))) = program_icon(&program) {
+                    let id = program.id().to_string();
                     if tx.send(Msg::Icon { id, rgba, w, h }).is_err() {
                         break;
                     }
@@ -1278,41 +1271,179 @@ fn render_group(
     }
 }
 
-// Windows icon extraction (DisplayIcon -> RGBA), used by spawn_icon_load.
+// Program icons, used by spawn_icon_load.
 // ------------------------------------------------------------------------
 
-/// Get a program's icon as raw RGBA + dimensions. Tries, in order: the
-/// `DisplayIcon` value (path + optional `,index`), then the largest `.exe` in
-/// the install folder. Returns `None` only when nothing usable is found (the UI
-/// then shows a generic placeholder).
+/// An icon as raw RGBA bytes, with its width and height.
+type Rgba = (Vec<u8>, u32, u32);
+
+/// A place a program's icon can come from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IconSource {
+    /// An icon inside a file (an executable, a library or an icon file) and
+    /// its index.
+    File(String, i32),
+    /// A folder whose main executable carries the icon.
+    Folder(String),
+}
+
+impl IconSource {
+    fn same_as(&self, other: &IconSource) -> bool {
+        match (self, other) {
+            (Self::File(a, i), Self::File(b, j)) => i == j && a.eq_ignore_ascii_case(b),
+            (Self::Folder(a), Self::Folder(b)) => a.eq_ignore_ascii_case(b),
+            _ => false,
+        }
+    }
+}
+
+/// A program's icon and where it came from: the first of [`icon_sources`]
+/// that gives one. `None` when none does; the list then shows a placeholder.
 #[cfg(windows)]
-fn extract_icon_rgba(
-    display_icon: Option<&str>,
-    install_location: Option<&str>,
-) -> Option<(Vec<u8>, u32, u32)> {
-    // 1. DisplayIcon.
-    if let Some(di) = display_icon {
-        let raw = di.trim().trim_matches('"');
-        let (p, index) = split_icon_path(raw);
-        let p = oxidize::util::expand_env_vars(p);
-        if !p.is_empty() && std::path::Path::new(&p).exists() {
-            if let Some(r) = unsafe { icon_from_file(&p, index) } {
-                return Some(r);
-            }
-        }
-    }
-    // 2. The main executable in the install folder.
-    if let Some(loc) = install_location {
-        let loc = oxidize::util::expand_env_vars(loc.trim().trim_matches('"'));
-        if !loc.is_empty() {
-            if let Some(exe) = find_main_exe(std::path::Path::new(&loc)) {
-                if let Some(r) = unsafe { icon_from_file(&exe, 0) } {
-                    return Some(r);
+fn program_icon(program: &Program) -> Option<(IconSource, Rgba)> {
+    let product_icon = product_icon(program);
+    let name_tokens = util::significant_tokens(&program.display_name);
+    icon_sources(program, product_icon.as_deref())
+        .into_iter()
+        .find_map(|source| {
+            let icon = match &source {
+                IconSource::File(path, index) => {
+                    if std::path::Path::new(path).is_file() {
+                        unsafe { icon_from_file(path, *index) }
+                    } else {
+                        None
+                    }
                 }
-            }
+                IconSource::Folder(dir) => find_main_exe(std::path::Path::new(dir), &name_tokens)
+                    .and_then(|exe| unsafe { icon_from_file(&exe, 0) }),
+            };
+            icon.map(|icon| (source, icon))
+        })
+}
+
+#[cfg(not(windows))]
+fn program_icon(_program: &Program) -> Option<(IconSource, Rgba)> {
+    None
+}
+
+/// Where to look for a program's icon, best first. The icons the program
+/// declares come first: its `DisplayIcon`, then the `ProductIcon` of its
+/// Windows Installer product (`product_icon`). Then the main executable in
+/// its folders: the install folder, the folder of the `DisplayIcon` file and
+/// the folder of its uninstaller. The Windows folder is never searched, so a
+/// program removed through `MsiExec.exe` does not get an icon from there.
+fn icon_sources(program: &Program, product_icon: Option<&str>) -> Vec<IconSource> {
+    let display_icon = program.display_icon.as_deref().and_then(parse_icon_spec);
+    let files = [display_icon.clone(), product_icon.and_then(parse_icon_spec)]
+        .into_iter()
+        .flatten()
+        .map(|(path, index)| IconSource::File(path, index));
+    let folders = [
+        program
+            .install_location
+            .as_deref()
+            .and_then(|loc| search_folder(&util::expand_env_vars(loc.trim().trim_matches('"')))),
+        display_icon.and_then(|(path, _)| parent_folder(&path)),
+        program
+            .uninstall_string
+            .as_deref()
+            .and_then(uninstaller_folder),
+        program
+            .quiet_uninstall_string
+            .as_deref()
+            .and_then(uninstaller_folder),
+    ]
+    .into_iter()
+    .flatten()
+    .map(IconSource::Folder);
+    let mut sources: Vec<IconSource> = Vec::new();
+    for source in files.chain(folders) {
+        if !sources.iter().any(|s| s.same_as(&source)) {
+            sources.push(source);
         }
     }
-    None
+    sources
+}
+
+/// The `ProductIcon` Windows Installer keeps for the program's product, read
+/// only when the program is a Windows Installer product keyed by its product
+/// code. Windows Installer files a machine-wide product under the machine and
+/// a per-user one under the user; the program's own hive is read first.
+#[cfg(windows)]
+fn product_icon(program: &Program) -> Option<String> {
+    use oxidize::model::Hive;
+    if !program.is_windows_installer {
+        return None;
+    }
+    let packed = packed_product_code(program.id())?;
+    let machine = (
+        Hive::LocalMachine,
+        format!(r"SOFTWARE\Classes\Installer\Products\{packed}"),
+    );
+    let user = (
+        Hive::CurrentUser,
+        format!(r"Software\Microsoft\Installer\Products\{packed}"),
+    );
+    let order = match program.source.hive {
+        Hive::CurrentUser => [user, machine],
+        Hive::LocalMachine => [machine, user],
+    };
+    order
+        .into_iter()
+        .find_map(|(hive, key)| registry::read_string(hive, &key, "ProductIcon"))
+}
+
+/// A product code in the packed form Windows Installer files its products
+/// under: the first three groups reversed character by character, the last
+/// two pair by pair, so `{12345678-ABCD-EF01-2345-6789ABCDEF01}` becomes
+/// `87654321DCBA10FE32547698BADCFE10`. `None` unless `code` is a GUID in
+/// braces.
+fn packed_product_code(code: &str) -> Option<String> {
+    let groups: Vec<&str> = code
+        .strip_prefix('{')?
+        .strip_suffix('}')?
+        .split('-')
+        .collect();
+    let lengths: Vec<usize> = groups.iter().map(|g| g.len()).collect();
+    if lengths != [8, 4, 4, 4, 12]
+        || !groups
+            .iter()
+            .all(|g| g.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        return None;
+    }
+    let mut packed = String::with_capacity(32);
+    for group in &groups[..3] {
+        packed.extend(group.chars().rev());
+    }
+    for group in &groups[3..] {
+        for pair in group.as_bytes().chunks(2) {
+            packed.push(pair[1] as char);
+            packed.push(pair[0] as char);
+        }
+    }
+    Some(packed.to_ascii_uppercase())
+}
+
+/// Read an icon reference the way installers write them: a path, quoted or
+/// not, with an optional `,index`, `%VARIABLES%`, and sometimes arguments
+/// after it. `None` when no absolute path is left.
+fn parse_icon_spec(raw: &str) -> Option<(String, i32)> {
+    let raw = raw.trim();
+    let (path, index) = match raw.strip_prefix('"').and_then(|s| s.split_once('"')) {
+        // `"C:\App\app.exe",1`, `"C:\App\app.exe,1"` or `"C:\App\app.exe" -x`.
+        Some((quoted, rest)) => match rest.trim_start().strip_prefix(',') {
+            Some(index) => (quoted, parse_index(index)),
+            None => split_icon_path(quoted),
+        },
+        // `C:\App\app.exe,1`, stray quotes, or arguments after the path.
+        None => {
+            let (path, index) = split_icon_path(raw);
+            (strip_arguments(path.trim().trim_matches('"')), index)
+        }
+    };
+    let path = util::expand_env_vars(path.trim());
+    is_absolute_path(&path).then_some((path, index))
 }
 
 /// Split a `path,index` icon spec into the path and the (signed) index.
@@ -1325,37 +1456,129 @@ fn split_icon_path(raw: &str) -> (&str, i32) {
     }
 }
 
-/// Pick the most likely "main" executable in `dir` (the largest `.exe`, skipping
-/// obvious uninstaller/setup stubs). Non-recursive.
-fn find_main_exe(dir: &std::path::Path) -> Option<String> {
-    if !dir.is_dir() {
-        return None;
+/// The signed number at the start of `s`, or 0.
+fn parse_index(s: &str) -> i32 {
+    let s = s.trim_start();
+    let end = s
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+'))))
+        .map_or(s.len(), |(i, _)| i);
+    s[..end].parse().unwrap_or(0)
+}
+
+/// An unquoted path with arguments after it, cut after the file: at the first
+/// `.exe`, `.dll` or `.ico` that a space follows. A path that ends in one of
+/// these stays whole, spaces and all.
+fn strip_arguments(path: &str) -> &str {
+    const ICON_FILES: [&str; 3] = [".exe", ".dll", ".ico"];
+    // Only ASCII changes case, so positions in `lower` are positions in `path`.
+    let lower = path.to_ascii_lowercase();
+    if ICON_FILES.iter().any(|ext| lower.ends_with(ext)) {
+        return path;
     }
+    ICON_FILES
+        .iter()
+        .filter_map(|ext| {
+            lower
+                .match_indices(ext)
+                .map(|(i, _)| i + ext.len())
+                .find(|&end| matches!(lower.as_bytes().get(end), Some(b' ' | b'\t')))
+        })
+        .min()
+        .map_or(path, |end| &path[..end])
+}
+
+/// True for `C:\...` and `\\server\share\...` paths.
+fn is_absolute_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    path.starts_with(r"\\")
+        || (b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'\\' | b'/'))
+}
+
+/// `dir` as a folder to search for a program's executable: absolute, below a
+/// drive root and outside the Windows folder, without a trailing separator.
+fn search_folder(dir: &str) -> Option<String> {
+    let dir = dir.trim().trim_end_matches(['\\', '/']);
+    let parts: Vec<&str> = dir.split(['\\', '/']).collect();
+    let below_root = parts.iter().filter(|p| !p.is_empty()).count() >= 2;
+    let windows = parts
+        .get(1)
+        .is_some_and(|top| top.eq_ignore_ascii_case("windows"));
+    (is_absolute_path(dir) && below_root && !windows).then(|| dir.to_string())
+}
+
+/// The folder of the file at `path`, when [`search_folder`] accepts it.
+fn parent_folder(path: &str) -> Option<String> {
+    let (dir, _) = path
+        .trim_end_matches(['\\', '/'])
+        .rsplit_once(['\\', '/'])?;
+    search_folder(dir)
+}
+
+/// The folder of the program an uninstall command runs. A bare program name
+/// such as `MsiExec.exe` has none.
+fn uninstaller_folder(command: &str) -> Option<String> {
+    let argv = util::split_uninstall_command(&util::expand_env_vars(command));
+    parent_folder(argv.first()?)
+}
+
+/// The most likely main executable of the program in `dir`: the largest
+/// `.exe` that is not an uninstaller or setup stub. When `dir` holds none, the
+/// folders one level down that are called `bin` or share a word with the
+/// program's name (`name_tokens`) are searched the same way.
+fn find_main_exe(dir: &std::path::Path, name_tokens: &[String]) -> Option<String> {
+    if let Some((_, exe)) = largest_exe(dir) {
+        return Some(exe);
+    }
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|entry| is_program_subfolder(&entry.file_name().to_string_lossy(), name_tokens))
+        .filter_map(|entry| largest_exe(&entry.path()))
+        .max_by_key(|(size, _)| *size)
+        .map(|(_, exe)| exe)
+}
+
+/// The largest `.exe` directly in `dir` that can be a main executable, with
+/// its size. Non-recursive.
+fn largest_exe(dir: &std::path::Path) -> Option<(u64, String)> {
     let mut best: Option<(u64, String)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
-        let path = entry.path();
-        let is_exe = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .map(|s| s.eq_ignore_ascii_case("exe"))
-            .unwrap_or(false);
-        if !is_exe {
-            continue;
-        }
-        let name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        if name.starts_with("unins") || name == "setup.exe" {
+        let is_file = entry.file_type().is_ok_and(|t| t.is_file());
+        if !is_file || !is_main_exe_candidate(&entry.file_name().to_string_lossy()) {
             continue;
         }
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        if best.as_ref().map(|(s, _)| size > *s).unwrap_or(true) {
-            best = Some((size, path.to_string_lossy().to_string()));
+        if best.as_ref().is_none_or(|(s, _)| size > *s) {
+            best = Some((size, entry.path().to_string_lossy().to_string()));
         }
     }
-    best.map(|(_, p)| p)
+    best
+}
+
+/// True for an `.exe` that can be a program's main executable: not an
+/// uninstaller (`unins000.exe`, `uninstall.exe`, `Uninstall App.exe`) and not
+/// `setup.exe`.
+fn is_main_exe_candidate(file_name: &str) -> bool {
+    let name = file_name.to_lowercase();
+    name.ends_with(".exe")
+        && !name.starts_with("unins")
+        && !name.contains("uninst")
+        && name != "setup.exe"
+}
+
+/// True for a folder one level below the install folder that can hold the
+/// main executable: `bin`, or one whose name shares a word with the
+/// program's name (`example-win-x64` for Example Player).
+fn is_program_subfolder(folder: &str, name_tokens: &[String]) -> bool {
+    folder.eq_ignore_ascii_case("bin")
+        || util::significant_tokens(folder)
+            .iter()
+            .any(|t| name_tokens.contains(t))
 }
 
 /// Extract an icon from a file at the given index (ExtractIconEx honours the
@@ -1475,14 +1698,6 @@ unsafe fn hicon_to_rgba(
         }
     }
     Some((buf, w as u32, h as u32))
-}
-
-#[cfg(not(windows))]
-fn extract_icon_rgba(
-    _display_icon: Option<&str>,
-    _install_location: Option<&str>,
-) -> Option<(Vec<u8>, u32, u32)> {
-    None
 }
 
 #[cfg(test)]
@@ -1780,6 +1995,250 @@ mod tests {
             lines.last().map(String::as_str),
             Some("Example Player: 1 items are still there.")
         );
+    }
+
+    #[test]
+    fn a_product_code_packs_the_way_windows_installer_files_it() {
+        assert_eq!(
+            packed_product_code("{12345678-ABCD-EF01-2345-6789ABCDEF01}").as_deref(),
+            Some("87654321DCBA10FE32547698BADCFE10")
+        );
+        assert_eq!(
+            packed_product_code("{12345678-abcd-ef01-2345-6789abcdef01}").as_deref(),
+            Some("87654321DCBA10FE32547698BADCFE10")
+        );
+        for not_a_code in [
+            "example-player",
+            "12345678-ABCD-EF01-2345-6789ABCDEF01",
+            "{12345678-ABCD-EF01-2345-6789ABCDEF01}.old",
+            "{12345678-ABCD-EF01-2345-6789ABCDEF0}",
+            "{12345678-ABCD-EF01-2345-6789ABCDEFGH}",
+            "{12345678ABCD-EF01-2345-6789ABCDEF01}",
+        ] {
+            assert_eq!(packed_product_code(not_a_code), None, "{not_a_code}");
+        }
+    }
+
+    #[test]
+    fn icon_references_are_read_the_way_installers_write_them() {
+        let app = r"C:\Program Files\Example Player\player.exe";
+        for (raw, index) in [
+            (app.to_string(), 0),
+            (format!("{app},0"), 0),
+            (format!("{app},3"), 3),
+            (format!("{app},-101"), -101),
+            (format!("{app}, 2"), 2),
+            (format!("\"{app}\""), 0),
+            (format!("\"{app}\",2"), 2),
+            (format!("\"{app},2\""), 2),
+            (format!("\"{app}\" ,2"), 2),
+            (format!("  \"{app}\"  "), 0),
+            // A stray quote, and one that is never closed.
+            (format!("{app}\",2"), 2),
+            (format!("\"{app}"), 0),
+            // Arguments after the path.
+            (format!("\"{app}\" --uninstall"), 0),
+            (format!("{app} --uninstall"), 0),
+        ] {
+            assert_eq!(
+                parse_icon_spec(&raw),
+                Some((app.to_string(), index)),
+                "{raw}"
+            );
+        }
+        // An icon file without an extension and a comma in a folder name.
+        for whole in [
+            r"C:\Windows\Installer\{12345678-ABCD-EF01-2345-6789ABCDEF01}\Player Icon",
+            r"C:\Example, Studio\player.ico",
+        ] {
+            assert_eq!(parse_icon_spec(whole), Some((whole.to_string(), 0)));
+        }
+        for nothing in [
+            "",
+            "  ",
+            "player.exe",
+            "MsiExec.exe",
+            r"\player.ico",
+            r"%OXIDIZE_NO_SUCH_VARIABLE%\player.exe",
+        ] {
+            assert_eq!(parse_icon_spec(nothing), None, "{nothing}");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn icon_references_expand_environment_variables() {
+        let root = std::env::var("SystemRoot").expect("Windows sets SystemRoot");
+        assert_eq!(
+            parse_icon_spec(r#""%SystemRoot%\Installer\player.ico",0"#),
+            Some((format!(r"{root}\Installer\player.ico"), 0))
+        );
+        assert_eq!(
+            parse_icon_spec(r"%SystemRoot%\system32\shell32.dll,-16"),
+            Some((format!(r"{root}\system32\shell32.dll"), -16))
+        );
+    }
+
+    #[test]
+    fn declared_icons_come_before_the_folders() {
+        let mut program = example_program();
+        program.display_icon =
+            Some(r#""C:\Program Files\Example Player\player.exe",1"#.to_string());
+        program.install_location = Some(r"C:\Program Files\Example Player\".to_string());
+        program.uninstall_string =
+            Some(r#""C:\Program Files\Example Player\Tools\remove.exe" /S"#.to_string());
+        let product = r"C:\Windows\Installer\{12345678-ABCD-EF01-2345-6789ABCDEF01}\player.ico";
+        assert_eq!(
+            icon_sources(&program, Some(product)),
+            vec![
+                IconSource::File(r"C:\Program Files\Example Player\player.exe".into(), 1),
+                IconSource::File(product.into(), 0),
+                // The install folder, which is also the DisplayIcon's.
+                IconSource::Folder(r"C:\Program Files\Example Player".into()),
+                IconSource::Folder(r"C:\Program Files\Example Player\Tools".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_windows_installer_product_falls_back_to_its_product_icon() {
+        let mut program = example_program();
+        program.registry_key = "{12345678-ABCD-EF01-2345-6789ABCDEF01}".to_string();
+        program.is_windows_installer = true;
+        program.uninstall_string =
+            Some("MsiExec.exe /X{12345678-ABCD-EF01-2345-6789ABCDEF01}".to_string());
+        let product = r"C:\Windows\Installer\{12345678-ABCD-EF01-2345-6789ABCDEF01}\ProductIcon";
+        assert_eq!(
+            icon_sources(&program, Some(product)),
+            vec![IconSource::File(product.into(), 0)]
+        );
+        // Without one nothing is left: MsiExec.exe names no folder.
+        assert_eq!(icon_sources(&program, None), Vec::new());
+    }
+
+    #[test]
+    fn the_folders_of_a_missing_icon_and_of_the_uninstaller_are_searched() {
+        let mut program = example_program();
+        program.display_icon = Some(r"C:\Program Files\Example Player\gone.ico".to_string());
+        program.uninstall_string =
+            Some(r#""C:\Users\me\.example\bin\player.exe" self uninstall"#.to_string());
+        program.quiet_uninstall_string =
+            Some(r"C:\Program Files\Example Player\Remove\remove.exe /S".to_string());
+        assert_eq!(
+            icon_sources(&program, None),
+            vec![
+                IconSource::File(r"C:\Program Files\Example Player\gone.ico".into(), 0),
+                IconSource::Folder(r"C:\Program Files\Example Player".into()),
+                IconSource::Folder(r"C:\Users\me\.example\bin".into()),
+                IconSource::Folder(r"C:\Program Files\Example Player\Remove".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_own_folders_and_drive_roots_are_never_searched() {
+        let mut program = example_program();
+        for (location, uninstall) in [
+            (
+                r"C:\",
+                r"C:\Windows\System32\rundll32.exe C:\Example\remove.dll,Remove",
+            ),
+            (r"C:\Windows\", r"RunDll32.exe C:\Example\remove.dll,Remove"),
+            (
+                r"D:\WINDOWS\Installer",
+                "winget uninstall --id Example.Player",
+            ),
+            (
+                r"%OXIDIZE_NO_SUCH_VARIABLE%\Example",
+                r#""C:\remove.exe" /S"#,
+            ),
+        ] {
+            program.install_location = Some(location.to_string());
+            program.uninstall_string = Some(uninstall.to_string());
+            assert_eq!(icon_sources(&program, None), Vec::new(), "{location}");
+        }
+        program.install_location = Some(r#""C:\Program Files\Example Player""#.to_string());
+        assert_eq!(
+            icon_sources(&program, None),
+            vec![IconSource::Folder(
+                r"C:\Program Files\Example Player".into()
+            )]
+        );
+    }
+
+    #[test]
+    fn the_main_executable_is_found_one_level_down_when_the_folder_has_none() {
+        let root = std::env::temp_dir().join("oxidize_icon_main_exe_test");
+        let _ = std::fs::remove_dir_all(&root);
+        let write = |rel: &str, len: usize| {
+            let path = rel
+                .split('/')
+                .fold(root.clone(), |path, part| path.join(part));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vec![0u8; len]).unwrap();
+            path.to_string_lossy().to_string()
+        };
+        let tokens = util::significant_tokens("Example Player");
+        // Only stubs in the folder itself.
+        write("unins000.exe", 900);
+        write("Uninstall Example Player.exe", 900);
+        write("setup.exe", 900);
+        // Below it: a folder named after the program, `bin`, and an unrelated
+        // folder with the largest file.
+        let named = write("example-win-x64/player.exe", 500);
+        write("bin/player-cli.exe", 300);
+        write("plugins/codec.exe", 5000);
+        assert_eq!(find_main_exe(&root, &tokens), Some(named));
+
+        // An executable in the folder itself wins over the ones below it.
+        let own = write("player.exe", 10);
+        assert_eq!(find_main_exe(&root, &tokens), Some(own));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn stubs_are_not_main_executables_and_bin_is_searched() {
+        for stub in [
+            "unins000.exe",
+            "uninstall.exe",
+            "Uninstall Example Player.exe",
+            "ExampleUninstaller.exe",
+            "setup.exe",
+            "player.dll",
+        ] {
+            assert!(!is_main_exe_candidate(stub), "{stub}");
+        }
+        assert!(is_main_exe_candidate("Player.EXE"));
+        let tokens = util::significant_tokens("Example Player");
+        assert!(is_program_subfolder("bin", &tokens));
+        assert!(is_program_subfolder("BIN", &tokens));
+        assert!(is_program_subfolder("example-win-x64", &tokens));
+        assert!(!is_program_subfolder("plugins", &tokens));
+        // A generic word in common is not enough.
+        assert!(!is_program_subfolder("player-data", &tokens));
+    }
+
+    /// Resolves the icon of every program installed on this machine and
+    /// prints where each came from and which have none. Reads only.
+    #[test]
+    #[ignore = "reads the programs installed on this machine"]
+    fn icons_of_the_installed_programs() {
+        let programs = registry::enumerate_installed_programs(false);
+        let mut missing = Vec::new();
+        for program in &programs {
+            match program_icon(program) {
+                Some((source, _)) => println!("{}: {source:?}", program.display_name),
+                None => missing.push(program.display_name.as_str()),
+            }
+        }
+        println!(
+            "{} of {} programs have no icon",
+            missing.len(),
+            programs.len()
+        );
+        for name in missing {
+            println!("  {name}");
+        }
     }
 
     #[test]

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The window finds icons for more programs: the icon Windows Installer keeps
+  for a product whose entry names none, the main executable in a `bin` folder
+  or a folder named after the program when the install folder has none, and
+  the one in the folder of the uninstaller or of a missing icon file. Icon
+  paths in quotes, with variables or followed by arguments are read too.
+
 ## 0.2.3, 2026-10-10
 
 - `oxidize uninstall <program> --yes` removes a program completely in one go:
