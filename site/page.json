@@ -1,0 +1,116 @@
+{
+  "slug": "oxidize",
+  "name": "Oxidize",
+  "description": "Uninstall programs from your PC and clear out what they leave behind, with one button and a backup of everything removed.",
+  "colours": {
+    "light": { "accent": "#a04e22", "accent-hover": "#87411c", "accent-ink": "#a04e22", "band": "#f4e8df", "tile": "#faf1ea", "stage": "#f5ebe3" },
+    "dark": { "accent": "#a85224", "accent-hover": "#b95a27", "accent-ink": "#f7b27a", "band": "#22160f", "tile": "#2b1c13", "stage": "#20150f" }
+  },
+  "platforms": { "windows": "Windows" },
+  "hero": {
+    "lede": "Uninstall programs from your PC and clear out what they leave behind. One button removes a program completely, and Undo brings it all back.",
+    "notes": ["Windows 10 and 11, 64-bit. One file, nothing to install. The command line is <a href=\"/download/cli\">oxidize.exe</a>.", "If Windows says it protected your PC, click More info, then Run anyway."],
+    "away": "Oxidize runs on Windows. Open this page on your PC to download it.",
+    "image": { "name": "hero", "w": 2880, "h": 1800, "alt": "Oxidize with Example Player selected and the twelve items that belong to it, each with how sure Oxidize is and why" }
+  },
+  "features": [
+    {
+      "label": "Remove",
+      "title": "One button, one question first",
+      "body": ["Remove completely closes the program's running copies, runs its own uninstaller when it needs one, removes everything found at high confidence and keeps a backup.", "Nothing happens until you click Yes."],
+      "main": { "name": "f2", "w": 2880, "h": 1800, "pos": "50% 30%", "zoom": 1.15, "alt": "The confirmation before Demo Photo Studio is removed completely" },
+      "detail": { "name": "c2", "w": 706, "h": 260, "style": "width: 40%" }
+    },
+    {
+      "label": "Result",
+      "title": "It ends with Nothing left",
+      "body": ["After the removal Oxidize scans again. It says Nothing left, or lists what is still there and why, and counts the lower-confidence items it kept."],
+      "main": { "name": "f3", "w": 2880, "h": 1800, "pos": "30% 0", "zoom": 1.3, "alt": "The result: Nothing left, removed in 3.9 seconds, with an Undo button" },
+      "detail": { "name": "c3", "w": 461, "h": 166, "style": "width: 34%" }
+    },
+    {
+      "label": "Leftovers",
+      "title": "Finds what uninstallers leave behind",
+      "body": ["Oxidize looks through the registry, AppData, ProgramData, the Start menu, services, scheduled tasks, firewall rules and PATH.", "High-confidence items start ticked; the medium ones wait for you."],
+      "main": { "name": "f1", "w": 2880, "h": 1800, "pos": "40% 0", "alt": "Eleven leftovers of Northwind Notes, nine ticked" },
+      "detail": { "name": "c1", "w": 1023, "h": 360 }
+    },
+    {
+      "label": "Undo",
+      "title": "Every removal can be undone",
+      "body": ["Before anything is deleted, registry keys are exported and files are moved into a backup folder. Undo puts every item back, and the log names each one."],
+      "main": { "name": "f4", "w": 2880, "h": 1800, "pos": "0 100%", "alt": "After Undo, the program is back and the log lists every restored item" },
+      "detail": { "name": "c4", "w": 1123, "h": 223, "style": "width: 60%" }
+    },
+    {
+      "label": "Preview",
+      "title": "See every item before it goes",
+      "body": ["With Dry run on, Remove completely changes nothing. It lists each item it would remove and each running process it would close."],
+      "main": { "name": "f5", "w": 2880, "h": 1800, "pos": "40% 0", "alt": "A dry run listing ten items and one running process" },
+      "detail": { "name": "c5", "w": 936, "h": 310 }
+    }
+  ],
+  "assistant": {
+    "label": "AI assistant",
+    "title": "Let your assistant clean up",
+    "body": [
+      "<code>oxidize mcp</code> lets an AI assistant on your PC list programs, find leftovers and plan a removal. Nothing goes over the network.",
+      "A removal is always a plan first: what goes, with paths, sizes and reasons, and where the backup goes. Your assistant asks you before it carries a plan out, and every removed item is backed up.",
+      "The command line has <code>--json</code> on every command. <a href=\"/skill/oxidize.zip\">Download the skill</a> to teach your assistant all of it."
+    ],
+    "caption": "Add Oxidize to your MCP client",
+    "code": "{\n  \"mcpServers\": {\n    \"oxidize\": {\n      \"command\": \"C:\\\\Tools\\\\oxidize.exe\",\n      \"args\": [\"mcp\"]\n    }\n  }\n}"
+  },
+  "pair": {
+    "label": "Themes",
+    "title": "Follows your Windows theme",
+    "body": ["Oxidize is light or dark, the way Windows is set."],
+    "one": { "name": "hero-light", "w": 2880, "h": 1800, "dark": false, "alt": "Oxidize in the light theme" },
+    "two": { "name": "f1-dark", "w": 2880, "h": 1800, "dark": false, "alt": "Oxidize in the dark theme" }
+  },
+  "new": {
+    "version": "0.2.3",
+    "items": [
+      "Remove completely and Undo in the window.",
+      "<code>oxidize uninstall &lt;program&gt; --yes</code> removes a program in one go and ends with Nothing left or a list of what stayed.",
+      "A program installed for you alone is removed without its own uninstaller.",
+      "New leftovers: link and file types, open-with entries, shortcuts, temp folders and the vendor's own key.",
+      "Faster scans: registry, files and system are read at the same time."
+    ]
+  },
+  "requirements": [
+    "Windows 10 or 11, 64-bit",
+    "About 9 MB to download",
+    "Administrator rights only for programs installed for all users",
+    "No install and no internet connection"
+  ],
+  "privacy": {
+    "title": "Nothing goes online",
+    "body": ["Oxidize has no network code. The assistant connection runs over your PC's own input and output, nothing else."]
+  },
+  "data": {
+    "title": "Only the backups",
+    "body": ["Each removal gets one backup folder under <code>%LOCALAPPDATA%\\Oxidize\\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data."]
+  },
+  "keys": [
+    ["Ctrl++", "Make everything larger"],
+    ["Ctrl+-", "Make everything smaller"],
+    ["Ctrl+0", "Back to normal size"],
+    ["Tab", "Move between controls"],
+    ["Space", "Press the focused button"]
+  ],
+  "basics": [
+    { "title": "Get started", "steps": ["Download oxidize-gui.exe.", "Double-click it. There is nothing to install.", "Pick a program and click Remove completely."] },
+    { "title": "Updates", "body": ["Download the file again and replace the old one. Every release uses the same file names."] },
+    { "title": "Removing it", "body": ["Delete oxidize-gui.exe, and <code>%LOCALAPPDATA%\\Oxidize</code> once you no longer need the backups in it."] }
+  ],
+  "faq": [
+    { "q": "Is Oxidize free?", "a": ["Yes. It is free and open source under the MIT license."] },
+    { "q": "Why does Windows say it protected my PC?", "a": ["Oxidize is not signed with a paid certificate, so Windows warns about it the first time. Click More info, then Run anyway."] },
+    { "q": "Can I undo a removal?", "a": ["Yes. Everything is backed up before it is removed. Click Undo in the window, or use <code>oxidize restore</code> from the command line; <code>oxidize backups</code> lists them."] },
+    { "q": "Does it remove things that belong to other programs?", "a": ["Only high-confidence items go by default, each with the reason it matched. Windows' own folders are never touched, and a vendor folder that still holds another product stays."] },
+    { "q": "Do I need the command line?", "a": ["No. The window does everything. <a href=\"/download/cli\">oxidize.exe</a> is there for scripts, and <a href=\"/download/zip\">a zip</a> holds both."] }
+  ],
+  "closing": { "title": "Get Oxidize", "sub": "Free for Windows 10 and 11. One file, nothing to install." },
+  "footer": ["For AI assistants: <a href=\"/skill/oxidize.zip\">the Oxidize skill</a> and <a href=\"/llms.txt\">llms.txt</a>."]
+}
