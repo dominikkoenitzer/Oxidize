@@ -414,6 +414,18 @@ def build(page):
     w(f'<meta name="description" content="{esc(page["description"])}">')
     w(f'<meta property="og:title" content="{esc(name)}">')
     w(f'<meta property="og:description" content="{esc(page["description"])}">')
+    if page.get("url"):
+        # The link preview a chat app shows when someone shares the page.
+        url = page["url"]
+        w(f'<meta property="og:url" content="{esc(url)}">')
+        w('<meta property="og:type" content="website">')
+        w(f'<meta property="og:site_name" content="{esc(name)}">')
+        w(f'<meta property="og:image" content="{esc(url)}og.png">')
+        w('<meta property="og:image:width" content="1200">')
+        w('<meta property="og:image:height" content="630">')
+        w(f'<meta property="og:image:alt" content="{esc(name)} and its window">')
+        w('<meta name="twitter:card" content="summary_large_image">')
+        w(f'<link rel="canonical" href="{esc(url)}">')
     w('<meta name="color-scheme" content="light dark">')
     w('<link rel="icon" href="data:,">')
     w('<link rel="preload" href="jakarta.woff2" as="font" type="font/woff2" crossorigin>')

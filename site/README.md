@@ -15,6 +15,8 @@ It names no author and does not link to this repository.
   looks. Never put a mock-up or an edited screenshot there.
 - `jakarta.woff2` is the Plus Jakarta Sans typeface, served from the page itself;
   `jakarta-OFL.txt` is its licence.
+- `og.png` is the 1200x630 card a chat app shows when someone shares the page. It is a picture of
+  the page's own hero: rebuild it when the hero screenshot changes.
 - `vercel.json` holds the download addresses, each a temporary redirect:
   - `/download/windows`
   - `/download/cli`
