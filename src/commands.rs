@@ -382,6 +382,8 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
                 )?
             );
         }
+        let selected = selected_leftovers(&report, &args.levels).len();
+        removal_verdict(selected, removal.as_ref(), g)?;
     } else if !report.is_empty() && !report.installed {
         let high = report
             .all()
@@ -842,6 +844,9 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
     if g.json {
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
+    if run.json["cancelled"] == json!(true) {
+        return Err(Failure::cancelled("Cancelled.", true).into());
+    }
     if run.failed(g.dry_run) {
         return Err(run.failure(g.json).into());
     }
@@ -1022,7 +1027,14 @@ fn run_uninstall(
     let out = complete::remove_completely(&pc, program, target, plan, &opts);
     let v = &out.verdict;
 
-    let json_out = complete_json(program, plan, &out, level, g.dry_run);
+    let mut json_out = complete_json(program, plan, &out, level, g.dry_run);
+    let cancelled = out
+        .removal
+        .as_ref()
+        .is_some_and(|o| declined(out.selected.len(), o, g.dry_run));
+    if cancelled {
+        json_out["cancelled"] = json!(true);
+    }
 
     if !g.json {
         print_complete(name, &out, g.dry_run);
@@ -1296,8 +1308,19 @@ fn run_uninstall_keep(
         json_out["uninstaller"] = json!("not started, no longer registered");
         json_out["still_installed"] = json!(false);
     } else {
-        let status = uninstall::run(plan)?;
-        let described = uninstall::describe_exit(status, plan.is_msi);
+        // With --json our output is the result; the uninstaller gets none.
+        let described = if g.json {
+            let null = std::process::Stdio::null;
+            match uninstall::run_for(plan, null(), null(), complete::VENDOR_WAIT)? {
+                Some(status) => uninstall::describe_exit(status, plan.is_msi),
+                None => format!(
+                    "was still running after {} s",
+                    complete::VENDOR_WAIT.as_secs()
+                ),
+            }
+        } else {
+            uninstall::describe_exit(uninstall::run(plan)?, plan.is_msi)
+        };
         if !g.json {
             println!("Uninstaller {described}.");
         }
@@ -1435,6 +1458,9 @@ fn uninstall_package(
     if !g.dry_run && !run.gone {
         let message = format!("{} is still registered", app.display_name);
         return Err(Failure::still_installed(message, g.json).into());
+    }
+    if run.failed(g.dry_run) {
+        return Err(run.failure(g.json).into());
     }
     Ok(())
 }
@@ -1745,10 +1771,11 @@ fn cmd_orphans(args: &OrphansArgs, g: &Global) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(
-                    &json!({ "report": report, "removal": removal_json(&Some(removal)) })
+                    &json!({ "report": report, "removal": removal_json(&Some(removal.clone())) })
                 )?
             );
         }
+        removal_verdict(report.dangling.len(), Some(&removal), g)?;
     } else if !report.dangling.is_empty() && !g.json {
         println!();
         println!("{}", term::dim("Remove them: oxidize orphans --remove"));
@@ -2102,6 +2129,27 @@ pub(crate) fn selected_leftovers(report: &ScanReport, levels: &LevelOpts) -> Vec
         .filter(|l| l.confidence <= threshold)
         .cloned()
         .collect()
+}
+
+/// The exit code of a removal of `selected` items that already printed its
+/// result: 5 when the question was answered no, 4 when an item failed.
+fn removal_verdict(selected: usize, removal: Option<&DeletionOutcome>, g: &Global) -> Result<()> {
+    let Some(o) = removal else {
+        return Ok(());
+    };
+    if declined(selected, o, g.dry_run) {
+        return Err(Failure::cancelled("Cancelled.", true).into());
+    }
+    if o.failed > 0 {
+        let message = format!("{} of {} items could not be removed", o.failed, o.attempted);
+        return Err(Failure::incomplete(message, g.json).into());
+    }
+    Ok(())
+}
+
+/// Items were selected and none was tried: the question was answered no.
+fn declined(selected: usize, o: &DeletionOutcome, dry_run: bool) -> bool {
+    !dry_run && selected > 0 && o.attempted == 0
 }
 
 fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<DeletionOutcome> {
@@ -2951,6 +2999,35 @@ mod tests {
         assert_eq!(j["would_close"][0]["pid"], 100);
         assert!(j.get("nothing_left").is_none());
         assert!(j.get("closed").is_none());
+    }
+
+    #[test]
+    fn a_removal_answered_no_is_a_cancel_and_a_failed_item_is_incomplete() {
+        let g = Global {
+            dry_run: false,
+            yes: false,
+            json: true,
+            no_backup: false,
+        };
+        let no = DeletionOutcome::default();
+        assert!(declined(3, &no, false));
+        assert!(!declined(0, &no, false), "nothing selected, nothing asked");
+        assert!(!declined(3, &no, true), "a dry run asks nothing");
+        let code = |r: Result<()>| r.err().map(|e| exit::outcome(&e).exit);
+        assert_eq!(
+            code(removal_verdict(3, Some(&no), &g)),
+            Some(exit::CANCELLED)
+        );
+        let failed = removed(2, 1, Some("b"));
+        assert_eq!(
+            code(removal_verdict(3, Some(&failed), &g)),
+            Some(exit::INCOMPLETE)
+        );
+        assert_eq!(
+            code(removal_verdict(3, Some(&removed(3, 0, Some("b"))), &g)),
+            None
+        );
+        assert_eq!(code(removal_verdict(0, None, &g)), None);
     }
 
     #[test]
