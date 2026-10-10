@@ -645,6 +645,8 @@ pub struct Server {
     inspect: Arc<dyn Inspect>,
     remove: Arc<dyn Remove>,
     plans: Arc<Mutex<Plans>>,
+    /// Held while a plan is carried out, so two never run at once.
+    applying: Arc<Mutex<()>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -668,6 +670,7 @@ impl Server {
             inspect,
             remove,
             plans: Arc::default(),
+            applying: Arc::default(),
             tool_router: Self::tool_router(),
         }
     }
@@ -753,7 +756,9 @@ impl Server {
         let m = Arc::clone(&self.inspect);
         let r = Arc::clone(&self.remove);
         let plans = Arc::clone(&self.plans);
+        let applying = Arc::clone(&self.applying);
         blocking(move || {
+            let _one_at_a_time = applying.lock().unwrap_or_else(|e| e.into_inner());
             let plan = plans
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
