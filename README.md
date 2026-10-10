@@ -158,6 +158,13 @@ instead: `{"error": {"code": "not_found", "message": "..."}}`. The codes are
 `cancelled`. A run that already printed its result only sets the exit code,
 so stdout always holds one JSON document.
 
+`oxidize uninstall <program> --yes --json` prints `nothing_left`,
+`still_installed`, `remaining` (what the second scan still found, with
+reasons), `below_level`, `closed` (the processes it closed), `uninstaller`,
+`uninstaller_step`, `removal` (with the `backup` name) and `seconds`. A dry
+run has `would_close` and `would_remove` instead. `oxidize scan <program>
+--json` prints `program_name`, `installed` and `items`.
+
 ## What gets checked
 
 Registry keys and values under `SOFTWARE` in HKCU and HKLM, both 32- and
