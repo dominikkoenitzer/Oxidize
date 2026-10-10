@@ -724,6 +724,7 @@ fn removal_log(outcome: &DeletionOutcome, dry_run: bool) -> Vec<String> {
             ItemStatus::Removed => lines.push(format!("removed {}", item.path)),
             ItemStatus::AlreadyGone => lines.push(format!("already gone {}", item.path)),
             ItemStatus::Failed(e) => lines.push(format!("failed {}: {e}", item.path)),
+            ItemStatus::WouldRemove => lines.push(format!("would remove {}", item.path)),
         }
     }
     for p in &outcome.emptied_parents {

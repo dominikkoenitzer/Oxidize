@@ -20,7 +20,7 @@ use crate::model::{
 use crate::packages::{
     self, package_guard, PackageStore, Refusal, RemovalOutcome, WindowsPackageStore,
 };
-use crate::safety::{DeletionOutcome, ItemStatus, SafetyContext};
+use crate::safety::{DeletionOutcome, ItemOutcome, ItemStatus, SafetyContext};
 use crate::{
     complete, hunter, orphans, registry, restore, safety, scanner, system, term, uninstall, util,
 };
@@ -2081,7 +2081,12 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
     }
 
     if ctx.dry_run {
+        let outcome = safety::remove_leftovers(selected, label, &ctx)?;
         if !g.json {
+            println!();
+            for item in &outcome.items {
+                println!("{}", item_line(item));
+            }
             println!();
             println!(
                 "{}",
@@ -2091,7 +2096,7 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
                 ))
             );
         }
-        return safety::remove_leftovers(selected, label, &ctx);
+        return Ok(outcome);
     }
 
     if !g.json {
@@ -2120,18 +2125,24 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
     Ok(outcome)
 }
 
+/// One item of a removal as a line of output.
+fn item_line(item: &ItemOutcome) -> String {
+    match &item.status {
+        ItemStatus::Removed => format!("  {}  {}", term::green("removed"), item.path),
+        ItemStatus::AlreadyGone => format!("  {}  {}", term::dim("gone   "), item.path),
+        ItemStatus::Failed(e) => format!(
+            "  {}  {}  {}",
+            term::red("failed "),
+            item.path,
+            term::dim(e)
+        ),
+        ItemStatus::WouldRemove => format!("  {}  {}", term::dim("would remove"), item.path),
+    }
+}
+
 fn print_outcome(outcome: &DeletionOutcome) {
     for item in &outcome.items {
-        match &item.status {
-            ItemStatus::Removed => println!("  {}  {}", term::green("removed"), item.path),
-            ItemStatus::AlreadyGone => println!("  {}  {}", term::dim("gone   "), item.path),
-            ItemStatus::Failed(e) => println!(
-                "  {}  {}  {}",
-                term::red("failed "),
-                item.path,
-                term::dim(e)
-            ),
-        }
+        println!("{}", item_line(item));
     }
     for p in &outcome.emptied_parents {
         println!(
@@ -2188,6 +2199,7 @@ pub(crate) fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Val
                     ItemStatus::Removed => "removed",
                     ItemStatus::AlreadyGone => "gone",
                     ItemStatus::Failed(_) => "failed",
+                    ItemStatus::WouldRemove => "would_remove",
                 },
                 "error": match &i.status { ItemStatus::Failed(e) => Some(e.as_str()), _ => None },
             })).collect::<Vec<_>>(),
@@ -3334,6 +3346,48 @@ mod tests {
         rows.retain(|r| r.matches("vendor.notes"));
         assert_eq!(row_names(&rows), ["Notes"]);
         assert_eq!(list_footer(&rows), "1 Store app");
+    }
+
+    #[test]
+    fn a_dry_run_lists_every_item_it_would_remove() {
+        let dir = std::env::temp_dir().join("oxidize_dry_run_list_test");
+        let selected = vec![
+            Leftover::fs(
+                LeftoverKind::Directory,
+                dir.join("Example Player"),
+                Confidence::High,
+                "install folder",
+                None,
+                false,
+            ),
+            Leftover::reg_value(
+                Hive::CurrentUser,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+                "Example Player",
+                Confidence::Medium,
+                "autostart",
+            ),
+        ];
+        let ctx = SafetyContext {
+            dry_run: true,
+            make_backups: true,
+        };
+        let outcome = safety::remove_leftovers(&selected, "Example Player", &ctx).unwrap();
+        assert_eq!(outcome.items.len(), selected.len());
+        assert!(outcome.backup_name.is_none());
+        for (item, leftover) in outcome.items.iter().zip(&selected) {
+            assert_eq!(item.path, leftover.path);
+            assert!(matches!(item.status, ItemStatus::WouldRemove));
+            assert!(item_line(item).contains(&leftover.path));
+            assert!(item_line(item).contains("would remove"));
+        }
+        let json = removal_json(&Some(outcome));
+        let items = json["items"].as_array().unwrap();
+        assert_eq!(items.len(), selected.len());
+        for (item, leftover) in items.iter().zip(&selected) {
+            assert_eq!(item["path"], leftover.path.as_str());
+            assert_eq!(item["status"], "would_remove");
+        }
     }
 
     #[test]

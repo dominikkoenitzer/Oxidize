@@ -28,6 +28,8 @@ pub enum ItemStatus {
     Removed,
     AlreadyGone,
     Failed(String),
+    /// A dry run: the item would be removed.
+    WouldRemove,
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +222,14 @@ pub fn remove_leftovers(
     if ctx.dry_run {
         outcome.attempted = items.len();
         outcome.skipped = items.len();
+        outcome.items = items
+            .iter()
+            .map(|l| ItemOutcome {
+                path: l.path.clone(),
+                kind: l.kind,
+                status: ItemStatus::WouldRemove,
+            })
+            .collect();
         return Ok(outcome);
     }
 
