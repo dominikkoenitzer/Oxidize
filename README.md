@@ -1,5 +1,7 @@
 # Oxidize
 
+Uninstall Windows programs and remove what they leave behind.
+
 [Download Oxidize](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-gui.exe), then double-click it.
 
 The file is not signed, so Windows may show "Windows protected your PC". Click
@@ -10,8 +12,6 @@ The command-line version is
 or get [a zip with both](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-windows-x64.zip).
 It runs from a terminal, for example `.\oxidize.exe list` in the folder you
 saved it to.
-
-Uninstall Windows programs and remove what they leave behind.
 
 Windows' own uninstall leaves things around: registry keys, folders under
 AppData and ProgramData, services, scheduled tasks, firewall rules, PATH
