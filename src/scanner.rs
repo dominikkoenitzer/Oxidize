@@ -2316,4 +2316,58 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    /// A root like `Program Files`: a few hundred unrelated folders, the
+    /// product's own folder, its vendor folder and a family folder.
+    fn many_folders(name: &str, unrelated: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for i in 0..unrelated {
+            fs::create_dir_all(root.join(format!("Unrelated Tool {i}")).join("bin")).unwrap();
+        }
+        fs::create_dir_all(root.join("Tindral Notes")).unwrap();
+        fs::create_dir_all(root.join("Quillhaven").join("Tindral Notes")).unwrap();
+        fs::create_dir_all(root.join("Quillhaven").join("Other Product")).unwrap();
+        fs::create_dir_all(root.join("Tindral Notes Kit").join("TindralNotes2")).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_root_of_many_folders_yields_only_the_products_own() {
+        let root = many_folders("oxidize_many_folders_test", 300);
+        let target = name_target("Tindral Notes", Some("Quillhaven"));
+        let mut out = Vec::new();
+        scan_dir_children(&root, &target, &[], &fs_roots(), &mut out);
+        let mut found: Vec<String> = out
+            .iter()
+            .map(|l| {
+                Path::new(&l.path)
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        found.sort();
+        assert_eq!(found, [r"Quillhaven\Tindral Notes", "Tindral Notes"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Times the walk of one large root. Run with
+    /// `cargo test --lib many_folders_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn many_folders_timing() {
+        let root = many_folders("oxidize_many_folders_timing", 2000);
+        let target = name_target("Tindral Notes", Some("Quillhaven"));
+        let roots = fs_roots();
+        let start = std::time::Instant::now();
+        for _ in 0..20 {
+            let mut out = Vec::new();
+            scan_dir_children(&root, &target, &[], &roots, &mut out);
+            assert_eq!(out.len(), 2);
+        }
+        eprintln!("20 walks of 2000 folders: {:?}", start.elapsed());
+        let _ = fs::remove_dir_all(&root);
+    }
 }
