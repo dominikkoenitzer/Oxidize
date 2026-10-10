@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4, 2026-10-11
 
 - The window finds icons for more programs: the icon Windows Installer keeps
   for a product whose entry names none, the main executable in a `bin` folder
