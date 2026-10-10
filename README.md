@@ -169,7 +169,8 @@ cargo build --release --locked
 ```
 
 The programs end up in `target\release\oxidize.exe` and
-`target\release\oxidize-gui.exe`.
+`target\release\oxidize-gui.exe`. Both are self-contained: the C runtime is
+linked in, so they run on any Windows PC without installing a runtime.
 
 Once you have the clone, `scripts\setup.ps1` does the checking for you. It
 looks for rustup, cargo, the MSVC build tools and the Windows SDK and prints
