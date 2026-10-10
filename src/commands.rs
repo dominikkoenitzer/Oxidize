@@ -1153,17 +1153,22 @@ impl complete::Pc for CliPc<'_> {
     }
 
     fn run_uninstaller(&self, plan: &uninstall::UninstallPlan) -> Result<String> {
-        // With --json our output is the result; the uninstaller gets none.
-        let status = if self.g.json {
-            uninstall::run_with(
-                plan,
-                std::process::Stdio::null(),
-                std::process::Stdio::null(),
-            )?
+        use std::process::Stdio;
+        // Someone clicking through it gets all the time they need; one that
+        // runs on its own is not waited for longer than the flow allows.
+        let attended = !plan.unattended && !self.g.yes && !self.g.json;
+        let status = if attended {
+            Some(uninstall::run(plan)?)
+        } else if self.g.json {
+            // With --json our output is the result; the uninstaller gets none.
+            uninstall::run_for(plan, Stdio::null(), Stdio::null(), self.wait)?
         } else {
-            uninstall::run(plan)?
+            uninstall::run_for(plan, Stdio::inherit(), Stdio::inherit(), self.wait)?
         };
-        let described = uninstall::describe_exit(status, plan.is_msi);
+        let described = match status {
+            Some(status) => uninstall::describe_exit(status, plan.is_msi),
+            None => format!("was still running after {} s", self.wait.as_secs()),
+        };
         if !self.g.json {
             println!("Uninstaller {described}.");
         }

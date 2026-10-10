@@ -436,11 +436,14 @@ impl Pc for ThisPc {
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String> {
         use std::process::Stdio;
         let status = if self.quiet {
-            crate::uninstall::run_with(plan, Stdio::null(), Stdio::null())?
+            crate::uninstall::run_for(plan, Stdio::null(), Stdio::null(), VENDOR_WAIT)?
         } else {
-            crate::uninstall::run(plan)?
+            crate::uninstall::run_for(plan, Stdio::inherit(), Stdio::inherit(), VENDOR_WAIT)?
         };
-        Ok(crate::uninstall::describe_exit(status, plan.is_msi))
+        Ok(match status {
+            Some(status) => crate::uninstall::describe_exit(status, plan.is_msi),
+            None => format!("was still running after {} s", VENDOR_WAIT.as_secs()),
+        })
     }
 
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool {
