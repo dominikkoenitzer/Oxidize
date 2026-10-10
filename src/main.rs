@@ -16,7 +16,7 @@ fn main() {
     let cli = Cli::parse();
     if let Some(path) = &cli.result_file {
         // Started by --elevate: the result goes back to the run that waits.
-        if let Err(e) = safety::send_stdout_to(path) {
+        if let Err(e) = safety::send_output_to(path) {
             term::warn(&format!("{e:#}"));
         }
     }
@@ -47,21 +47,25 @@ fn elevate(cli: &Cli) -> anyhow::Result<i32> {
         None
     };
     let code = safety::run_elevated(file.as_deref());
-    let output = file.map(|path| {
-        let bytes = std::fs::read(&path).unwrap_or_default();
-        let _ = std::fs::remove_file(&path);
-        bytes
-    });
+    let output = file.map(|path| (take(&path), take(&safety::error_file(&path))));
     let code = code?;
-    if let Some(bytes) = output {
-        if cli.json && code != exit::DONE && bytes.iter().all(u8::is_ascii_whitespace) {
+    if let Some((out, err)) = output {
+        let _ = std::io::stderr().write_all(&err);
+        if cli.json && code != exit::DONE && out.iter().all(u8::is_ascii_whitespace) {
             let message =
                 format!("the elevated run ended with exit code {code} and printed nothing");
             return Err(Failure::new("error", code, message, false).into());
         }
-        std::io::stdout().write_all(&bytes)?;
+        std::io::stdout().write_all(&out)?;
     }
     Ok(code)
+}
+
+/// Read a file the elevated run wrote, then delete it.
+fn take(path: &std::path::Path) -> Vec<u8> {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let _ = std::fs::remove_file(path);
+    bytes
 }
 
 /// Print what is left to print and exit. With `--json` an error is one

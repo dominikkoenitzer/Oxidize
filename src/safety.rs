@@ -184,10 +184,11 @@ fn elevated_params(result_file: Option<&Path>, args: &[String]) -> String {
     all.join(" ")
 }
 
-/// Start of the name of every file an elevated run writes its stdout to.
+/// Start of the name of every file an elevated run writes its output to.
 const RESULT_FILE_PREFIX: &str = "oxidize-elevated-";
 
-/// A new empty file in `%TEMP%` for an elevated run's stdout.
+/// New empty files in `%TEMP%` for an elevated run's stdout and stderr.
+/// Returns the stdout file; [`error_file`] names the other.
 pub fn new_result_file() -> Result<PathBuf> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -195,12 +196,19 @@ pub fn new_result_file() -> Result<PathBuf> {
         .unwrap_or_default();
     let name = format!("{RESULT_FILE_PREFIX}{}-{stamp}.out", std::process::id());
     let path = std::env::temp_dir().join(name);
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    for file in [path.clone(), error_file(&path)] {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&file)
+            .with_context(|| format!("creating {}", file.display()))?;
+    }
     Ok(path)
+}
+
+/// The stderr file next to a result file.
+pub fn error_file(result_file: &Path) -> PathBuf {
+    result_file.with_extension("err")
 }
 
 /// Whether `path` is named like a file [`new_result_file`] makes. An
@@ -211,27 +219,37 @@ pub fn is_result_file(path: &Path) -> bool {
         .is_some_and(|n| n.starts_with(RESULT_FILE_PREFIX) && n.ends_with(".out"))
 }
 
-/// Send this process's stdout to `path`, an existing result file. Call it
-/// before anything is printed. Rust's stdout asks Windows for the handle on
-/// every write, so `println!` follows.
+/// Send this process's stdout to `path`, an existing result file, and its
+/// stderr to the [`error_file`] next to it. Call it before anything is
+/// printed. Rust's stdout and stderr ask Windows for the handle on every
+/// write, so `println!` and `eprintln!` follow.
 #[cfg(windows)]
-pub fn send_stdout_to(path: &Path) -> Result<()> {
-    use std::os::windows::io::IntoRawHandle;
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::System::Console::{SetStdHandle, STD_OUTPUT_HANDLE};
+pub fn send_output_to(path: &Path) -> Result<()> {
+    use windows::Win32::System::Console::{STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
 
     if !is_result_file(path) {
         bail!("{} is not a result file", path.display());
     }
+    redirect(STD_OUTPUT_HANDLE, path)?;
+    redirect(STD_ERROR_HANDLE, &error_file(path))
+}
+
+/// Point one standard handle at an existing file, which stays open until
+/// the process ends.
+#[cfg(windows)]
+fn redirect(which: windows::Win32::System::Console::STD_HANDLE, path: &Path) -> Result<()> {
+    use std::os::windows::io::IntoRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::Console::SetStdHandle;
+
     let file = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
         .open(path)
         .with_context(|| format!("opening {}", path.display()))?;
-    // Stays open until the process ends.
     let handle = HANDLE(file.into_raw_handle());
-    unsafe { SetStdHandle(STD_OUTPUT_HANDLE, handle) }.context("redirecting stdout")?;
-    Ok(())
+    unsafe { SetStdHandle(which, handle) }
+        .with_context(|| format!("redirecting output to {}", path.display()))
 }
 
 #[cfg(not(windows))]
@@ -240,8 +258,8 @@ pub fn run_elevated(_result_file: Option<&Path>) -> Result<i32> {
 }
 
 #[cfg(not(windows))]
-pub fn send_stdout_to(_path: &Path) -> Result<()> {
-    bail!("redirecting stdout is only supported on Windows")
+pub fn send_output_to(_path: &Path) -> Result<()> {
+    bail!("redirecting output is only supported on Windows")
 }
 
 /// Quote one argument so `CommandLineToArgvW` parses it back unchanged.
@@ -743,7 +761,7 @@ mod tests {
         ] {
             assert!(!is_result_file(Path::new(path)), "{path}");
             // Refused before anything is opened or redirected.
-            assert!(send_stdout_to(Path::new(path)).is_err(), "{path}");
+            assert!(send_output_to(Path::new(path)).is_err(), "{path}");
         }
     }
 
@@ -753,9 +771,15 @@ mod tests {
         let b = new_result_file().unwrap();
         assert_ne!(a, b);
         assert!(is_result_file(&a));
-        assert_eq!(std::fs::metadata(&a).unwrap().len(), 0);
+        assert!(!is_result_file(&error_file(&a)));
+        for file in [&a, &error_file(&a)] {
+            assert_eq!(std::fs::metadata(file).unwrap().len(), 0);
+        }
         assert!(a.starts_with(std::env::temp_dir()));
-        let _ = std::fs::remove_file(&a);
-        let _ = std::fs::remove_file(&b);
+        assert_eq!(error_file(&a).extension().unwrap(), "err");
+        for file in [&a, &b] {
+            let _ = std::fs::remove_file(file);
+            let _ = std::fs::remove_file(error_file(file));
+        }
     }
 }
