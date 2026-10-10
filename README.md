@@ -182,10 +182,11 @@ leftovers, find orphans, trace an exe or a running process to its program and
 list your backups. None of that changes anything.
 
 To remove a program it first asks for a plan, which changes nothing either:
-the uninstaller that would run, every leftover that would go with its path,
-size, confidence and reason, whether administrator rights are needed, and where
-the backup goes. Only applying that plan removes anything, and only a plan made
-in the same session, exactly as shown and once. Your assistant asks you before
+the uninstaller and whether it runs at all, every leftover that would go with
+its path, size, confidence and reason, whether administrator rights are needed,
+and where the backup goes. Only applying that plan removes anything, and only a
+plan made in the same session, exactly as shown and once. Copies of the program
+still running from its folders are closed first. Your assistant asks you before
 it calls a tool, unless you told it to stop asking for this one, so nothing is
 removed until you agree to that step.
 
