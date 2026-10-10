@@ -167,6 +167,7 @@ impl Level {
         LevelOpts {
             medium: self == Level::Medium,
             all: self == Level::All,
+            level: None,
         }
     }
 

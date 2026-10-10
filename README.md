@@ -125,7 +125,8 @@ runtime or the package of a normal program, is marked `protected` with the
 reason. With `--json` every entry gains a `kind`, `program` or `store`.
 
 Every leftover has a confidence. `--remove` takes the high-confidence ones;
-`--medium` adds the plausible ones, `--all` takes everything listed.
+`--medium` adds the plausible ones, `--all` takes everything listed. The same as
+one flag: `--level high`, `--level medium` or `--level low`.
 
 | flag | |
 |---|---|

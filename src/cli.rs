@@ -196,26 +196,39 @@ pub struct LevelOpts {
     /// Remove everything found, low-confidence items included.
     #[arg(long)]
     pub all: bool,
+
+    /// The lowest confidence to remove. `medium` is `--medium`, `low` is
+    /// `--all`.
+    #[arg(long, value_enum, value_name = "LEVEL", conflicts_with_all = ["medium", "all"])]
+    pub level: Option<Level>,
+}
+
+/// A confidence level as `--level` takes it.
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    High,
+    Medium,
+    #[value(alias = "all")]
+    Low,
 }
 
 impl LevelOpts {
     pub fn threshold(&self) -> Confidence {
-        if self.all {
-            Confidence::Low
-        } else if self.medium {
-            Confidence::Medium
-        } else {
-            Confidence::High
+        match self.level {
+            Some(Level::High) => Confidence::High,
+            Some(Level::Medium) => Confidence::Medium,
+            Some(Level::Low) => Confidence::Low,
+            None if self.all => Confidence::Low,
+            None if self.medium => Confidence::Medium,
+            None => Confidence::High,
         }
     }
 
     pub fn describe(&self) -> &'static str {
-        if self.all {
-            "all"
-        } else if self.medium {
-            "high and medium confidence"
-        } else {
-            "high confidence"
+        match self.threshold() {
+            Confidence::Low => "all",
+            Confidence::Medium => "high and medium confidence",
+            Confidence::High => "high confidence",
         }
     }
 }
@@ -358,6 +371,47 @@ mod tests {
             "mcp",
         ] {
             assert!(!parse(args).changes_nothing(), "{args}");
+        }
+    }
+
+    fn levels(args: &str) -> LevelOpts {
+        match parse(args).command {
+            Commands::Uninstall(a) => a.levels,
+            Commands::Scan(a) => a.levels,
+            Commands::Trace(a) => a.levels,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn level_is_the_long_form_of_medium_and_all() {
+        for (args, threshold) in [
+            ("uninstall Thing", Confidence::High),
+            ("uninstall Thing --level high", Confidence::High),
+            ("uninstall Thing --medium", Confidence::Medium),
+            ("uninstall Thing --level medium", Confidence::Medium),
+            ("scan Thing --remove --level medium", Confidence::Medium),
+            ("uninstall Thing --all", Confidence::Low),
+            ("uninstall Thing --level low", Confidence::Low),
+            ("trace thing.exe --uninstall --level all", Confidence::Low),
+        ] {
+            assert_eq!(levels(args).threshold(), threshold, "{args}");
+        }
+        assert_eq!(
+            levels("uninstall Thing --level medium").describe(),
+            levels("uninstall Thing --medium").describe()
+        );
+    }
+
+    #[test]
+    fn level_does_not_mix_with_medium_or_all() {
+        for args in [
+            "uninstall Thing --level low --medium",
+            "uninstall Thing --level high --all",
+            "uninstall Thing --level none",
+        ] {
+            let parsed = Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')));
+            assert!(parsed.is_err(), "{args}");
         }
     }
 
