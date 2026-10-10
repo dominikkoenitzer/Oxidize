@@ -13,6 +13,7 @@ use crate::cli::{
     BackupsArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs, SortKey,
     TraceArgs, UninstallArgs,
 };
+use crate::exit::{self, Failure};
 use crate::model::{
     Confidence, Group, Leftover, Package, Program, ScanReport, ScanTarget, SignatureKind,
 };
@@ -399,7 +400,7 @@ pub(crate) fn scan_subject<'a>(
 ) -> Result<Option<&'a Program>> {
     match resolve_target(programs, name) {
         Ok(program) => Ok(Some(program)),
-        Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
+        Err(Resolve::Ambiguous(msg)) => Err(Failure::ambiguous(msg).into()),
         Err(Resolve::NotFound) => {
             if let Some(app) = store_app_named(&packages(), name) {
                 bail!("{}", store_app_refusal(name, app));
@@ -506,6 +507,7 @@ pub(crate) fn plan_batch(
 ) -> Result<Vec<Step>> {
     let mut planned: Vec<Step> = Vec::new();
     let mut problems = Vec::new();
+    let mut code = None;
     for target in targets {
         match resolve_any(programs, packages, target) {
             Ok(Resolved::Program(program)) => {
@@ -535,15 +537,22 @@ pub(crate) fn plan_batch(
                     Err(reason) => problems.push(kept(app, &reason)),
                 }
             }
-            Err(Resolve::NotFound) => problems.push(not_found(target)),
-            Err(Resolve::Ambiguous(msg)) => problems.push(msg),
+            Err(resolve) => {
+                let failure = resolve.into_failure(target);
+                code = code.or(Some(failure.code));
+                problems.push(failure.message);
+            }
         }
     }
     if !problems.is_empty() {
-        bail!(
+        let message = format!(
             "nothing was uninstalled. Fix these first:\n{}",
             problems.join("\n")
         );
+        return Err(match code {
+            Some(code) => Failure::new(code, exit::ERROR, message, false).into(),
+            None => anyhow::anyhow!(message),
+        });
     }
     Ok(planned)
 }
@@ -1550,10 +1559,11 @@ fn cmd_trace(args: &TraceArgs, g: &Global) -> Result<()> {
     }
 
     if matches.is_empty() {
-        bail!(
+        return Err(Failure::not_found(format!(
             "no installed program matches \"{}\". Try the full path to the .exe or its folder.",
             args.query
-        );
+        ))
+        .into());
     }
 
     let best = &matches[0];
@@ -1587,7 +1597,10 @@ fn cmd_trace(args: &TraceArgs, g: &Global) -> Result<()> {
 
     if args.uninstall {
         if matches.len() >= 2 && matches[1].score == best.score {
-            bail!("several programs match equally well; uninstall by name instead");
+            return Err(Failure::ambiguous(
+                "several programs match equally well; uninstall by name instead",
+            )
+            .into());
         }
         // A shared word in a folder name is not enough to uninstall something.
         if best.score < 80 {
@@ -2153,6 +2166,16 @@ pub(crate) fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Val
 pub(crate) enum Resolve {
     NotFound,
     Ambiguous(String),
+}
+
+impl Resolve {
+    /// The typed error for a name `uninstall` cannot act on.
+    pub(crate) fn into_failure(self, target: &str) -> Failure {
+        match self {
+            Resolve::NotFound => Failure::not_found(not_found(target)),
+            Resolve::Ambiguous(msg) => Failure::ambiguous(msg),
+        }
+    }
 }
 
 /// A name `uninstall` acts on: a program or a Store app.

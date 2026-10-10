@@ -42,10 +42,7 @@ fn finish(result: anyhow::Result<i32>, json: bool) -> ! {
             if !o.reported {
                 if json {
                     let doc = exit::error_json(o.code, &o.message);
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&doc).unwrap_or_default()
-                    );
+                    println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
                 } else {
                     term::error(&o.message);
                 }

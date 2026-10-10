@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::exit::Failure;
 use crate::model::{Hive, LeftoverKind};
 use crate::system::{self, TaskInfo};
 
@@ -372,7 +373,10 @@ pub fn read_manifest(dir: &Path) -> Result<Manifest> {
 /// Resolve a backup by exact name, or by a unique substring of its name or
 /// program.
 pub fn find_backup(name: &str) -> Result<BackupInfo> {
-    let all = list_backups()?;
+    pick_backup(&list_backups()?, name)
+}
+
+fn pick_backup(all: &[BackupInfo], name: &str) -> Result<BackupInfo> {
     if let Some(b) = all.iter().find(|b| b.name.eq_ignore_ascii_case(name)) {
         return Ok(b.clone());
     }
@@ -384,9 +388,12 @@ pub fn find_backup(name: &str) -> Result<BackupInfo> {
         })
         .collect();
     match hits.len() {
-        0 => bail!("no backup matches \"{name}\""),
+        0 => Err(Failure::not_found(format!("no backup matches \"{name}\"")).into()),
         1 => Ok(hits[0].clone()),
-        n => bail!("\"{name}\" matches {n} backups; use the full name from `oxidize backups`"),
+        n => Err(Failure::ambiguous(format!(
+            "\"{name}\" matches {n} backups; use the full name from `oxidize backups`"
+        ))
+        .into()),
     }
 }
 
