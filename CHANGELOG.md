@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3, 2026-10-10
 
 - `oxidize uninstall <program> --yes` removes a program completely in one go:
   it closes what runs from the program's folders, runs the program's own
