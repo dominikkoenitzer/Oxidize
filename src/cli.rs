@@ -52,11 +52,14 @@ pub enum Commands {
     Backups(BackupsArgs),
     /// Put back everything a backup holds.
     Restore(RestoreArgs),
+    /// Serve Oxidize to an AI assistant over MCP on stdin and stdout.
+    Mcp,
 }
 
 impl Cli {
     /// Whether this command line only reads: it uninstalls, removes,
-    /// deletes, restores and elevates nothing.
+    /// deletes, restores and elevates nothing. `mcp` does not count, since
+    /// one of its tools carries out a removal plan.
     pub fn changes_nothing(&self) -> bool {
         if self.elevate {
             return false;
@@ -69,6 +72,7 @@ impl Cli {
             Commands::Trace(args) => !args.uninstall || self.dry_run,
             Commands::Backups(args) => (args.delete.is_none() && !args.clear) || self.dry_run,
             Commands::Restore(_) => self.dry_run,
+            Commands::Mcp => false,
         }
     }
 }

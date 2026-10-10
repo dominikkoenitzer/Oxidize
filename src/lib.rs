@@ -4,6 +4,7 @@ pub mod backup;
 pub mod cli;
 pub mod commands;
 pub mod hunter;
+pub mod mcp;
 pub mod model;
 pub mod orphans;
 pub mod packages;

@@ -64,6 +64,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Commands::Trace(args) => cmd_trace(args, &g),
         Commands::Backups(args) => cmd_backups(args, &g),
         Commands::Restore(args) => cmd_restore(args, &g),
+        Commands::Mcp => crate::mcp::serve(),
     }
 }
 
