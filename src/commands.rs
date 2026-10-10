@@ -358,7 +358,10 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
         } else {
             render_report(&report);
         }
-        bail!("{label} is still installed. Uninstall it first: oxidize uninstall \"{label}\"");
+        let message = format!(
+            "{label} is still installed. Uninstall it first: oxidize uninstall \"{label}\""
+        );
+        return Err(Failure::new("error", exit::ERROR, message, g.json).into());
     }
 
     if g.json && !args.remove {
@@ -453,8 +456,7 @@ fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
                 }
                 uninstall_package(&env, app, args.keep, &args.levels, g)
             }
-            Err(Resolve::NotFound) => bail!("{}", not_found(target)),
-            Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
+            Err(resolve) => Err(resolve.into_failure(target).into()),
         };
     }
     let batch = plan_batch(&programs, &packages, &args.targets, silent)?;
@@ -670,7 +672,7 @@ fn uninstall_batch(
         } else {
             term::info("Cancelled.");
         }
-        return Ok(());
+        return Err(Failure::cancelled("Cancelled.", true).into());
     }
 
     let mut runs = Vec::with_capacity(n);
@@ -728,12 +730,16 @@ fn uninstall_batch(
     } else {
         print_batch_summary(&runs, g.dry_run);
     }
-    let failed = runs.iter().filter(|r| r.failed(g.dry_run)).count();
-    if failed > 0 {
-        bail!(
-            "{failed} of {} did not uninstall cleanly",
+    let failed: Vec<&ProgramRun> = runs.iter().filter(|r| r.failed(g.dry_run)).collect();
+    if let Some(first) = failed.first() {
+        // The batch exits like the first run that failed.
+        let first = first.failure(g.json);
+        let message = format!(
+            "{} of {} did not uninstall cleanly",
+            failed.len(),
             kinds(programs, apps)
         );
+        return Err(Failure::new(first.code, first.exit, message, g.json).into());
     }
     Ok(())
 }
@@ -829,7 +835,7 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         } else {
             term::info("Cancelled.");
         }
-        return Ok(());
+        return Err(Failure::cancelled("Cancelled.", true).into());
     }
 
     let run = run_uninstall(program, &target, &plan, false, Some(snap), how, levels, g)?;
@@ -837,7 +843,7 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
     if run.failed(g.dry_run) {
-        bail!("{}", run.why_failed());
+        return Err(run.failure(g.json).into());
     }
     Ok(())
 }
@@ -922,6 +928,19 @@ impl ProgramRun {
             return format!("{failed} items of {} could not be removed", self.name);
         }
         format!("{} items of {} are still there", self.left, self.name)
+    }
+
+    /// [`Self::why_failed`] as a typed error: still installed (exit 3), an
+    /// incomplete removal (exit 4), or a plain error.
+    fn failure(&self, reported: bool) -> Failure {
+        let why = self.why_failed();
+        if self.error.is_some() {
+            Failure::new("error", exit::ERROR, why, reported)
+        } else if !self.gone {
+            Failure::still_installed(why, reported)
+        } else {
+            Failure::incomplete(why, reported)
+        }
     }
 
     fn state(&self, dry_run: bool) -> &'static str {
@@ -1384,7 +1403,7 @@ fn uninstall_package(
         } else {
             term::info("Cancelled.");
         }
-        return Ok(());
+        return Err(Failure::cancelled("Cancelled.", true).into());
     }
 
     let run = match run_package(env, app, false, keep, levels, g) {
@@ -1393,6 +1412,7 @@ fn uninstall_package(
             if g.json {
                 let stopped = ProgramRun::stopped_package(app, format!("{e:#}"));
                 println!("{}", serde_json::to_string_pretty(&stopped.json)?);
+                return Err(exit::reported(e));
             }
             return Err(e);
         }
@@ -1401,7 +1421,8 @@ fn uninstall_package(
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
     if !g.dry_run && !run.gone {
-        bail!("{} is still registered", app.display_name);
+        let message = format!("{} is still registered", app.display_name);
+        return Err(Failure::still_installed(message, g.json).into());
     }
     Ok(())
 }
@@ -2931,6 +2952,36 @@ mod tests {
         assert!(!r.failed(true));
     }
 
+    #[test]
+    fn a_failed_run_exits_with_what_went_wrong() {
+        let still = run("Example Player", false, 0, None).failure(true);
+        assert_eq!(
+            (still.code, still.exit),
+            ("still_installed", exit::STILL_INSTALLED)
+        );
+        assert!(still.reported);
+
+        let partly = run("Example Player", true, 3, Some(removed(2, 1, Some("b")))).failure(false);
+        assert_eq!((partly.code, partly.exit), ("incomplete", exit::INCOMPLETE));
+        assert_eq!(
+            partly.message,
+            "1 items of Example Player could not be removed"
+        );
+        assert!(!partly.reported);
+
+        let mut left = run("Example Player", true, 3, Some(removed(3, 0, Some("b"))));
+        left.left = 2;
+        assert_eq!(left.failure(true).exit, exit::INCOMPLETE);
+
+        let mut stopped = run("Example Player", false, 0, None);
+        stopped.error = Some("no uninstaller".into());
+        let f = stopped.failure(true);
+        assert_eq!(
+            (f.code, f.exit, f.message.as_str()),
+            ("error", exit::ERROR, "no uninstaller")
+        );
+    }
+
     /// Answers yes to everything and prints JSON, so nothing waits on a prompt.
     fn unattended(dry_run: bool, no_backup: bool) -> Global {
         Global {
@@ -3089,6 +3140,7 @@ mod tests {
         assert!(run.removal.is_none());
         let err = uninstall_package(&env, &notes, false, &LevelOpts::default(), &g).unwrap_err();
         assert_eq!(format!("{err:#}"), "Notes is still registered");
+        assert_eq!(exit::outcome(&err).exit, exit::STILL_INSTALLED);
     }
 
     #[test]

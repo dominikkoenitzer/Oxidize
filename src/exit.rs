@@ -110,6 +110,12 @@ pub fn outcome(err: &anyhow::Error) -> Outcome {
     }
 }
 
+/// The same error, marked as already reported. Its code and exit code stay.
+pub fn reported(err: anyhow::Error) -> anyhow::Error {
+    let o = outcome(&err);
+    Failure::new(o.code, o.exit, o.message, true).into()
+}
+
 /// The error object `--json` prints on stdout.
 pub fn error_json(code: &str, message: &str) -> serde_json::Value {
     serde_json::json!({ "error": { "code": code, "message": message } })
@@ -157,6 +163,15 @@ mod tests {
         let o = outcome(&wrapped);
         assert_eq!((o.exit, o.code), (ERROR, "not_found"));
         assert_eq!(o.message, "restoring: no backup");
+    }
+
+    #[test]
+    fn a_reported_error_keeps_its_codes() {
+        let o = outcome(&reported(Failure::not_found("gone").into()));
+        assert_eq!((o.exit, o.code, o.reported), (ERROR, "not_found", true));
+        let o = outcome(&reported(anyhow::anyhow!("disk full")));
+        assert_eq!((o.exit, o.code, o.reported), (ERROR, "error", true));
+        assert_eq!(o.message, "disk full");
     }
 
     #[test]
