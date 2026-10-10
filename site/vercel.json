@@ -1,0 +1,5 @@
+{
+  "redirects": [
+    { "source": "/download/windows", "destination": "https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-gui.exe", "permanent": false }
+  ]
+}

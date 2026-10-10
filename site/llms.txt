@@ -1,0 +1,29 @@
+# Oxidize
+
+> Oxidize removes Windows programs completely: it closes what still runs from them, runs their uninstaller when one is needed, then finds what they leave behind and removes it, with a backup that can be restored.
+
+Oxidize runs on Windows 10 and 11. It needs no installer and no runtime.
+The download on this page is oxidize-gui.exe, the window app. Its Remove completely button does the whole removal, and Undo puts it back.
+The command line, oxidize.exe, has the same engine, a --json output and exit codes 0 to 5. It is published with every release next to the window app; this page links only the window app.
+oxidize uninstall <program> --yes removes a program completely in one command and ends with a second scan that says what, if anything, is left.
+Leftovers it looks for: registry keys and values, folders under Program Files, ProgramData, AppData, the Start Menu, Startup and the Desktop, services, scheduled tasks, firewall rules, PATH entries, link and file types, shortcuts and temp folders.
+Every removal is backed up to %LOCALAPPDATA%\Oxidize\backups first unless --no-backup is given, and oxidize restore puts it back.
+Windows' own folders are never removed.
+
+## Download
+
+- [Oxidize for Windows](/download/windows): oxidize-gui.exe, the window app
+
+## Skill for AI assistants
+
+- [Skill as a zip](/skill/oxidize.zip): the oxidize folder with SKILL.md and its references
+- [SKILL.md](/skill/oxidize/SKILL.md): how an assistant uses Oxidize safely: preview first, remove only what the user confirmed, undo from the backup
+- [Command reference](/skill/oxidize/references/commands.md): every command and flag, the backup folder and what is never removed
+- [JSON output](/skill/oxidize/references/json-output.md): the --json output of every command, the error object and the exit codes
+- [Window app](/skill/oxidize/references/window-app.md): guiding a user through oxidize-gui.exe
+
+## MCP server
+
+- `oxidize.exe mcp` is a local MCP server on stdin and stdout. Client config: `command` is the full path to oxidize.exe, `args` is `["mcp"]`.
+- `list_programs`, `scan_leftovers`, `find_orphans`, `trace`, `list_backups` and `plan_removal` only read. `plan_removal` lists each uninstaller, whether it runs, and every leftover that would go.
+- `apply_removal_plan` carries out one plan from `plan_removal` of the same session, only after the user agreed to it, exactly as shown and once: it closes running copies, runs the uninstallers the plan keeps, removes the listed leftovers with a backup of every item, and returns what a fresh scan still finds, the backup name and the `oxidize restore` command.
