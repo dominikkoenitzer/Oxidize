@@ -85,11 +85,13 @@ body {
   overflow-x: clip;
 }
 a { color: var(--accent-ink); text-underline-offset: 0.18em; }
-a:focus-visible, .btn:focus-visible, summary:focus-visible { outline: 3px solid var(--accent-ink); outline-offset: 3px; border-radius: 0.6rem; }
+a:focus-visible, .btn:focus-visible, summary:focus-visible, .codecard:focus-visible { outline: 3px solid var(--accent-ink); outline-offset: 3px; }
+a:not(.btn):focus-visible, summary:focus-visible { border-radius: 0.6rem; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 img { display: block; max-width: 100%; height: auto; }
 picture { display: contents; }
 kbd { font: inherit; font-weight: 700; color: var(--text); }
-code { font: 0.92em/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+code { font: 0.92em/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
 .wrap { position: relative; max-width: 78rem; margin: 0 auto; padding: 0 1.5rem; }
 section[id] { scroll-margin-top: 1.5rem; }
 
@@ -145,7 +147,7 @@ nav.top { position: relative; display: flex; align-items: center; justify-conten
   align-items: center;
   padding-top: clamp(2.5rem, 8vh, 5.5rem);
 }
-h1 { margin: 0; font-size: clamp(3.5rem, 9vw, 7.75rem); line-height: 0.92; letter-spacing: -0.055em; font-weight: 780; }
+h1 { margin: 0; font-size: clamp(3.5rem, var(--h1-vw, 9vw), var(--h1-max, 7.75rem)); line-height: 0.92; letter-spacing: -0.055em; font-weight: 780; }
 .lede { margin: 1.5rem 0 0; max-width: 27rem; font-size: clamp(1.15rem, 1.7vw, 1.3rem); line-height: 1.5; }
 .get { margin-top: 2.25rem; }
 .small { margin: 1rem 0 0; font-size: 0.93rem; color: var(--muted); line-height: 1.5; }
@@ -317,6 +319,9 @@ footer p { margin: 0.3rem 0; }
   .feature { margin-bottom: clamp(6rem, 18vw, 8rem); }
   .pair .shot { width: 80%; }
 }
+@media (min-width: 600px) and (max-width: 900px) {
+  .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .btn { transition: none; }
@@ -350,7 +355,7 @@ footer p { margin: 0.3rem 0; }
 </div>
 </div>
 <div class="hero-shot">
-<figure class="window"><picture><source srcset="img/hero-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/hero-light.webp" width="2880" height="1800" alt="Oxidize with Example Player selected and the twelve items that belong to it, each with how sure Oxidize is and why" fetchpriority="high" decoding="async"></picture></figure>
+<figure class="window"><picture><source srcset="img/hero-dark-1440.webp 1440w, img/hero-dark.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" media="(prefers-color-scheme: dark)"><img src="img/hero-light.webp" srcset="img/hero-light-1440.webp 1440w, img/hero-light.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="Oxidize with Example Player selected and the twelve items that belong to it, each with how sure Oxidize is and why" fetchpriority="high" decoding="async"></picture></figure>
 </div>
 </div>
 </div>
@@ -388,7 +393,7 @@ footer p { margin: 0.3rem 0; }
 <p>High-confidence items start ticked; the medium ones wait for you.</p>
 </div>
 <div class="stage">
-<div class="main" style="--pos: 40% 0; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f1-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/f1-light.webp" width="2880" height="1800" alt="Eleven leftovers of Northwind Notes, nine ticked" loading="lazy" decoding="async"></picture></div>
+<div class="main" style="--pos: 40% 0; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f1-dark-1440.webp 1440w, img/f1-dark.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" media="(prefers-color-scheme: dark)"><img src="img/f1-light.webp" srcset="img/f1-light-1440.webp 1440w, img/f1-light.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="Eleven leftovers of Northwind Notes, nine ticked" loading="lazy" decoding="async"></picture></div>
 <div class="detail"><picture><source srcset="img/c1-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/c1-light.webp" width="1023" height="360" alt="" loading="lazy" decoding="async"></picture></div>
 </div>
 </div>
@@ -399,7 +404,7 @@ footer p { margin: 0.3rem 0; }
 <p>Before anything is deleted, registry keys are exported and files are moved into a backup folder. Undo puts every item back, and the log names each one.</p>
 </div>
 <div class="stage">
-<div class="main" style="--pos: 0 100%; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f4-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/f4-light.webp" width="2880" height="1800" alt="After Undo, the program is back and the log lists every restored item" loading="lazy" decoding="async"></picture></div>
+<div class="main" style="--pos: 0 100%; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f4-dark-1440.webp 1440w, img/f4-dark.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" media="(prefers-color-scheme: dark)"><img src="img/f4-light.webp" srcset="img/f4-light-1440.webp 1440w, img/f4-light.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="After Undo, the program is back and the log lists every restored item" loading="lazy" decoding="async"></picture></div>
 <div class="detail" style="width: 60%"><picture><source srcset="img/c4-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/c4-light.webp" width="1123" height="223" alt="" loading="lazy" decoding="async"></picture></div>
 </div>
 </div>
@@ -410,7 +415,7 @@ footer p { margin: 0.3rem 0; }
 <p>With Dry run on, Remove completely changes nothing. It lists each item it would remove and each running process it would close.</p>
 </div>
 <div class="stage">
-<div class="main" style="--pos: 40% 0; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f5-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/f5-light.webp" width="2880" height="1800" alt="A dry run listing ten items and one running process" loading="lazy" decoding="async"></picture></div>
+<div class="main" style="--pos: 40% 0; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f5-dark-1440.webp 1440w, img/f5-dark.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" media="(prefers-color-scheme: dark)"><img src="img/f5-light.webp" srcset="img/f5-light-1440.webp 1440w, img/f5-light.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="A dry run listing ten items and one running process" loading="lazy" decoding="async"></picture></div>
 <div class="detail"><picture><source srcset="img/c5-dark.webp" media="(prefers-color-scheme: dark)"><img src="img/c5-light.webp" width="936" height="310" alt="" loading="lazy" decoding="async"></picture></div>
 </div>
 </div>
@@ -422,8 +427,8 @@ footer p { margin: 0.3rem 0; }
 <p class="lead">Oxidize is light or dark, the way Windows is set.</p>
 </div>
 <div class="shots">
-<div class="shot one"><picture><img src="img/hero-light.webp" width="2880" height="1800" alt="Oxidize in the light theme" loading="lazy" decoding="async"></picture></div>
-<div class="shot two"><picture><img src="img/f1-dark.webp" width="2880" height="1800" alt="Oxidize in the dark theme" loading="lazy" decoding="async"></picture></div>
+<div class="shot one"><picture><img src="img/hero-light.webp" srcset="img/hero-light-1440.webp 1440w, img/hero-light.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="Oxidize in the light theme" loading="lazy" decoding="async"></picture></div>
+<div class="shot two"><picture><img src="img/f1-dark.webp" srcset="img/f1-dark-1440.webp 1440w, img/f1-dark.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="Oxidize in the dark theme" loading="lazy" decoding="async"></picture></div>
 </div>
 </section>
 <section class="assistant" aria-labelledby="ai-h">
@@ -434,7 +439,7 @@ footer p { margin: 0.3rem 0; }
 <p>A removal is always a plan first: what goes, with paths, sizes and reasons, and where the backup goes. Your assistant asks you before it carries a plan out, and every removed item is backed up.</p>
 <p>The command line has <code>--json</code> on every command. <a href="/skill/oxidize.zip">Download the skill</a> to teach your assistant all of it.</p>
 </div>
-<div class="codecard">
+<div class="codecard" tabindex="0" role="region" aria-label="Add Oxidize to your MCP client">
 <p class="cap">Add Oxidize to your MCP client</p>
 <pre><code>{
   &quot;mcpServers&quot;: {
@@ -446,7 +451,8 @@ footer p { margin: 0.3rem 0; }
 }</code></pre>
 </div>
 </section>
-<section id="new" aria-label="Details">
+<section id="new" aria-labelledby="new-h">
+<h2 id="new-h" class="vh">Details</h2>
 <div class="grid2">
 <div class="card">
 <div class="num">Version 0.2.3</div>
@@ -482,7 +488,8 @@ footer p { margin: 0.3rem 0; }
 <li><span>Press the focused button</span><kbd><kbd>Space</kbd></kbd></li>
 </ul>
 </section>
-<section aria-label="Install, update and remove">
+<section aria-labelledby="basics-h">
+<h2 id="basics-h" class="vh">Install, update and remove</h2>
 <div class="grid3">
 <div class="card">
 <div class="num">01</div>

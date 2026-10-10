@@ -55,11 +55,13 @@ body {
   overflow-x: clip;
 }
 a { color: var(--accent-ink); text-underline-offset: 0.18em; }
-a:focus-visible, .btn:focus-visible, summary:focus-visible { outline: 3px solid var(--accent-ink); outline-offset: 3px; border-radius: 0.6rem; }
+a:focus-visible, .btn:focus-visible, summary:focus-visible, .codecard:focus-visible { outline: 3px solid var(--accent-ink); outline-offset: 3px; }
+a:not(.btn):focus-visible, summary:focus-visible { border-radius: 0.6rem; }
+.vh { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 img { display: block; max-width: 100%; height: auto; }
 picture { display: contents; }
 kbd { font: inherit; font-weight: 700; color: var(--text); }
-code { font: 0.92em/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; }
+code { font: 0.92em/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
 .wrap { position: relative; max-width: 78rem; margin: 0 auto; padding: 0 1.5rem; }
 section[id] { scroll-margin-top: 1.5rem; }
 
@@ -115,7 +117,7 @@ nav.top { position: relative; display: flex; align-items: center; justify-conten
   align-items: center;
   padding-top: clamp(2.5rem, 8vh, 5.5rem);
 }
-h1 { margin: 0; font-size: clamp(3.5rem, 9vw, 7.75rem); line-height: 0.92; letter-spacing: -0.055em; font-weight: 780; }
+h1 { margin: 0; font-size: clamp(3.5rem, var(--h1-vw, 9vw), var(--h1-max, 7.75rem)); line-height: 0.92; letter-spacing: -0.055em; font-weight: 780; }
 .lede { margin: 1.5rem 0 0; max-width: 27rem; font-size: clamp(1.15rem, 1.7vw, 1.3rem); line-height: 1.5; }
 .get { margin-top: 2.25rem; }
 .small { margin: 1rem 0 0; font-size: 0.93rem; color: var(--muted); line-height: 1.5; }
@@ -287,6 +289,9 @@ footer p { margin: 0.3rem 0; }
   .feature { margin-bottom: clamp(6rem, 18vw, 8rem); }
   .pair .shot { width: 80%; }
 }
+@media (min-width: 600px) and (max-width: 900px) {
+  .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .btn { transition: none; }
@@ -348,11 +353,23 @@ def picture(img, alt=None, cls=""):
     """img: {"name": ..., "w": ..., "h": ..., "dark": bool}. Files are img/<name>-light.webp and -dark.webp."""
     name, w, h = img["name"], img["w"], img["h"]
     alt = esc(alt if alt is not None else img.get("alt", ""))
-    light = f"img/{name}-light.webp" if img.get("dark", True) else f"img/{name}.webp"
-    source = (f'<source srcset="img/{name}-dark.webp" media="(prefers-color-scheme: dark)">'
-              if img.get("dark", True) else "")
+    themed = img.get("dark", True)
+    light = f"img/{name}-light.webp" if themed else f"img/{name}.webp"
+
+    def srcset(path):
+        # A half-size copy next to a wide screenshot serves screens that would not show the full one.
+        half = path.replace(".webp", "-1440.webp")
+        if w >= 2000 and not img.get("zoom") and os.path.exists(os.path.join(HERE, half)):
+            return f' srcset="{half} 1440w, {path} {w}w" sizes="(max-width: 900px) 100vw, 60vw"'
+        return ""
+
+    source = ""
+    if themed:
+        dark = f"img/{name}-dark.webp"
+        dark_set = srcset(dark) or f' srcset="{dark}"'
+        source = f'<source{dark_set} media="(prefers-color-scheme: dark)">'
     c = f' class="{cls}"' if cls else ""
-    return f'<picture>{source}<img src="{light}" width="{w}" height="{h}" alt="{alt}" loading="lazy" decoding="async"{c}></picture>'
+    return f'<picture>{source}<img src="{light}"{srcset(light)} width="{w}" height="{h}" alt="{alt}" loading="lazy" decoding="async"{c}></picture>'
 
 
 def build(page):
@@ -487,14 +504,15 @@ def build(page):
         for t in s["body"]:
             w(f"<p>{t}</p>")
         w("</div>")
-        w('<div class="codecard">')
+        w(f'<div class="codecard" tabindex="0" role="region" aria-label="{esc(s["caption"])}">')
         w(f'<p class="cap">{esc(s["caption"])}</p>')
         w(f'<pre><code>{esc(s["code"])}</code></pre>')
         w("</div>")
         w("</section>")
 
     # what's new, requirements, privacy, data
-    w('<section id="new" aria-label="Details">')
+    w('<section id="new" aria-labelledby="new-h">')
+    w('<h2 id="new-h" class="vh">Details</h2>')
     w('<div class="grid2">')
     n = page["new"]
     w('<div class="card">')
@@ -538,7 +556,8 @@ def build(page):
         w("</section>")
 
     # start, update, remove
-    w('<section aria-label="Install, update and remove">')
+    w('<section aria-labelledby="basics-h">')
+    w('<h2 id="basics-h" class="vh">Install, update and remove</h2>')
     w('<div class="grid3">')
     for i, b in enumerate(page["basics"], 1):
         w('<div class="card">')
