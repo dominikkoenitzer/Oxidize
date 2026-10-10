@@ -538,6 +538,111 @@ pub fn running_exes() -> Vec<PathBuf> {
     out
 }
 
+/// Every running process with a known image path.
+pub fn running_processes() -> Vec<crate::complete::Running> {
+    let mut sys = System::new();
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::All,
+        true,
+        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
+    );
+    sys.processes()
+        .iter()
+        .filter_map(|(pid, p)| {
+            p.exe().map(|exe| crate::complete::Running {
+                pid: pid.as_u32(),
+                exe: exe.to_path_buf(),
+            })
+        })
+        .collect()
+}
+
+/// Ask each process to close its windows, give them all `grace` together,
+/// then end whatever still runs.
+#[cfg(windows)]
+pub fn close_processes(
+    procs: &[crate::complete::Running],
+    grace: std::time::Duration,
+) -> Vec<crate::complete::Closed> {
+    use crate::complete::{CloseHow, Closed};
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
+    use windows::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+    };
+
+    unsafe extern "system" fn ask_to_close(hwnd: HWND, pid: LPARAM) -> windows::core::BOOL {
+        let mut owner = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        if owner as isize == pid.0 {
+            let _ = unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+        }
+        true.into()
+    }
+
+    let mut out = Vec::new();
+    let mut handles = Vec::new();
+    for p in procs {
+        let exe = p.exe.display().to_string();
+        match unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, p.pid) } {
+            Ok(h) => {
+                let _ = unsafe { EnumWindows(Some(ask_to_close), LPARAM(p.pid as isize)) };
+                handles.push((p.pid, exe, h));
+            }
+            Err(e) => out.push(Closed {
+                pid: p.pid,
+                exe,
+                how: CloseHow::Failed,
+                error: Some(e.message()),
+            }),
+        }
+    }
+    let deadline = std::time::Instant::now() + grace;
+    for (pid, exe, h) in handles {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        let exited = unsafe { WaitForSingleObject(h, left.as_millis() as u32) } == WAIT_OBJECT_0;
+        let closed = if exited {
+            Closed {
+                pid,
+                exe,
+                how: CloseHow::Closed,
+                error: None,
+            }
+        } else {
+            match unsafe { TerminateProcess(h, 1) } {
+                Ok(()) => {
+                    let _ = unsafe { WaitForSingleObject(h, 2000) };
+                    Closed {
+                        pid,
+                        exe,
+                        how: CloseHow::Ended,
+                        error: None,
+                    }
+                }
+                Err(e) => Closed {
+                    pid,
+                    exe,
+                    how: CloseHow::Failed,
+                    error: Some(e.message()),
+                },
+            }
+        };
+        let _ = unsafe { CloseHandle(h) };
+        out.push(closed);
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn close_processes(
+    _procs: &[crate::complete::Running],
+    _grace: std::time::Duration,
+) -> Vec<crate::complete::Closed> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
