@@ -653,6 +653,66 @@ fn contains_subslice(haystack: &[String], needle: &[String]) -> bool {
 
 /// True if `name` is essentially the publisher (a shared vendor root such as
 /// "Google" or "BraveSoftware"). Those are descended into, never flagged.
+/// Is `name` the publisher's whole name, not just part of it? Only the
+/// company form (Inc., Ltd., GmbH ...) may differ.
+fn is_publisher_exactly(name: &str, target: &ScanTarget) -> bool {
+    let Some(publisher) = &target.publisher else {
+        return false;
+    };
+    let bare = without_company_form(name);
+    bare.len() >= 4 && bare == without_company_form(publisher)
+}
+
+/// A name in lower case without spaces or punctuation and without its
+/// company form.
+fn without_company_form(name: &str) -> String {
+    const FORMS: &[&str] = &[
+        "inc",
+        "llc",
+        "ltd",
+        "corp",
+        "corporation",
+        "company",
+        "co",
+        "limited",
+        "gmbh",
+        "ag",
+        "srl",
+        "sas",
+        "sa",
+        "bv",
+        "incorporated",
+        "plc",
+        "pty",
+    ];
+    name.split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| !w.is_empty() && !FORMS.contains(&w.as_str()))
+        .collect()
+}
+
+/// Does no other installed program come from this program's publisher?
+/// Programs without a publisher say nothing either way.
+fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
+    if target.publisher.is_none() || target.publisher_tokens.is_empty() {
+        return false;
+    }
+    !programs
+        .iter()
+        .filter(|p| {
+            target
+                .registry
+                .as_ref()
+                .map(|(key, source)| !(p.registry_key == *key && p.source == *source))
+                .unwrap_or(true)
+        })
+        .any(|p| {
+            p.publisher
+                .as_deref()
+                .is_some_and(|pubr| significant_tokens(pubr) == target.publisher_tokens)
+        })
+}
+
 fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
     let Some(publisher) = &target.publisher else {
         return false;
@@ -1159,12 +1219,29 @@ fn app_paths_roots() -> [(Hive, &'static str); 3] {
     ]
 }
 
-fn scan_software_root(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Leftover>) {
+fn scan_software_root(
+    hive: Hive,
+    base: &str,
+    target: &ScanTarget,
+    vendor_alone: bool,
+    out: &mut Vec<Leftover>,
+) {
     for child in registry::enum_subkeys(hive, base) {
         if reg_denied(&child) {
             continue;
         }
         let child_path = format!("{base}\\{child}");
+        // The user's own settings from a vendor with nothing else installed
+        // belong to this program, whatever the subkeys are called.
+        if hive == Hive::CurrentUser && vendor_alone && is_publisher_exactly(&child, target) {
+            out.push(Leftover::reg_key(
+                hive,
+                child_path,
+                Confidence::High,
+                "the vendor's key, nothing else of theirs is installed",
+            ));
+            continue;
+        }
         if matches_publisher(&child, target) {
             for grand in registry::enum_subkeys(hive, &child_path) {
                 if let Some((conf, reason)) = score_product(&grand, target) {
@@ -1256,7 +1333,9 @@ fn scan_run_keys(target: &ScanTarget, out: &mut Vec<Leftover>) {
     }
 }
 
-fn scan_registry(target: &ScanTarget, installed: bool) -> Vec<Leftover> {
+/// `vendor_alone`: no other installed program comes from the same publisher,
+/// so the publisher's own key under `HKCU\Software` is this program's.
+fn scan_registry(target: &ScanTarget, installed: bool, vendor_alone: bool) -> Vec<Leftover> {
     let mut out: Vec<Leftover> = Vec::new();
 
     // The program's own Uninstall key, if the uninstaller left it behind.
@@ -1275,7 +1354,7 @@ fn scan_registry(target: &ScanTarget, installed: bool) -> Vec<Leftover> {
     }
 
     for (hive, base) in software_roots() {
-        scan_software_root(hive, base, target, &mut out);
+        scan_software_root(hive, base, target, vendor_alone, &mut out);
     }
     for (hive, base) in app_paths_roots() {
         scan_app_paths(hive, base, target, &mut out);
@@ -1491,7 +1570,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
     // The phases only read, so they run at the same time. Their findings are
     // joined in this order, whichever finishes first.
     let phases: Vec<Job<Vec<Leftover>>> = vec![
-        Box::new(move || scan_registry(target, installed)),
+        Box::new(move || scan_registry(target, installed, vendor_alone(target, snap.programs()))),
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
         Box::new(move || links::scan_link_handlers(target)),
@@ -1521,6 +1600,63 @@ mod tests {
             RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
         ));
         t
+    }
+
+    fn listed(name: &str, key: &str, publisher: Option<&str>) -> Program {
+        Program {
+            registry_key: key.to_string(),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: publisher.map(str::to_string),
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    #[test]
+    fn the_vendors_key_is_the_programs_only_when_nothing_else_of_theirs_is_installed() {
+        let mut t = name_target("Example Player", Some("Example Studio Inc."));
+        t.registry = Some((
+            "example-player".to_string(),
+            RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+        ));
+        let own = listed(
+            "Example Player",
+            "example-player",
+            Some("Example Studio Inc."),
+        );
+        let other = listed("Other Tool", "other-tool", Some("Other Vendor"));
+        assert!(vendor_alone(&t, &[own.clone(), other.clone()]));
+
+        let sibling = listed(
+            "Example Editor",
+            "example-editor",
+            Some("Example Studio Inc"),
+        );
+        assert!(!vendor_alone(&t, &[own, other, sibling]));
+
+        // No publisher, no claim.
+        let bare = name_target("Example Player", None);
+        assert!(!vendor_alone(&bare, &[]));
+    }
+
+    #[test]
+    fn only_the_publishers_whole_name_is_its_key() {
+        let t = name_target("Example Player", Some("Example Studio Inc."));
+        assert!(is_publisher_exactly("Example Studio", &t));
+        assert!(is_publisher_exactly("Example Studio Inc.", &t));
+        // Part of the name is not the vendor's key.
+        assert!(!is_publisher_exactly("Example", &t));
+        assert!(!is_publisher_exactly("Studio", &t));
+        assert!(!is_publisher_exactly("Example Studio Tools", &t));
     }
 
     #[test]
