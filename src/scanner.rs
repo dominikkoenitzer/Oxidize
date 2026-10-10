@@ -986,26 +986,31 @@ fn scan_dir_children(
             let houses_other = other_installs
                 .iter()
                 .any(|o| dir_contains(&key, &norm_path_key(o)));
-            let family = holds_namesake_child(&path, target);
+            // Reading the folder is only worth it where its name counts.
+            let family = std::cell::OnceCell::new();
+            let family = |p: &Path| *family.get_or_init(|| holds_namesake_child(p, target));
             if is_exact_product(&name, target)
                 && !target.vendor_is_shared
                 && !houses_other
                 && !contains_install
-                && !family
+                && !family(&path)
             {
                 push_dir_leftover(out, path, Confidence::High, "exact name".to_string(), roots);
             } else if matches_publisher(&name, target) {
                 let note = format!("in vendor folder {name}");
                 flag_product_children(&path, target, out, &note, roots);
-            } else if houses_other || contains_install || family {
+            } else if houses_other || contains_install {
                 // Another program is installed inside, and the folder is not
                 // the vendor's, so it is shared whatever its name says:
                 // Visual Studio's folder holds the Build Tools, Steam's holds
                 // the games. The one folder in there we know is ours, the
-                // recorded install folder, is listed on its own.
+                // recorded install folder, is listed on its own. A family
+                // folder is shared the same way.
                 continue;
             } else if let Some((conf, reason)) = score_product(&name, target) {
-                push_dir_leftover(out, path, conf, reason, roots);
+                if !family(&path) {
+                    push_dir_leftover(out, path, conf, reason, roots);
+                }
             }
         } else if ft.is_file() {
             // Mostly Start Menu, Startup and Desktop shortcuts.
