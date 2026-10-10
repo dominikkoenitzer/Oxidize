@@ -900,7 +900,7 @@ mod tests {
         FakePc {
             programs: vec![
                 program("Example Player", "example-player"),
-                program("Brave", "BraveSoftware Brave-Browser"),
+                program("Paper Browser", "PaperSoft Paper-Browser"),
                 program("Game Service", "game-service"),
             ],
             apps: vec![package("Vendor.Notes", "Notes")],
@@ -1250,7 +1250,7 @@ mod tests {
         assert_eq!(result["isError"], true, "{result}");
         let text = result["content"][0]["text"].as_str().unwrap();
         assert!(
-            text.contains("Example Player") && text.contains("Brave"),
+            text.contains("Example Player") && text.contains("Paper Browser"),
             "{text}"
         );
         assert!(recorder.calls().is_empty());
@@ -1391,7 +1391,7 @@ mod tests {
         let (first, _) = server_on(pc());
         let (mut planning, _) = Session::open(first).await;
         let plan = planning
-            .call("plan_removal", json!({ "programs": ["Brave"] }))
+            .call("plan_removal", json!({ "programs": ["Paper Browser"] }))
             .await;
         let id = plan_id(&plan);
 
