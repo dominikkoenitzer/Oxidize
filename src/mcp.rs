@@ -797,3 +797,663 @@ pub fn serve() -> Result<()> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::time::Duration;
+
+    use clap::Parser;
+    use tokio::io::{
+        AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream, Lines, ReadHalf, WriteHalf,
+    };
+
+    use crate::cli::Cli;
+    use crate::model::{Confidence, Hive, LeftoverKind, RegistrySource, RegistryView};
+    use crate::orphans::OrphanFolder;
+    use crate::packages::fake::package;
+    use crate::safety::ItemOutcome;
+    use crate::scanner;
+
+    fn program(name: &str, key: &str) -> Program {
+        Program {
+            registry_key: key.to_string(),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: Some("1.0".to_string()),
+            publisher: None,
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: Some(format!(r"C:\Apps\{key}\uninstall.exe")),
+            quiet_uninstall_string: Some(format!(r"C:\Apps\{key}\uninstall.exe /S")),
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    fn folder(path: &str, confidence: Confidence, bytes: u64) -> Leftover {
+        Leftover::fs(
+            LeftoverKind::Directory,
+            PathBuf::from(path),
+            confidence,
+            "named after the program",
+            Some(bytes),
+            false,
+        )
+    }
+
+    /// A PC in memory. What it lists and finds is fixed; nothing reaches
+    /// Windows.
+    struct FakePc {
+        programs: Vec<Program>,
+        apps: Vec<Package>,
+        found: HashMap<String, Vec<Leftover>>,
+    }
+
+    fn pc() -> FakePc {
+        let mut found = HashMap::new();
+        found.insert(
+            "Example Player".to_string(),
+            vec![
+                folder(r"C:\Users\me\AppData\Local\ExamplePlayer", Confidence::High, 900),
+                Leftover::reg_key(
+                    Hive::CurrentUser,
+                    r"Software\Example Studio",
+                    Confidence::High,
+                    "the vendor's key",
+                ),
+                folder(
+                    r"C:\Users\me\AppData\Local\Temp\ExamplePlayer",
+                    Confidence::Medium,
+                    50,
+                ),
+            ],
+        );
+        found.insert(
+            "OldGame".to_string(),
+            vec![folder(r"C:\Games\OldGame", Confidence::High, 70)],
+        );
+        FakePc {
+            programs: vec![
+                program("Example Player", "example-player"),
+                program("Brave", "BraveSoftware Brave-Browser"),
+            ],
+            apps: vec![package("Vendor.Notes", "Notes")],
+            found,
+        }
+    }
+
+    impl Inspect for FakePc {
+        fn programs(&self, _system: bool) -> Vec<Program> {
+            self.programs.clone()
+        }
+        fn store_apps(&self) -> Result<Vec<Package>> {
+            Ok(self.apps.clone())
+        }
+        fn target(&self, program: &Program) -> ScanTarget {
+            scanner::name_target(&program.display_name, program.publisher.as_deref())
+        }
+        fn target_by_name(&self, name: &str, publisher: Option<&str>) -> ScanTarget {
+            scanner::name_target(name, publisher)
+        }
+        fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
+            ScanReport {
+                program_name: target.display_name.clone(),
+                installed,
+                items: self
+                    .found
+                    .get(&target.display_name)
+                    .cloned()
+                    .unwrap_or_default(),
+            }
+        }
+        fn orphans(&self, _programs: &[Program]) -> OrphanReport {
+            OrphanReport {
+                folders: vec![OrphanFolder {
+                    path: PathBuf::from(r"C:\Users\me\AppData\Roaming\OldTool"),
+                    size_bytes: 2048,
+                    modified: Some("2026-01-02".to_string()),
+                }],
+                dangling: Vec::new(),
+            }
+        }
+        fn trace(&self, query: &str, programs: &[Program]) -> Vec<HunterMatch> {
+            programs
+                .iter()
+                .filter(|p| query.contains(p.id()))
+                .map(|p| HunterMatch {
+                    program: p.clone(),
+                    score: 90,
+                    reason: "runs from its install folder".to_string(),
+                })
+                .collect()
+        }
+        fn backups(&self) -> Result<Vec<BackupInfo>> {
+            Ok(Vec::new())
+        }
+        fn backups_folder(&self) -> Option<PathBuf> {
+            Some(PathBuf::from(r"C:\Users\me\AppData\Local\Oxidize\backups"))
+        }
+        fn local_appdata(&self) -> Option<PathBuf> {
+            None
+        }
+        fn is_elevated(&self) -> bool {
+            false
+        }
+    }
+
+    /// Writes down what it is asked to do and does none of it.
+    #[derive(Default)]
+    struct Recorder {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl Recorder {
+        fn log(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Remove for Recorder {
+        fn uninstall(&self, plan: &UninstallPlan) -> Result<String> {
+            self.log(format!("uninstall {}", plan.display()));
+            Ok("exited with code 0".to_string())
+        }
+        fn wait_until_gone(&self, program: &Program, _plan: &UninstallPlan) -> bool {
+            self.log(format!("wait {}", program.display_name));
+            true
+        }
+        fn remove_app(&self, app: &Package) -> Result<bool> {
+            self.log(format!("remove app {}", app.family_name));
+            Ok(true)
+        }
+        fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome> {
+            for l in items {
+                self.log(format!("remove {}", l.path));
+            }
+            Ok(DeletionOutcome {
+                attempted: items.len(),
+                deleted: items.len(),
+                backup_name: Some(format!("2026-10-10_150000_{label}")),
+                items: items
+                    .iter()
+                    .map(|l| ItemOutcome {
+                        path: l.path.clone(),
+                        kind: l.kind,
+                        status: ItemStatus::Removed,
+                    })
+                    .collect(),
+                ..DeletionOutcome::default()
+            })
+        }
+    }
+
+    /// A client on the other end of an in-memory stdio pipe.
+    struct Session {
+        write: WriteHalf<DuplexStream>,
+        lines: Lines<BufReader<ReadHalf<DuplexStream>>>,
+        server: tokio::task::JoinHandle<()>,
+        next_id: u64,
+    }
+
+    impl Session {
+        async fn open(server: Server) -> (Session, Value) {
+            let (ours, theirs) = tokio::io::duplex(1 << 20);
+            let server = tokio::spawn(async move {
+                if let Ok(running) = server.serve(theirs).await {
+                    let _ = running.waiting().await;
+                }
+            });
+            let (read, write) = tokio::io::split(ours);
+            let mut session = Session {
+                write,
+                lines: BufReader::new(read).lines(),
+                server,
+                next_id: 0,
+            };
+            let init = session
+                .request(
+                    "initialize",
+                    json!({
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": { "name": "test", "version": "1" },
+                    }),
+                )
+                .await;
+            session
+                .send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }))
+                .await;
+            (session, init)
+        }
+
+        async fn send(&mut self, message: Value) {
+            let line = format!("{message}\n");
+            self.write.write_all(line.as_bytes()).await.unwrap();
+        }
+
+        /// Send a request and return the whole answer to it.
+        async fn request(&mut self, method: &str, params: Value) -> Value {
+            self.next_id += 1;
+            let id = self.next_id;
+            self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+                .await;
+            loop {
+                let line = tokio::time::timeout(Duration::from_secs(20), self.lines.next_line())
+                    .await
+                    .expect("an answer in time")
+                    .unwrap()
+                    .expect("the server is still there");
+                let answer: Value = serde_json::from_str(&line).expect("one JSON message a line");
+                if answer["id"] == json!(id) {
+                    return answer;
+                }
+            }
+        }
+
+        /// Call a tool and return its result.
+        async fn call(&mut self, tool: &str, arguments: Value) -> Value {
+            let answer = self
+                .request(
+                    "tools/call",
+                    json!({ "name": tool, "arguments": arguments }),
+                )
+                .await;
+            assert!(answer.get("error").is_none(), "{answer}");
+            answer["result"].clone()
+        }
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            self.server.abort();
+        }
+    }
+
+    fn server_on(pc: FakePc) -> (Server, Arc<Recorder>) {
+        let recorder = Arc::new(Recorder::default());
+        let remove: Arc<dyn Remove> = recorder.clone();
+        (Server::new(Arc::new(pc), remove), recorder)
+    }
+
+    fn plan_id(plan: &Value) -> Value {
+        let id = plan["structuredContent"]["plan_id"].clone();
+        assert!(id.is_string(), "{plan}");
+        id
+    }
+
+    #[tokio::test]
+    async fn the_handshake_names_the_server_and_offers_tools() {
+        let (server, _) = server_on(pc());
+        let (_session, init) = Session::open(server).await;
+        let result = &init["result"];
+        assert_eq!(result["protocolVersion"], "2025-11-25", "{init}");
+        assert_eq!(result["serverInfo"]["name"], "oxidize");
+        assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(result["capabilities"]["tools"].is_object(), "{init}");
+        assert!(result["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("apply_removal_plan"));
+    }
+
+    #[tokio::test]
+    async fn tools_are_listed_with_their_arguments_and_hints() {
+        let (server, _) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let answer = session.request("tools/list", json!({})).await;
+        let tools = answer["result"]["tools"]
+            .as_array()
+            .expect("a list")
+            .clone();
+        let mut names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "apply_removal_plan",
+                "find_orphans",
+                "list_backups",
+                "list_programs",
+                "plan_removal",
+                "scan_leftovers",
+                "trace",
+            ]
+        );
+        for tool in &tools {
+            assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
+            assert!(!tool["description"].as_str().unwrap().is_empty());
+            let read_only = tool["annotations"]["readOnlyHint"] == json!(true);
+            assert_eq!(read_only, tool["name"] != "apply_removal_plan", "{tool}");
+        }
+        let plan = tools.iter().find(|t| t["name"] == "plan_removal").unwrap();
+        assert_eq!(plan["inputSchema"]["required"], json!(["programs"]));
+        let apply = tools
+            .iter()
+            .find(|t| t["name"] == "apply_removal_plan")
+            .unwrap();
+        assert_eq!(apply["annotations"]["destructiveHint"], true);
+        assert_eq!(apply["inputSchema"]["required"], json!(["plan_id"]));
+    }
+
+    #[tokio::test]
+    async fn reading_tools_answer_with_the_command_lines_json_and_change_nothing() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+
+        let list = session
+            .call("list_programs", json!({ "filter": "ro" }))
+            .await;
+        let rows = list["structuredContent"]["programs"].as_array().unwrap();
+        let names: Vec<&str> = rows
+            .iter()
+            .map(|r| r["display_name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["Example Player"]);
+        assert_eq!(rows[0]["kind"], "program");
+        // The text is the same JSON, for clients that read only text.
+        let text: Value =
+            serde_json::from_str(list["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, list["structuredContent"]);
+
+        let apps = session
+            .call("list_programs", json!({ "store": true }))
+            .await;
+        assert_eq!(apps["structuredContent"]["programs"][0]["kind"], "store");
+
+        let scan = session
+            .call("scan_leftovers", json!({ "program": "Example" }))
+            .await;
+        let report = &scan["structuredContent"];
+        assert_eq!(report["program_name"], "Example Player");
+        assert_eq!(report["installed"], true);
+        assert_eq!(report["items"][0]["confidence"], "High");
+        assert_eq!(report["items"][0]["reason"], "named after the program");
+        assert_eq!(report["items"][2]["confidence"], "Medium");
+
+        let gone = session
+            .call("scan_leftovers", json!({ "program": "OldGame" }))
+            .await;
+        assert_eq!(gone["structuredContent"]["installed"], false);
+
+        let orphans = session.call("find_orphans", json!({})).await;
+        assert_eq!(
+            orphans["structuredContent"]["folders"][0]["size_bytes"],
+            2048
+        );
+
+        let traced = session
+            .call(
+                "trace",
+                json!({ "query": r"C:\Apps\example-player\player.exe" }),
+            )
+            .await;
+        assert_eq!(
+            traced["structuredContent"]["matches"][0]["name"],
+            "Example Player"
+        );
+
+        let backups = session.call("list_backups", json!({})).await;
+        assert_eq!(backups["structuredContent"]["backups"], json!([]));
+
+        let plan = session
+            .call("plan_removal", json!({ "programs": ["Example"] }))
+            .await;
+        plan_id(&plan);
+
+        assert!(recorder.calls().is_empty(), "{:?}", recorder.calls());
+    }
+
+    #[tokio::test]
+    async fn an_unclear_name_is_a_tool_error_the_assistant_can_read() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let result = session
+            .call("plan_removal", json!({ "programs": ["r"] }))
+            .await;
+        assert_eq!(result["isError"], true, "{result}");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("Example Player") && text.contains("Brave"),
+            "{text}"
+        );
+        assert!(recorder.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_plan_lists_exactly_what_goes_and_the_command_that_does_the_same() {
+        let (server, _) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let result = session
+            .call(
+                "plan_removal",
+                json!({ "programs": ["Example", "OldGame"], "silent": true }),
+            )
+            .await;
+        let plan = &result["structuredContent"];
+        let steps = plan["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 2, "{plan}");
+        assert_eq!(steps[0]["kind"], "program");
+        assert_eq!(
+            steps[0]["uninstaller"],
+            r"C:\Apps\example-player\uninstall.exe /S"
+        );
+        // High only by default: the Medium temp folder stays.
+        let paths: Vec<&str> = steps[0]["leftovers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                r"C:\Users\me\AppData\Local\ExamplePlayer",
+                r"HKCU\Software\Example Studio"
+            ]
+        );
+        assert_eq!(steps[0]["bytes"], 900);
+        assert_eq!(steps[1]["kind"], "leftovers");
+        assert_eq!(
+            plan["commands"],
+            json!([
+                "oxidize uninstall \"Example Player\" --silent",
+                "oxidize scan \"OldGame\" --remove"
+            ])
+        );
+        assert_eq!(plan["leftovers"], 3);
+        assert_eq!(plan["bytes"], 970);
+        assert_eq!(plan["needs_admin"], false);
+        assert_eq!(
+            plan["backup_folder"],
+            r"C:\Users\me\AppData\Local\Oxidize\backups"
+        );
+
+        let medium = session
+            .call(
+                "plan_removal",
+                json!({ "programs": ["Example"], "level": "medium" }),
+            )
+            .await;
+        assert_eq!(medium["structuredContent"]["leftovers"], 3);
+        assert_eq!(
+            medium["structuredContent"]["commands"],
+            json!(["oxidize uninstall \"Example Player\" --medium"])
+        );
+    }
+
+    #[tokio::test]
+    async fn applying_a_plan_does_exactly_what_it_showed_once() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call("plan_removal", json!({ "programs": ["Example"] }))
+            .await;
+        let id = plan_id(&plan);
+        assert!(recorder.calls().is_empty());
+
+        let done = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        assert_ne!(done["isError"], true, "{done}");
+        assert_eq!(
+            recorder.calls(),
+            [
+                r"uninstall C:\Apps\example-player\uninstall.exe",
+                "wait Example Player",
+                r"remove C:\Users\me\AppData\Local\ExamplePlayer",
+                r"remove HKCU\Software\Example Studio",
+            ]
+        );
+        let step = &done["structuredContent"]["steps"][0];
+        assert_eq!(step["still_installed"], false, "{step}");
+        assert_eq!(step["failed"], false, "{step}");
+        assert_eq!(step["removal"]["removed"], 2);
+        assert_eq!(step["backup"], "2026-10-10_150000_Example Player");
+        assert_eq!(
+            step["restore_command"],
+            "oxidize restore \"2026-10-10_150000_Example Player\""
+        );
+        // The rescan reports what is still there, the Medium folder included.
+        assert_eq!(step["remaining"].as_array().unwrap().len(), 3);
+
+        let again = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        assert_eq!(again["isError"], true, "{again}");
+        assert_eq!(recorder.calls().len(), 4, "a plan runs once");
+    }
+
+    #[tokio::test]
+    async fn only_a_plan_made_in_this_session_can_be_applied() {
+        let (first, _) = server_on(pc());
+        let (mut planning, _) = Session::open(first).await;
+        let plan = planning
+            .call("plan_removal", json!({ "programs": ["Brave"] }))
+            .await;
+        let id = plan_id(&plan);
+
+        let (second, recorder) = server_on(pc());
+        let (mut other, _) = Session::open(second).await;
+        for plan_id in [id, json!("plan-1"), json!("")] {
+            let result = other
+                .call("apply_removal_plan", json!({ "plan_id": plan_id }))
+                .await;
+            assert_eq!(result["isError"], true, "{result}");
+        }
+        assert!(recorder.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_store_app_and_leftovers_by_name_take_the_same_path() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call("plan_removal", json!({ "programs": ["Notes", "OldGame"] }))
+            .await;
+        assert_eq!(plan["structuredContent"]["steps"][0]["kind"], "store");
+        assert_eq!(
+            plan["structuredContent"]["commands"],
+            json!([
+                "oxidize uninstall \"Notes\"",
+                "oxidize scan \"OldGame\" --remove"
+            ])
+        );
+        let id = plan_id(&plan);
+        session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        assert_eq!(
+            recorder.calls(),
+            [
+                "remove app Vendor.Notes_8wekyb3d8bbwe",
+                r"remove C:\Games\OldGame",
+            ]
+        );
+    }
+
+    /// The command line each tool does the work of.
+    const MIRRORS: &[(&str, &str)] = &[
+        ("list_programs", "list --json"),
+        ("scan_leftovers", "scan Thing --json"),
+        ("find_orphans", "orphans --json"),
+        ("trace", "trace thing.exe --json"),
+        ("list_backups", "backups --json"),
+        ("plan_removal", "uninstall Thing --dry-run --json"),
+        ("apply_removal_plan", "uninstall Thing --yes --json"),
+    ];
+
+    #[test]
+    fn every_tool_but_one_mirrors_a_command_line_that_changes_nothing() {
+        let mut tools: Vec<String> = Server::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        tools.sort_unstable();
+        let mut mirrored: Vec<String> = MIRRORS.iter().map(|(t, _)| t.to_string()).collect();
+        mirrored.sort_unstable();
+        assert_eq!(tools, mirrored, "every tool says what it mirrors");
+
+        let changing: Vec<&str> = MIRRORS
+            .iter()
+            .filter(|(_, args)| {
+                let cli = Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')))
+                    .unwrap_or_else(|e| panic!("{args}: {e}"));
+                if !cli.changes_nothing() {
+                    assert!(!cli.no_backup && !cli.elevate, "{args}");
+                }
+                !cli.changes_nothing()
+            })
+            .map(|(tool, _)| *tool)
+            .collect();
+        assert_eq!(changing, ["apply_removal_plan"]);
+    }
+
+    /// Engine calls that change the machine.
+    const ENGINE_CHANGES: &[&str] = &[
+        "remove_leftovers",
+        "uninstall::run",
+        "remove_package",
+        "restore::",
+        "delete_backup",
+        "relaunch_elevated",
+        "delete_service",
+        "delete_task",
+        "remove_path_entry",
+        "delete_key_tree",
+        "delete_value",
+        "import_registry_file",
+        "Command::new",
+        "fs::remove",
+        "fs::write",
+    ];
+
+    #[test]
+    fn only_the_remover_reaches_the_engines_removal_and_it_always_backs_up() {
+        let source = include_str!("mcp.rs");
+        let server = &source[..source.find("#[cfg(test)]").unwrap()];
+        for call in ENGINE_CHANGES {
+            assert!(!server.contains(call), "the server calls {call}");
+        }
+        assert_eq!(
+            server.matches("self.remove").count(),
+            1,
+            "only apply_removal_plan holds the remover"
+        );
+
+        let machine = include_str!("mcp/machine.rs");
+        let (reads, removes) = machine.split_once("impl Remove for Remover").unwrap();
+        for call in ENGINE_CHANGES {
+            assert!(!reads.contains(call), "the reading side calls {call}");
+        }
+        assert!(removes.contains("make_backups: true"));
+        assert!(!machine.contains("make_backups: false"));
+    }
+}

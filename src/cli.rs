@@ -350,6 +350,7 @@ mod tests {
             "backups --clear",
             "restore name",
             "list --elevate",
+            "mcp",
         ] {
             assert!(!parse(args).changes_nothing(), "{args}");
         }
