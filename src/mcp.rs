@@ -170,6 +170,15 @@ impl Level {
         }
     }
 
+    /// The lowest confidence this level removes.
+    fn confidence(self) -> Confidence {
+        match self {
+            Level::High => Confidence::High,
+            Level::Medium => Confidence::Medium,
+            Level::All => Confidence::Low,
+        }
+    }
+
     /// The command-line flag that picks this level.
     fn flag(self) -> &'static str {
         match self {
@@ -746,7 +755,9 @@ fn apply_step(
             })
         }
     };
+    let verdict = complete::verdict(installed, &after, level.confidence());
     out["remaining"] = json!(after.items);
+    out["nothing_left"] = json!(verdict.nothing_left);
     out["failed"] = json!(failed);
     out
 }
@@ -859,8 +870,9 @@ impl Server {
     /// folders, run each uninstaller the plan keeps, then remove the
     /// leftovers it listed, each one backed up first. Returns what was
     /// closed and removed, what was not and why, what a fresh scan still
-    /// finds, and the backup with the command that restores it. Call it
-    /// only after the user agreed to that plan.
+    /// finds and whether nothing at the plan's level is left, and the
+    /// backup with the command that restores it. Call it only after the
+    /// user agreed to that plan.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -1560,6 +1572,7 @@ mod tests {
             .map(|l| l["path"].as_str().unwrap())
             .collect();
         assert_eq!(left, [r"C:\Users\me\AppData\Local\Temp\ExamplePlayer"]);
+        assert_eq!(step["nothing_left"], true, "{step}");
 
         let again = session
             .call("apply_removal_plan", json!({ "plan_id": id }))
@@ -1674,6 +1687,7 @@ mod tests {
         let step = &done["structuredContent"]["steps"][0];
         assert_eq!(step["still_installed"], false, "{step}");
         // The machine key needed administrator rights and stayed.
+        assert_eq!(step["nothing_left"], false, "{step}");
         assert_eq!(step["remaining"][0]["path"], r"HKLM\SOFTWARE\Game Service");
     }
 
