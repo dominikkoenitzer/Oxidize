@@ -140,7 +140,12 @@ Every leftover has a confidence. `--remove` takes the high-confidence ones;
 Registry keys and values under `SOFTWARE` in HKCU and HKLM, both 32- and
 64-bit views, App Paths and autostart entries. Folders under Program Files,
 ProgramData, AppData, the Start Menu, Startup and the Desktop. Services,
-scheduled tasks, firewall rules and PATH entries. Windows' own locations are
+scheduled tasks, firewall rules and PATH entries. Link types (`name://`
+links, also the ones a browser hands to the program), file types and
+open-with entries whose command runs from the program's folder, shortcuts
+that lead into it whatever they are called, its folders in your temp folder,
+other uninstall entries left pointing into it, and the vendor's own key in
+your registry when nothing else of theirs is installed. Windows' own locations are
 never touched, and a vendor folder that also holds other products is never
 removed as a whole. One that held nothing but the program, folder or key, goes
 with it.
