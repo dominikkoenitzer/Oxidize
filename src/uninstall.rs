@@ -75,9 +75,9 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
     let (raw, source) = if silent {
         match (&program.quiet_uninstall_string, &program.uninstall_string) {
             (Some(q), _) => (q.clone(), "QuietUninstallString".to_string()),
-            (None, Some(u)) if inno_uninstaller(u) => (
-                format!("{u} {INNO_SILENT}"),
-                "UninstallString with Inno Setup's silent switches".to_string(),
+            (None, Some(u)) if unins_uninstaller(u) => (
+                format!("{u} {UNINS_SILENT}"),
+                "UninstallString with the unins000.exe silent switches".to_string(),
             ),
             (None, Some(u)) => (u.clone(), "UninstallString, no quiet variant".to_string()),
             (None, None) => bail!("no uninstall command recorded for this program"),
@@ -94,7 +94,8 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
     if argv.first().is_none_or(|exe| exe.trim().is_empty()) {
         bail!("uninstall command parsed to nothing: {raw:?}");
     }
-    let unattended = silent && (program.quiet_uninstall_string.is_some() || inno_uninstaller(&raw));
+    let unattended =
+        silent && (program.quiet_uninstall_string.is_some() || unins_uninstaller(&raw));
     Ok(UninstallPlan {
         argv,
         is_msi: false,
@@ -103,13 +104,14 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
     })
 }
 
-/// What an Inno Setup uninstaller takes to run without a window or a question.
-const INNO_SILENT: &str = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART";
+/// What an `unins000.exe` uninstaller takes to run without a window or a
+/// question.
+const UNINS_SILENT: &str = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART";
 
-/// Inno Setup names its uninstaller `unins000.exe` (the digits count up when
+/// One widely used installer names its uninstaller `unins000.exe` (the digits count up when
 /// several installs share a folder) and documents the silent switches, so it
 /// runs unattended even when no quiet command was recorded.
-fn inno_uninstaller(command: &str) -> bool {
+fn unins_uninstaller(command: &str) -> bool {
     let argv = util::split_uninstall_command(&util::expand_env_vars(command));
     let Some(base) = argv.first().and_then(|exe| util::file_basename_lower(exe)) else {
         return false;
@@ -219,7 +221,7 @@ pub fn wait_for_completion(program: &Program, plan: &UninstallPlan, max: Duratio
     !still_installed(program)
 }
 
-/// Inno Setup and friends run from `%TEMP%\<random>\_iu14D2N.tmp` or similar.
+/// Some uninstallers run from `%TEMP%\<random>\_iu14D2N.tmp` or similar.
 fn is_temp_uninstaller(exe: &Path) -> bool {
     let Some(temp) = std::env::var_os("TEMP").map(std::path::PathBuf::from) else {
         return false;
@@ -275,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn an_inno_setup_uninstaller_gets_its_silent_switches() {
+    fn an_unins000_uninstaller_gets_its_silent_switches() {
         let p = program(r#""C:\Apps\App\unins000.exe""#, None);
         let silent = plan(&p, true).unwrap();
         assert!(silent.unattended);
@@ -303,9 +305,9 @@ mod tests {
             Some(r"C:\Apps\App\uninstall.exe /S"),
         );
         assert!(plan(&quiet, true).unwrap().unattended);
-        assert!(!inno_uninstaller(r"C:\Apps\unins.exe"));
-        assert!(!inno_uninstaller(r"C:\Apps\uninstaller.exe"));
-        assert!(inno_uninstaller(r"C:\Apps\unins001.exe /LOG"));
+        assert!(!unins_uninstaller(r"C:\Apps\unins.exe"));
+        assert!(!unins_uninstaller(r"C:\Apps\uninstaller.exe"));
+        assert!(unins_uninstaller(r"C:\Apps\unins001.exe /LOG"));
     }
 
     #[test]

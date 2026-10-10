@@ -9,7 +9,7 @@
   still there.
 - A program installed for the current user alone, with nothing machine-wide,
   is removed without its own uninstaller. `--use-uninstaller` always runs it.
-- Inno Setup uninstallers run with their silent switches when no quiet
+- Uninstallers named `unins000.exe` run with their silent switches when no quiet
   command was recorded.
 - A scan reads the installed programs, services and tasks once and runs its
   registry, file and system parts at the same time.
