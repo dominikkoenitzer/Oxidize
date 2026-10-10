@@ -150,10 +150,11 @@ pub fn vendor_step(
     }
 }
 
-/// An uninstaller that runs without asking: Windows Installer, a recorded
-/// quiet command, or a plan that already carries the unattended switches.
-pub fn runs_silently(program: &Program, plan: &UninstallPlan) -> bool {
-    plan.is_msi || program.quiet_uninstall_string.is_some() || plan.unattended
+/// An uninstaller that runs without asking: the plan carries the unattended
+/// switches, Windows Installer's, a recorded quiet command or Inno Setup's.
+/// A quiet command the plan does not use says nothing.
+pub fn runs_silently(_program: &Program, plan: &UninstallPlan) -> bool {
+    plan.unattended
 }
 
 /// The machine-wide folders: what is under them needs administrator rights.
@@ -743,7 +744,7 @@ mod tests {
             argv: vec![r"C:\Users\me\AppData\Local\ExamplePlayer\uninstall.exe".to_string()],
             is_msi,
             source: "UninstallString".to_string(),
-            unattended: false,
+            unattended: is_msi,
         }
     }
 
