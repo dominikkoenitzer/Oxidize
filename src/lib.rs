@@ -5,6 +5,7 @@ pub mod cli;
 pub mod commands;
 pub mod complete;
 pub mod hunter;
+pub mod lnk;
 pub mod mcp;
 pub mod model;
 pub mod orphans;
