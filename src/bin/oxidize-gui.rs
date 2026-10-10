@@ -222,9 +222,11 @@ impl OxidizeApp {
         self.busy = true;
         self.status = format!("Scanning for leftovers of {}...", program.display_name);
         self.spawn(ctx, move || {
-            let target = scanner::build_target(&program);
+            // One reading of the machine serves both steps.
+            let snap = scanner::Snapshot::new();
+            let target = scanner::build_target_with(&program, &snap);
             let installed = uninstall::still_installed(&program);
-            let report = scanner::scan(&target, installed);
+            let report = scanner::scan_with(&target, installed, &snap);
             Msg::Scan {
                 id: program.id().to_string(),
                 report,

@@ -316,13 +316,18 @@ fn fit(s: &str, width: usize) -> String {
 
 fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
     let programs = registry::enumerate_installed_programs(true);
+    // Nothing changes before the scan, so one reading serves every step.
+    let snap = scanner::Snapshot::with_programs(programs.clone());
     let installed = scan_subject(
         &programs,
         || WindowsPackageStore.list().unwrap_or_default(),
         &args.target,
     )?;
     let (target, label) = match installed {
-        Some(program) => (scanner::build_target(program), program.display_name.clone()),
+        Some(program) => (
+            scanner::build_target_with(program, &snap),
+            program.display_name.clone(),
+        ),
         None => {
             if !g.json {
                 println!(
@@ -341,7 +346,7 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
     };
     let installed = installed.is_some();
 
-    let report = scanner::scan(&target, installed);
+    let report = scanner::scan_with(&target, installed, &snap);
 
     if args.remove && installed && !g.dry_run {
         if g.json {
