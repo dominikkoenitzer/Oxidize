@@ -93,6 +93,19 @@ oxidize orphans --remove              drops PATH entries, autostart values, serv
                                       and tasks whose files no longer exist
 ```
 
+`oxidize uninstall <program> --yes` removes a program completely in one go.
+Whatever runs from its folders is closed first: each process is asked to close
+its windows and ended if it is still running three seconds later. Nothing that
+runs from anywhere else is touched. A program installed for your user alone,
+with no service, firewall rule or machine-wide file or key, is then removed by
+Oxidize itself, uninstall entry included, without starting its own
+uninstaller. Any other program runs its uninstaller first, silently where it
+supports that. Every high-confidence leftover goes next, with a backup
+(`--medium` adds the plausible ones), and a second scan ends the run with
+`Nothing left.` or a list of what is still there and why. `--use-uninstaller`
+always runs the program's own uninstaller, `--keep` removes no leftovers, and
+`--dry-run` lists every process it would close and every item it would remove.
+
 `oxidize uninstall brave vlc 7zip` uninstalls several programs one after
 another. Every name has to match exactly one program before anything runs;
 otherwise nothing runs and the unclear names are listed with their candidates.
