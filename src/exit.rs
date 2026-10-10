@@ -54,11 +54,6 @@ impl Failure {
         Failure::new("ambiguous", ERROR, message, false)
     }
 
-    /// The step needs administrator rights.
-    pub fn needs_admin(message: impl Into<String>) -> Self {
-        Failure::new("needs_admin", ERROR, message, false)
-    }
-
     pub fn still_installed(message: impl Into<String>, reported: bool) -> Self {
         Failure::new("still_installed", STILL_INSTALLED, message, reported)
     }
@@ -131,7 +126,6 @@ mod tests {
         let cases = [
             (Failure::not_found("x"), "not_found", ERROR),
             (Failure::ambiguous("x"), "ambiguous", ERROR),
-            (Failure::needs_admin("x"), "needs_admin", ERROR),
             (
                 Failure::still_installed("x", false),
                 "still_installed",
