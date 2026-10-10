@@ -110,7 +110,8 @@ always runs the program's own uninstaller, `--keep` removes no leftovers, and
 another. Every name has to match exactly one program before anything runs;
 otherwise nothing runs and the unclear names are listed with their candidates.
 The plan is shown once, each program then gets its own leftover scan, removal
-and backup, and a summary follows. The exit code is 1 if any program failed.
+and backup, and a summary follows. If any program failed, the batch exits
+with the code of the first one that did.
 With `--json` a batch prints `{"programs": [...], "uninstalled", "failed",
 "cancelled"}`; a single name keeps the single-program shape.
 
@@ -135,6 +136,27 @@ one flag: `--level high`, `--level medium` or `--level low`.
 | `--json` | machine-readable output |
 | `--elevate` | relaunch as administrator |
 | `--no-backup` | delete permanently instead of quarantining |
+
+`--dry-run` lists every item a removal would take. `--elevate` waits for the
+elevated run and exits with its code. With `--json` or `-y` it also prints that
+run's output; otherwise the run keeps its own window for its questions.
+
+### Exit codes
+
+| code | |
+|---|---|
+| 0 | done |
+| 1 | error |
+| 2 | the command line did not parse |
+| 3 | the program is still installed after its uninstall |
+| 4 | the removal is incomplete: an item failed or something is left |
+| 5 | cancelled: a question was answered no, or `--json` ran without `-y` |
+
+With `--json`, a run that fails before it has a result prints one object
+instead: `{"error": {"code": "not_found", "message": "..."}}`. The codes are
+`error`, `not_found`, `ambiguous`, `still_installed`, `incomplete` and
+`cancelled`. A run that already printed its result only sets the exit code,
+so stdout always holds one JSON document.
 
 ## What gets checked
 
@@ -165,6 +187,10 @@ Removals go to `%LOCALAPPDATA%\Oxidize\backups\<date> <program>\`. Registry
 keys are exported to `.reg` files and validated before anything is deleted.
 Files and folders are moved there, not deleted. Task definitions are copied.
 A manifest records every step, and `oxidize restore` replays it in reverse.
+
+`oxidize backups --json` lists the newest first. Each entry's `id` is its
+folder name, and `oxidize restore <id>` takes it as an exact match. `restore`
+asks first, Enter means yes; `-y` skips the question.
 
 ## Use it with an AI assistant
 
