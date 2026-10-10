@@ -1178,7 +1178,7 @@ mod tests {
         let (mut session, _) = Session::open(server).await;
 
         let list = session
-            .call("list_programs", json!({ "filter": "ro" }))
+            .call("list_programs", json!({ "filter": "player" }))
             .await;
         let rows = list["structuredContent"]["programs"].as_array().unwrap();
         let names: Vec<&str> = rows
