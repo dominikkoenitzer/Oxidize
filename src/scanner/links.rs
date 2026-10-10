@@ -5,7 +5,11 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::{env_dir, exe_missing, locate_exe, path_names_product, path_within_shared_dir};
+use super::{
+    dir_contains, env_dir, exe_missing, is_exact_product, locate_exe, norm_path_key,
+    other_program_install_dirs, path_names_product, path_within_shared_dir, push_dir_leftover,
+    score_product, Snapshot,
+};
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, ScanTarget};
 use crate::{lnk, registry, system};
 
@@ -179,6 +183,54 @@ pub(super) fn scan_shortcuts(target: &ScanTarget) -> Vec<Leftover> {
     out
 }
 
+/// Folders in `root` named after the product. Only a folder named exactly
+/// like it is sure to be its own; any other match is likely at most, since
+/// installers and updaters unpack under all kinds of names. A folder another
+/// program is installed in stays.
+fn scan_temp_dir(root: &Path, target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
+    let mut out = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return out;
+    };
+    let others = other_program_install_dirs(target.registry.as_ref(), snap.programs());
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        let key = norm_path_key(&path);
+        let holds_install = others
+            .iter()
+            .chain(target.install_location.as_ref())
+            .any(|o| dir_contains(&key, &norm_path_key(o)));
+        if holds_install {
+            continue;
+        }
+        let hit = if is_exact_product(&name, target) && !target.vendor_is_shared {
+            Some((
+                Confidence::High,
+                "exact name, in the temp folder".to_string(),
+            ))
+        } else {
+            score_product(&name, target)
+                .map(|(_, reason)| (Confidence::Medium, format!("{reason}, in the temp folder")))
+        };
+        if let Some((conf, reason)) = hit {
+            push_dir_leftover(&mut out, path, conf, reason, snap.roots());
+        }
+    }
+    out
+}
+
+/// The program's folders in the user's temp folder.
+pub(super) fn scan_temp_folders(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
+    match env_dir("LOCALAPPDATA") {
+        Some(local) => scan_temp_dir(&local.join("Temp"), target, snap),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +327,75 @@ mod tests {
         let t = quillmark(Some(HOME));
         assert!(match_shortcut(Path::new("quillmark.exe"), &t).is_none());
         assert!(match_shortcut(&Path::new(HOME).join("quillmark.exe"), &t).is_some());
+    }
+
+    #[test]
+    fn a_temp_folder_is_sure_only_when_named_exactly_like_the_product() {
+        let root = std::env::temp_dir().join(format!("oxidize_temp_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for folder in [
+            "Quillmark",
+            "Quillmark Setup 2",
+            "Other Tool",
+            "quillmark.log",
+        ] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::create_dir_all(root.join(r"Shared Quillmark Cache\Example Studio Tool")).unwrap();
+        fs::write(root.join("quillmark.tmp"), b"").unwrap();
+
+        let snap = Snapshot::with_programs(Vec::new());
+        let t = quillmark(Some(HOME));
+        let mut found: Vec<(String, Confidence)> = scan_temp_dir(&root, &t, &snap)
+            .into_iter()
+            .map(|l| {
+                let name = Path::new(&l.path).file_name().unwrap().to_string_lossy();
+                (name.to_string(), l.confidence)
+            })
+            .collect();
+        found.sort();
+        assert!(found.contains(&("Quillmark".to_string(), Confidence::High)));
+        assert!(found.contains(&("Quillmark Setup 2".to_string(), Confidence::Medium)));
+        assert!(!found
+            .iter()
+            .any(|(n, _)| n == "Other Tool" || n == "quillmark.tmp"));
+
+        // A folder another program is installed in is left alone.
+        let holder = root.join("Shared Quillmark Cache");
+        let mut entry = crate::model::Program {
+            registry_key: "Example Studio Tool".to_string(),
+            source: crate::model::RegistrySource::new(
+                Hive::CurrentUser,
+                crate::model::RegistryView::Native64,
+            ),
+            display_name: "Example Studio Tool".to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: Some(holder.join("Example Studio Tool").display().to_string()),
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        };
+        let snap = Snapshot::with_programs(vec![entry.clone()]);
+        let found = scan_temp_dir(&root, &t, &snap);
+        assert!(
+            !found.iter().any(|l| Path::new(&l.path) == holder),
+            "{found:?}"
+        );
+        entry.install_location = None;
+        let snap = Snapshot::with_programs(vec![entry]);
+        let found = scan_temp_dir(&root, &t, &snap);
+        assert!(
+            found.iter().any(|l| Path::new(&l.path) == holder),
+            "{found:?}"
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
