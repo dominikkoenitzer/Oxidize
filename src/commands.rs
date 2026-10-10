@@ -71,25 +71,12 @@ pub fn dispatch(cli: Cli) -> Result<()> {
 // ----
 
 fn cmd_list(args: &ListArgs, g: &Global) -> Result<()> {
-    let mut rows: Vec<Listed> = Vec::new();
-    if !args.store {
-        rows.extend(
-            registry::enumerate_installed_programs(args.system)
-                .into_iter()
-                .map(Listed::Program),
-        );
-    }
-    match store_rows(&WindowsPackageStore, args.system) {
-        Ok(apps) => rows.extend(apps),
-        Err(e) if args.store => return Err(e),
-        // The programs are still worth listing.
-        Err(e) => term::warn(&format!("Store apps left out: {e:#}")),
-    }
-    if let Some(filter) = &args.filter {
-        let needle = filter.to_lowercase();
-        rows.retain(|r| r.matches(&needle));
-    }
-    sort_rows(&mut rows, args.sort);
+    let programs = if args.store {
+        Vec::new()
+    } else {
+        registry::enumerate_installed_programs(args.system)
+    };
+    let rows = list_rows(programs, WindowsPackageStore.list(), args)?;
 
     if g.json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -107,11 +94,36 @@ fn cmd_list(args: &ListArgs, g: &Global) -> Result<()> {
     Ok(())
 }
 
+/// The rows `list` shows: `programs` as read with `args.system`, the Store
+/// apps unless Windows could not list them, filtered and sorted.
+pub(crate) fn list_rows(
+    programs: Vec<Program>,
+    packages: Result<Vec<Package>>,
+    args: &ListArgs,
+) -> Result<Vec<Listed>> {
+    let mut rows: Vec<Listed> = Vec::new();
+    if !args.store {
+        rows.extend(programs.into_iter().map(Listed::Program));
+    }
+    match packages {
+        Ok(packages) => rows.extend(store_rows(&packages, args.system)),
+        Err(e) if args.store => return Err(e),
+        // The programs are still worth listing.
+        Err(e) => term::warn(&format!("Store apps left out: {e:#}")),
+    }
+    if let Some(filter) = &args.filter {
+        let needle = filter.to_lowercase();
+        rows.retain(|r| r.matches(&needle));
+    }
+    sort_rows(&mut rows, args.sort);
+    Ok(rows)
+}
+
 /// One entry of `list`: a program from the registry or a Store app. As JSON
 /// it is the program or package with a `kind` in front.
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-enum Listed {
+pub(crate) enum Listed {
     Program(Program),
     Store {
         #[serde(flatten)]
@@ -182,16 +194,15 @@ impl Listed {
 /// The Store apps `list` shows, each with the guard's verdict. The guard sees
 /// every package, so one that a hidden Windows package needs is still kept.
 /// Packages signed as part of Windows show only with `system`.
-fn store_rows(store: &dyn PackageStore, system: bool) -> Result<Vec<Listed>> {
-    let packages = store.list()?;
-    Ok(packages
+fn store_rows(packages: &[Package], system: bool) -> Vec<Listed> {
+    packages
         .iter()
         .filter(|p| system || p.signature != SignatureKind::System)
         .map(|p| Listed::Store {
             package: p.clone(),
-            protected: package_guard(p, &packages).err(),
+            protected: package_guard(p, packages).err(),
         })
-        .collect())
+        .collect()
 }
 
 fn sort_rows(rows: &mut [Listed], key: SortKey) {
@@ -302,18 +313,14 @@ fn fit(s: &str, width: usize) -> String {
 
 fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
     let programs = registry::enumerate_installed_programs(true);
-    let (target, installed, label) = match resolve_target(&programs, &args.target) {
-        Ok(program) => (
-            scanner::build_target(program),
-            true,
-            program.display_name.clone(),
-        ),
-        Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
-        Err(Resolve::NotFound) => {
-            let packages = WindowsPackageStore.list().unwrap_or_default();
-            if let Some(app) = store_app_named(&packages, &args.target) {
-                bail!("{}", store_app_refusal(&args.target, app));
-            }
+    let installed = scan_subject(
+        &programs,
+        || WindowsPackageStore.list().unwrap_or_default(),
+        &args.target,
+    )?;
+    let (target, label) = match installed {
+        Some(program) => (scanner::build_target(program), program.display_name.clone()),
+        None => {
             if !g.json {
                 println!(
                     "{}",
@@ -325,11 +332,11 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
             }
             (
                 scanner::name_only_target(&args.target, args.publisher.as_deref()),
-                false,
                 args.target.clone(),
             )
         }
     };
+    let installed = installed.is_some();
 
     let report = scanner::scan(&target, installed);
 
@@ -371,6 +378,27 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
         print_remove_hint(high, &format!("oxidize scan \"{}\" --remove", args.target));
     }
     Ok(())
+}
+
+/// What `scan` looks for: the installed program `name` resolves to, or
+/// `None` when nothing installed answers to it and the scan goes by name. A
+/// name only a Store app answers to is refused; `packages` is asked for the
+/// apps only then.
+pub(crate) fn scan_subject<'a>(
+    programs: &'a [Program],
+    packages: impl FnOnce() -> Vec<Package>,
+    name: &str,
+) -> Result<Option<&'a Program>> {
+    match resolve_target(programs, name) {
+        Ok(program) => Ok(Some(program)),
+        Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
+        Err(Resolve::NotFound) => {
+            if let Some(app) = store_app_named(&packages(), name) {
+                bail!("{}", store_app_refusal(name, app));
+            }
+            Ok(None)
+        }
+    }
 }
 
 fn print_remove_hint(high: usize, command: &str) {
@@ -419,15 +447,15 @@ fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
 
 /// A program of a batch with the command that uninstalls it.
 #[derive(Debug)]
-struct Planned {
-    program: Program,
-    plan: uninstall::UninstallPlan,
+pub(crate) struct Planned {
+    pub program: Program,
+    pub plan: uninstall::UninstallPlan,
 }
 
 /// One entry of a batch: a program and its uninstaller, or a Store app the
 /// guard lets go.
 #[derive(Debug)]
-enum Step {
+pub(crate) enum Step {
     Program(Planned),
     Store(Package),
 }
@@ -445,7 +473,7 @@ impl Step {
 /// that matches nothing or several, any program without an uninstall
 /// command and any Store app the guard keeps stops the whole batch. The
 /// order is the order of the names; a program or app named twice runs once.
-fn plan_batch(
+pub(crate) fn plan_batch(
     programs: &[Program],
     packages: &[Package],
     targets: &[String],
@@ -518,7 +546,7 @@ fn kinds(programs: usize, apps: usize) -> String {
 }
 
 /// The same Uninstall entry: one id can exist in more than one hive or view.
-fn same_program(a: &Program, b: &Program) -> bool {
+pub(crate) fn same_program(a: &Program, b: &Program) -> bool {
     a.id() == b.id() && a.source == b.source
 }
 
@@ -951,7 +979,7 @@ fn run_uninstall(
 }
 
 /// Said before any Store app is removed, whatever the flags.
-const STORE_APP_WARNING: &str =
+pub(crate) const STORE_APP_WARNING: &str =
     "Removing a Store app deletes its data with it; reinstalling means the Store. \
      The removal itself cannot be backed up, only the leftovers found after it.";
 
@@ -1001,7 +1029,7 @@ fn package_head(app: &Package) -> String {
 }
 
 /// What removing the app does, in the place a program shows its uninstaller.
-fn package_command(app: &Package) -> String {
+pub(crate) fn package_command(app: &Package) -> String {
     format!("remove package {} for this user", app.full_name)
 }
 
@@ -1130,12 +1158,7 @@ fn run_package(
         } else {
             env.local_appdata.as_deref()
         };
-        let target = packages::scan_target(app);
-        let report = ScanReport {
-            program_name: name.clone(),
-            installed: false,
-            items: packages::leftovers(app, local, (env.scan_by_name)(&target)),
-        };
+        let report = store_app_leftovers(app, local, env.scan_by_name);
         if !g.json {
             render_report(&report);
         }
@@ -1158,9 +1181,24 @@ fn run_package(
     })
 }
 
+/// What a removed Store app leaves: its data folder under `local_appdata`
+/// when that is given, then what a scan by its names finds.
+pub(crate) fn store_app_leftovers(
+    app: &Package,
+    local_appdata: Option<&std::path::Path>,
+    scan_by_name: impl Fn(&ScanTarget) -> Vec<Leftover>,
+) -> ScanReport {
+    let target = packages::scan_target(app);
+    ScanReport {
+        program_name: app.display_name.clone(),
+        installed: false,
+        items: packages::leftovers(app, local_appdata, scan_by_name(&target)),
+    }
+}
+
 /// Remove a Store app after asking the guard once more against a fresh
 /// listing: a refused app never reaches the removal.
-fn remove_package(store: &dyn PackageStore, app: &Package) -> Result<RemovalOutcome> {
+pub(crate) fn remove_package(store: &dyn PackageStore, app: &Package) -> Result<RemovalOutcome> {
     let installed = store.list()?;
     if let Err(reason) = package_guard(app, &installed) {
         bail!("{}", kept(app, &reason));
@@ -1187,20 +1225,7 @@ fn cmd_trace(args: &TraceArgs, g: &Global) -> Result<()> {
     let matches = hunter::hunt(&args.query, &programs);
 
     if g.json && !args.uninstall {
-        let arr: Vec<_> = matches
-            .iter()
-            .map(|m| {
-                json!({
-                    "id": m.program.id(),
-                    "name": m.program.display_name,
-                    "publisher": m.program.publisher,
-                    "version": m.program.display_version,
-                    "score": m.score,
-                    "reason": m.reason,
-                })
-            })
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&arr)?);
+        println!("{}", serde_json::to_string_pretty(&trace_json(&matches))?);
         return Ok(());
     }
 
@@ -1268,6 +1293,23 @@ fn cmd_trace(args: &TraceArgs, g: &Global) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The programs `trace` found, best first, as `trace --json` prints them.
+pub(crate) fn trace_json(matches: &[hunter::HunterMatch]) -> serde_json::Value {
+    matches
+        .iter()
+        .map(|m| {
+            json!({
+                "id": m.program.id(),
+                "name": m.program.display_name,
+                "publisher": m.program.publisher,
+                "version": m.program.display_version,
+                "score": m.score,
+                "reason": m.reason,
+            })
+        })
+        .collect()
 }
 
 // orphans
@@ -1635,12 +1677,7 @@ fn remove_from_report(
     levels: &LevelOpts,
     g: &Global,
 ) -> Result<Option<DeletionOutcome>> {
-    let threshold = levels.threshold();
-    let selected: Vec<Leftover> = report
-        .all()
-        .filter(|l| l.confidence <= threshold)
-        .cloned()
-        .collect();
+    let selected = selected_leftovers(report, levels);
     if selected.is_empty() {
         if !g.json {
             println!();
@@ -1649,6 +1686,16 @@ fn remove_from_report(
         return Ok(None);
     }
     remove_items(&selected, label, g).map(Some)
+}
+
+/// The leftovers a removal at `levels` acts on.
+pub(crate) fn selected_leftovers(report: &ScanReport, levels: &LevelOpts) -> Vec<Leftover> {
+    let threshold = levels.threshold();
+    report
+        .all()
+        .filter(|l| l.confidence <= threshold)
+        .cloned()
+        .collect()
 }
 
 fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<DeletionOutcome> {
@@ -1753,7 +1800,7 @@ fn print_outcome(outcome: &DeletionOutcome) {
     }
 }
 
-fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Value {
+pub(crate) fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Value {
     match outcome {
         None => json!(null),
         Some(o) => json!({
@@ -1778,14 +1825,14 @@ fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Value {
 // program resolution
 // ------------------
 
-enum Resolve {
+pub(crate) enum Resolve {
     NotFound,
     Ambiguous(String),
 }
 
 /// A name `uninstall` acts on: a program or a Store app.
 #[derive(Debug, Clone, Copy)]
-enum Resolved<'a> {
+pub(crate) enum Resolved<'a> {
     Program(&'a Program),
     Store(&'a Package),
 }
@@ -1807,7 +1854,7 @@ fn resolve_target<'a>(
 /// unique part of a name. A name both kinds answer to equally well is
 /// ambiguous; neither wins. Store apps signed as part of Windows answer only
 /// to their exact id or name.
-fn resolve_any<'a>(
+pub(crate) fn resolve_any<'a>(
     programs: &'a [Program],
     packages: &'a [Package],
     target: &str,
@@ -2695,7 +2742,10 @@ mod tests {
         let engine = package("Vendor.Engine", "Engine");
         let mut studio = package("Vendor.Studio", "Studio");
         studio.dependencies = vec![engine.family_name.clone()];
-        let rows = store_rows(&FakePackageStore::new(vec![engine, studio]), false).unwrap();
+        let rows = store_rows(
+            &FakePackageStore::new(vec![engine, studio]).list().unwrap(),
+            false,
+        );
         let v = serde_json::to_value(&rows).unwrap();
         assert_eq!(v[0]["kind"], "store");
         assert_eq!(v[0]["family_name"], "Vendor.Engine_8wekyb3d8bbwe");
@@ -2740,14 +2790,14 @@ mod tests {
         shell.dependencies = vec![engine.family_name.clone()];
         let store = FakePackageStore::new(vec![engine, shell]);
 
-        let shown = store_rows(&store, false).unwrap();
+        let shown = store_rows(&store.list().unwrap(), false);
         assert_eq!(row_names(&shown), ["Engine"]);
         assert!(matches!(
             &shown[0],
             Listed::Store { protected: Some(Refusal::RequiredBy(by)), .. } if by == "Shell"
         ));
 
-        let all = store_rows(&store, true).unwrap();
+        let all = store_rows(&store.list().unwrap(), true);
         assert_eq!(row_names(&all), ["Engine", "Shell"]);
         assert!(matches!(
             &all[1],
@@ -2761,16 +2811,15 @@ mod tests {
     #[test]
     fn programs_and_store_apps_sort_filter_and_count_together() {
         let mut rows = vec![Listed::Program(program("Zed", "Zed", None))];
-        rows.extend(
-            store_rows(
-                &FakePackageStore::new(vec![
-                    package("Vendor.Notes", "Notes"),
-                    package("Microsoft.WindowsStore", "Microsoft Store"),
-                ]),
-                false,
-            )
+        rows.extend(store_rows(
+            &FakePackageStore::new(vec![
+                package("Vendor.Notes", "Notes"),
+                package("Microsoft.WindowsStore", "Microsoft Store"),
+            ])
+            .list()
             .unwrap(),
-        );
+            false,
+        ));
         rows.push(Listed::Program(program("brave", "brave", None)));
         sort_rows(&mut rows, SortKey::Name);
         assert_eq!(
