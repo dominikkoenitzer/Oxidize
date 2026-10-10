@@ -881,10 +881,20 @@ mod tests {
             "OldGame".to_string(),
             vec![folder(r"C:\Games\OldGame", Confidence::High, 70)],
         );
+        found.insert(
+            "Game Service".to_string(),
+            vec![Leftover::reg_key(
+                Hive::LocalMachine,
+                r"SOFTWARE\Game Service",
+                Confidence::High,
+                "the program's own key",
+            )],
+        );
         FakePc {
             programs: vec![
                 program("Example Player", "example-player"),
                 program("Brave", "BraveSoftware Brave-Browser"),
+                program("Game Service", "game-service"),
             ],
             apps: vec![package("Vendor.Notes", "Notes")],
             found,
@@ -950,7 +960,8 @@ mod tests {
         }
     }
 
-    /// Writes down what it is asked to do and does none of it.
+    /// Writes down what it is asked to do and does none of it. A machine-wide
+    /// item fails as it would without administrator rights.
     #[derive(Default)]
     struct Recorder {
         calls: Mutex<Vec<String>>,
@@ -982,16 +993,23 @@ mod tests {
             for l in items {
                 self.log(format!("remove {}", l.path));
             }
+            let denied = |l: &Leftover| l.hive == Some(Hive::LocalMachine);
+            let failed = items.iter().filter(|l| denied(l)).count();
             Ok(DeletionOutcome {
                 attempted: items.len(),
-                deleted: items.len(),
+                deleted: items.len() - failed,
+                failed,
                 backup_name: Some(format!("2026-10-10_150000_{label}")),
                 items: items
                     .iter()
                     .map(|l| ItemOutcome {
                         path: l.path.clone(),
                         kind: l.kind,
-                        status: ItemStatus::Removed,
+                        status: if denied(l) {
+                            ItemStatus::Failed("access denied".to_string())
+                        } else {
+                            ItemStatus::Removed
+                        },
                     })
                     .collect(),
                 ..DeletionOutcome::default()
@@ -1333,6 +1351,32 @@ mod tests {
             .await;
         assert_eq!(again["isError"], true, "{again}");
         assert_eq!(recorder.calls().len(), 4, "a plan runs once");
+    }
+
+    #[tokio::test]
+    async fn an_item_that_needs_administrator_rights_comes_back_with_the_command_for_it() {
+        let (server, _) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call("plan_removal", json!({ "programs": ["Game Service"] }))
+            .await;
+        assert_eq!(plan["structuredContent"]["needs_admin"], true, "{plan}");
+        let id = plan_id(&plan);
+
+        let done = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        let result = &done["structuredContent"];
+        assert_eq!(result["failed"], 1, "{done}");
+        let step = &result["steps"][0];
+        assert_eq!(step["failed"], true);
+        assert_eq!(step["removal"]["items"][0]["status"], "failed");
+        assert_eq!(step["removal"]["items"][0]["error"], "access denied");
+        assert_eq!(step["needs_admin"], true);
+        assert_eq!(
+            step["admin_command"],
+            "oxidize scan \"Game Service\" --remove --elevate"
+        );
     }
 
     #[tokio::test]
