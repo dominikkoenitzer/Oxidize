@@ -539,6 +539,8 @@ pub fn running_exes() -> Vec<PathBuf> {
 }
 
 /// Every running process with a known image path.
+/// This process and the ones that started it are never listed: ending the
+/// terminal or the run that waits for an elevated one would lose the result.
 pub fn running_processes() -> Vec<crate::complete::Running> {
     let mut sys = System::new();
     sys.refresh_processes_specifics(
@@ -546,8 +548,15 @@ pub fn running_processes() -> Vec<crate::complete::Running> {
         true,
         ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
     );
+    let parents: std::collections::HashMap<u32, u32> = sys
+        .processes()
+        .iter()
+        .filter_map(|(pid, p)| p.parent().map(|parent| (pid.as_u32(), parent.as_u32())))
+        .collect();
+    let spared = lineage(std::process::id(), &parents);
     sys.processes()
         .iter()
+        .filter(|(pid, _)| !spared.contains(&pid.as_u32()))
         .filter_map(|(pid, p)| {
             p.exe().map(|exe| crate::complete::Running {
                 pid: pid.as_u32(),
@@ -555,6 +564,21 @@ pub fn running_processes() -> Vec<crate::complete::Running> {
             })
         })
         .collect()
+}
+
+/// `pid` and its parents, grandparents and so on. Windows reuses process
+/// ids, so a loop is cut off instead of followed.
+fn lineage(pid: u32, parents: &std::collections::HashMap<u32, u32>) -> Vec<u32> {
+    let mut out = vec![pid];
+    let mut at = pid;
+    while let Some(&parent) = parents.get(&at) {
+        if parent == 0 || out.contains(&parent) || out.len() >= 64 {
+            break;
+        }
+        out.push(parent);
+        at = parent;
+    }
+    out
 }
 
 /// Ask each process to close its windows, give them all `grace` together,
@@ -568,7 +592,9 @@ pub fn close_processes(
     use crate::complete::{CloseHow, Closed};
     use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+        OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
+        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        PROCESS_TERMINATE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
@@ -597,8 +623,30 @@ pub fn close_processes(
     let mut handles = Vec::new();
     for p in procs {
         let exe = p.exe.display().to_string();
-        match unsafe { OpenProcess(PROCESS_TERMINATE | PROCESS_SYNCHRONIZE, false, p.pid) } {
+        let access = PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+        match unsafe { OpenProcess(access, false, p.pid) } {
             Ok(h) => {
+                // The id may belong to another program by now: Windows
+                // reuses them. Only the image that was picked is touched.
+                let mut buf = [0u16; 1024];
+                let mut len = buf.len() as u32;
+                let image = unsafe {
+                    QueryFullProcessImageNameW(
+                        h,
+                        PROCESS_NAME_WIN32,
+                        windows::core::PWSTR(buf.as_mut_ptr()),
+                        &mut len,
+                    )
+                }
+                .ok()
+                .map(|()| String::from_utf16_lossy(&buf[..len as usize]));
+                let same = image
+                    .as_deref()
+                    .is_some_and(|i| same_image(Path::new(i), &p.exe));
+                if !same {
+                    let _ = unsafe { CloseHandle(h) };
+                    continue;
+                }
                 let mut ask = Ask {
                     pid: p.pid,
                     windows: 0,
@@ -656,6 +704,11 @@ pub fn close_processes(
     out
 }
 
+/// The same executable, whatever the case of the path.
+fn same_image(a: &Path, b: &Path) -> bool {
+    a.as_os_str().eq_ignore_ascii_case(b.as_os_str())
+}
+
 #[cfg(not(windows))]
 pub fn close_processes(
     _procs: &[crate::complete::Running],
@@ -709,6 +762,19 @@ mod tests {
         // A path with a folder is not looked up.
         assert_eq!(find(r"C:\Elsewhere\tool.exe"), None);
         assert_eq!(find(r"bin\tool.exe"), None);
+    }
+
+    #[test]
+    fn this_process_and_its_parents_are_spared() {
+        let parents = std::collections::HashMap::from([(30, 20), (20, 10), (10, 0), (40, 30)]);
+        assert_eq!(lineage(30, &parents), [30, 20, 10]);
+        // A reused id that points back down is cut off.
+        let looped = std::collections::HashMap::from([(5, 6), (6, 5)]);
+        assert_eq!(lineage(5, &looped), [5, 6]);
+        assert!(same_image(
+            Path::new(r"C:\Apps\Example\player.exe"),
+            Path::new(r"c:\apps\EXAMPLE\Player.exe")
+        ));
     }
 
     #[test]
