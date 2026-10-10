@@ -22,6 +22,8 @@ pub struct UninstallPlan {
     pub is_msi: bool,
     /// Where the command came from.
     pub source: String,
+    /// The command runs without asking anything.
+    pub unattended: bool,
 }
 
 impl UninstallPlan {
@@ -66,12 +68,17 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
             argv,
             is_msi: true,
             source: "MSI product code".to_string(),
+            unattended: silent,
         });
     }
 
     let (raw, source) = if silent {
         match (&program.quiet_uninstall_string, &program.uninstall_string) {
             (Some(q), _) => (q.clone(), "QuietUninstallString".to_string()),
+            (None, Some(u)) if inno_uninstaller(u) => (
+                format!("{u} {INNO_SILENT}"),
+                "UninstallString with Inno Setup's silent switches".to_string(),
+            ),
             (None, Some(u)) => (u.clone(), "UninstallString, no quiet variant".to_string()),
             (None, None) => bail!("no uninstall command recorded for this program"),
         }
@@ -87,11 +94,28 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
     if argv.first().is_none_or(|exe| exe.trim().is_empty()) {
         bail!("uninstall command parsed to nothing: {raw:?}");
     }
+    let unattended = silent && (program.quiet_uninstall_string.is_some() || inno_uninstaller(&raw));
     Ok(UninstallPlan {
         argv,
         is_msi: false,
         source,
+        unattended,
     })
+}
+
+/// What an Inno Setup uninstaller takes to run without a window or a question.
+const INNO_SILENT: &str = "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART";
+
+/// Inno Setup names its uninstaller `unins000.exe` (the digits count up when
+/// several installs share a folder) and documents the silent switches, so it
+/// runs unattended even when no quiet command was recorded.
+fn inno_uninstaller(command: &str) -> bool {
+    let argv = util::split_uninstall_command(&util::expand_env_vars(command));
+    let Some(base) = argv.first().and_then(|exe| util::file_basename_lower(exe)) else {
+        return false;
+    };
+    let stem = base.strip_suffix(".exe").unwrap_or(&base);
+    stem.len() == 8 && stem.starts_with("unins") && stem[5..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Launch the plan and wait for the spawned process to exit.
@@ -194,6 +218,60 @@ pub fn describe_exit(status: ExitStatus, is_msi: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn program(uninstall: &str, quiet: Option<&str>) -> Program {
+        use crate::model::{Hive, RegistrySource, RegistryView};
+        Program {
+            registry_key: "app_is1".to_string(),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: "App".to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: Some(uninstall.to_string()),
+            quiet_uninstall_string: quiet.map(str::to_string),
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    #[test]
+    fn an_inno_setup_uninstaller_gets_its_silent_switches() {
+        let p = program(r#""C:\Apps\App\unins000.exe""#, None);
+        let silent = plan(&p, true).unwrap();
+        assert!(silent.unattended);
+        assert_eq!(
+            silent.argv,
+            [
+                r"C:\Apps\App\unins000.exe",
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART"
+            ]
+        );
+        // Not asked for silence: the command as recorded.
+        let asked = plan(&p, false).unwrap();
+        assert!(!asked.unattended);
+        assert_eq!(asked.argv, [r"C:\Apps\App\unins000.exe"]);
+    }
+
+    #[test]
+    fn only_a_known_quiet_command_counts_as_unattended() {
+        let other = program(r"C:\Apps\App\uninstall.exe", None);
+        assert!(!plan(&other, true).unwrap().unattended);
+        let quiet = program(
+            r"C:\Apps\App\uninstall.exe",
+            Some(r"C:\Apps\App\uninstall.exe /S"),
+        );
+        assert!(plan(&quiet, true).unwrap().unattended);
+        assert!(!inno_uninstaller(r"C:\Apps\unins.exe"));
+        assert!(!inno_uninstaller(r"C:\Apps\uninstaller.exe"));
+        assert!(inno_uninstaller(r"C:\Apps\unins001.exe /LOG"));
+    }
 
     #[test]
     fn recognises_product_guids() {
