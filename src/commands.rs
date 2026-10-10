@@ -1222,6 +1222,18 @@ impl complete::Pc for CliPc<'_> {
                 items: items.to_vec(),
             });
         }
+        if self.g.dry_run {
+            // The list above already says what would go and why.
+            let outcome = safety::remove_leftovers(items, label, &self.g.safety())?;
+            if !self.g.json {
+                println!();
+                println!(
+                    "{}",
+                    term::dim(&format!("dry run: {} items would be removed", items.len()))
+                );
+            }
+            return Ok(outcome);
+        }
         remove_items(items, label, self.g)
     }
 
