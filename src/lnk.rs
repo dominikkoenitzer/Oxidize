@@ -38,12 +38,16 @@ pub fn target_of(path: &Path) -> Option<PathBuf> {
 /// The same, from the bytes of a shortcut.
 /// The Unicode base path wins over the ANSI one, and a common path suffix is
 /// appended. Network-only links and malformed input give `None`.
+/// `ForceNoLinkInfo`: the location part is to be ignored.
+const FORCE_NO_LINK_INFO: u32 = 0x100;
+
 pub fn parse_target(bytes: &[u8]) -> Option<PathBuf> {
     if read_len(bytes, 0)? != HEADER_LEN || bytes.get(4..20)? != LINK_CLSID {
         return None;
     }
     let flags = read_u32(bytes, 20)?;
-    if flags & HAS_LINK_INFO == 0 {
+    // Windows ignores the location part when the link says so; so do we.
+    if flags & HAS_LINK_INFO == 0 || flags & FORCE_NO_LINK_INFO != 0 {
         return None;
     }
     let mut start = HEADER_LEN;
