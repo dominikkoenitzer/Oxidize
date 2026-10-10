@@ -111,6 +111,11 @@ pub struct UninstallArgs {
     #[arg(long)]
     pub keep: bool,
 
+    /// Always run the program's own uninstaller, also when Oxidize can
+    /// remove a program installed for this user alone.
+    #[arg(long)]
+    pub use_uninstaller: bool,
+
     #[command(flatten)]
     pub levels: LevelOpts,
 }

@@ -20,7 +20,9 @@ use crate::packages::{
     self, package_guard, PackageStore, Refusal, RemovalOutcome, WindowsPackageStore,
 };
 use crate::safety::{DeletionOutcome, ItemStatus, SafetyContext};
-use crate::{hunter, orphans, registry, restore, safety, scanner, term, uninstall, util};
+use crate::{
+    complete, hunter, orphans, registry, restore, safety, scanner, system, term, uninstall, util,
+};
 
 struct Global {
     dry_run: bool,
@@ -423,6 +425,13 @@ fn print_remove_hint(high: usize, command: &str) {
 // ---------
 
 fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
+    // Nobody is there to click through an uninstaller's pages.
+    let silent = args.silent || g.yes || g.json;
+    let how = How {
+        silent,
+        keep: args.keep,
+        use_uninstaller: args.use_uninstaller,
+    };
     let programs = registry::enumerate_installed_programs(true);
     let env = StoreEnv::windows();
     let packages = installed_store_apps(env.store, g);
@@ -430,7 +439,7 @@ fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
         return match resolve_any(&programs, &packages, target) {
             Ok(Resolved::Program(program)) => {
                 let program = program.clone();
-                uninstall_program(&program, args.silent, args.keep, &args.levels, g)
+                uninstall_program(&program, &how, &args.levels, g)
             }
             Ok(Resolved::Store(app)) => {
                 if let Err(reason) = package_guard(app, &packages) {
@@ -442,8 +451,18 @@ fn cmd_uninstall(args: &UninstallArgs, g: &Global) -> Result<()> {
             Err(Resolve::Ambiguous(msg)) => bail!("{msg}"),
         };
     }
-    let batch = plan_batch(&programs, &packages, &args.targets, args.silent)?;
-    uninstall_batch(&env, &batch, args.keep, &args.levels, g)
+    let batch = plan_batch(&programs, &packages, &args.targets, silent)?;
+    uninstall_batch(&env, &batch, &how, &args.levels, g)
+}
+
+/// How `uninstall` goes about a program.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct How {
+    pub silent: bool,
+    /// Show the leftovers but remove nothing.
+    pub keep: bool,
+    /// Run the vendor's uninstaller even when Oxidize could do without it.
+    pub use_uninstaller: bool,
 }
 
 /// A program of a batch with the command that uninstalls it.
@@ -557,10 +576,11 @@ pub(crate) fn same_program(a: &Program, b: &Program) -> bool {
 fn uninstall_batch(
     env: &StoreEnv,
     batch: &[Step],
-    keep: bool,
+    how: &How,
     levels: &LevelOpts,
     g: &Global,
 ) -> Result<()> {
+    let keep = how.keep;
     // Capture every footprint before the first uninstaller runs: one of them
     // may take a later program along.
     let targets: Vec<Option<ScanTarget>> = batch
@@ -662,7 +682,7 @@ fn uninstall_batch(
                 // An earlier uninstaller may have taken this one along; its
                 // own would then fail or run on a half-removed install.
                 let already_gone = !g.dry_run && !uninstall::still_installed(&b.program);
-                run_uninstall(&b.program, &target, &b.plan, already_gone, keep, levels, g)
+                run_uninstall(&b.program, &target, &b.plan, already_gone, how, levels, g)
                     .unwrap_or_else(|e| ProgramRun::stopped(&b.program, &b.plan, failed(e)))
             }
             Step::Store(app) => {
@@ -762,23 +782,22 @@ fn print_batch_summary(runs: &[ProgramRun], dry_run: bool) {
 
 /// Uninstall, then scan and offer to remove the leftovers. Shared with
 /// `trace --uninstall`.
-fn uninstall_program(
-    program: &Program,
-    silent: bool,
-    keep: bool,
-    levels: &LevelOpts,
-    g: &Global,
-) -> Result<()> {
+fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Global) -> Result<()> {
     // Capture the footprint before the entry disappears.
     let target = scanner::build_target(program);
-    let plan = uninstall::plan(program, silent)?;
+    let plan = uninstall::plan(program, how.silent)?;
 
     if !g.json {
         println!("{}", program_head(program));
         println!("  {}", term::dim(&plan.display()));
     }
 
-    if !g.dry_run && !g.confirm("Run the uninstaller?", true) {
+    let question = if how.keep {
+        "Run the uninstaller?"
+    } else {
+        "Remove it completely? Running copies are closed first."
+    };
+    if !g.dry_run && !g.confirm(question, true) {
         if g.json {
             let json_out = json!({ "kind": "program", "program": program, "command": plan.display(), "cancelled": true });
             println!("{}", serde_json::to_string_pretty(&json_out)?);
@@ -788,9 +807,12 @@ fn uninstall_program(
         return Ok(());
     }
 
-    let run = run_uninstall(program, &target, &plan, false, keep, levels, g)?;
+    let run = run_uninstall(program, &target, &plan, false, how, levels, g)?;
     if g.json {
         println!("{}", serde_json::to_string_pretty(&run.json)?);
+    }
+    if run.failed(g.dry_run) {
+        bail!("{}", run.why_failed());
     }
     Ok(())
 }
@@ -822,6 +844,8 @@ struct ProgramRun {
     removal: Option<DeletionOutcome>,
     /// Why the uninstall stopped, when it did.
     error: Option<String>,
+    /// Items at the chosen level the second scan still found.
+    left: usize,
 }
 
 impl ProgramRun {
@@ -834,6 +858,7 @@ impl ProgramRun {
             found: 0,
             removal: None,
             error: Some(error),
+            left: 0,
         }
     }
 
@@ -846,15 +871,32 @@ impl ProgramRun {
             found: 0,
             removal: None,
             error: Some(error),
+            left: 0,
         }
     }
 
-    /// An error, an entry still registered after its uninstaller, or a
-    /// leftover that could not be removed.
+    /// An error, an entry still registered after its uninstaller, a
+    /// leftover that could not be removed or one the second scan still found.
     fn failed(&self, dry_run: bool) -> bool {
         self.error.is_some()
             || (!dry_run && !self.gone)
             || self.removal.as_ref().is_some_and(|o| o.failed > 0)
+            || (!dry_run && self.left > 0)
+    }
+
+    /// One line on why a run counts as failed.
+    fn why_failed(&self) -> String {
+        if let Some(e) = &self.error {
+            return e.clone();
+        }
+        if !self.gone {
+            return format!("{} is still installed", self.name);
+        }
+        let failed = self.removal.as_ref().map_or(0, |o| o.failed);
+        if failed > 0 {
+            return format!("{failed} items of {} could not be removed", self.name);
+        }
+        format!("{} items of {} are still there", self.left, self.name)
     }
 
     fn state(&self, dry_run: bool) -> &'static str {
@@ -896,16 +938,256 @@ impl ProgramRun {
     }
 }
 
-/// Run a confirmed plan, wait for it, then scan and offer to remove the
-/// leftovers. `target` is the footprint captured before anything ran. A
-/// program that is `already_gone` goes straight to its leftovers.
+/// Run a confirmed plan the complete way: close what runs from the
+/// program's folders, run its uninstaller only when Oxidize cannot do without
+/// it, remove the leftovers at `levels` and scan again. `target` is the
+/// footprint captured before anything ran.
 fn run_uninstall(
     program: &Program,
     target: &ScanTarget,
     plan: &uninstall::UninstallPlan,
     already_gone: bool,
-    keep: bool,
+    how: &How,
     levels: &LevelOpts,
+    g: &Global,
+) -> Result<ProgramRun> {
+    if how.keep {
+        return run_uninstall_keep(program, target, plan, already_gone, g);
+    }
+    let name = &program.display_name;
+    let level = levels.threshold();
+    // An uninstaller someone clicks through gets the time it needs.
+    let wait = if plan.unattended || g.yes || g.json {
+        complete::VENDOR_WAIT
+    } else {
+        Duration::from_secs(120)
+    };
+    let pc = CliPc { g, wait };
+    let opts = complete::Options {
+        level,
+        dry_run: g.dry_run,
+        use_uninstaller: how.use_uninstaller,
+    };
+    let out = complete::remove_completely(&pc, program, target, plan, &opts);
+    let v = &out.verdict;
+
+    let mut json_out = json!({
+        "kind": "program",
+        "program": program,
+        "command": plan.display(),
+        "uninstaller_step": out.vendor,
+        "level": level.label(),
+        "report": out.report,
+        "seconds": (out.seconds * 10.0).round() / 10.0,
+    });
+    if g.dry_run {
+        json_out["would_close"] = json!(out.would_close);
+        json_out["would_remove"] = json!(out.selected);
+    } else {
+        json_out["closed"] = json!(out.closed);
+        json_out["uninstaller"] = match (&out.vendor, &out.uninstaller) {
+            (complete::VendorStep::Skip { reason }, _) => json!(format!("skipped, {reason}")),
+            (_, Some(how)) => json!(how),
+            (_, None) => json!(null),
+        };
+        json_out["still_installed"] = json!(v.still_installed);
+        json_out["remaining"] = json!(v.remaining);
+        json_out["below_level"] = json!(v.below_level);
+        json_out["nothing_left"] = json!(out.complete());
+    }
+    if out.removal.is_some() {
+        json_out["removal"] = removal_json(&out.removal);
+    }
+    if let Some(e) = &out.error {
+        json_out["error"] = json!(e);
+    }
+
+    if !g.json {
+        print_complete(name, &out, g.dry_run);
+    }
+    Ok(ProgramRun {
+        name: name.clone(),
+        json: json_out,
+        gone: !g.dry_run && !v.still_installed,
+        found: out.report.total(),
+        removal: out.removal.clone(),
+        error: out.error.clone(),
+        left: v.remaining.len(),
+    })
+}
+
+/// The end of a complete removal in words.
+fn print_complete(name: &str, out: &complete::Outcome, dry_run: bool) {
+    let v = &out.verdict;
+    if dry_run {
+        if !out.would_close.is_empty() {
+            println!();
+            println!("{}", term::dim("would close"));
+            for p in &out.would_close {
+                println!("  {}", p.exe.display());
+            }
+        }
+        return;
+    }
+    for c in out
+        .closed
+        .iter()
+        .filter(|c| c.how == complete::CloseHow::Failed)
+    {
+        term::warn(&format!(
+            "could not close {}: {}",
+            c.exe,
+            c.error.as_deref().unwrap_or("unknown error")
+        ));
+    }
+    if let Some(e) = &out.error {
+        term::error(e);
+    }
+    println!();
+    if out.complete() {
+        println!(
+            "{}  {}",
+            term::green("Nothing left."),
+            term::dim(&format!("{:.1} s", out.seconds))
+        );
+    } else if v.still_installed {
+        term::warn(&format!(
+            "{name} is still registered. The uninstaller may have been cancelled or is still running."
+        ));
+    }
+    if !v.remaining.is_empty() {
+        println!("{}", term::bold("Still there"));
+        print_items(&v.remaining, true);
+    }
+    if v.below_level > 0 {
+        println!(
+            "{}",
+            term::dim(&format!(
+                "{} lower-confidence items were kept; add --medium or --all to include them",
+                v.below_level
+            ))
+        );
+    }
+    if let Some(backup) = out.removal.as_ref().and_then(|o| o.backup_name.as_ref()) {
+        println!(
+            "{}",
+            term::dim(&format!("Undo: oxidize restore \"{backup}\""))
+        );
+    }
+}
+
+/// This PC for the command line: says what it does as it goes and asks
+/// before it removes anything, unless told yes.
+struct CliPc<'a> {
+    g: &'a Global,
+    wait: Duration,
+}
+
+impl complete::Pc for CliPc<'_> {
+    fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
+        scanner::scan(target, installed)
+    }
+
+    fn still_installed(&self, program: &Program) -> bool {
+        uninstall::still_installed(program)
+    }
+
+    fn running(&self) -> Vec<complete::Running> {
+        system::running_processes()
+    }
+
+    fn close(&self, procs: &[complete::Running]) -> Vec<complete::Closed> {
+        if !self.g.json {
+            let n = procs.len();
+            println!(
+                "Closing {n} running {}.",
+                if n == 1 { "process" } else { "processes" }
+            );
+        }
+        system::close_processes(procs, complete::CLOSE_GRACE)
+    }
+
+    fn run_uninstaller(&self, plan: &uninstall::UninstallPlan) -> Result<String> {
+        // With --json our output is the result; the uninstaller gets none.
+        let status = if self.g.json {
+            uninstall::run_with(
+                plan,
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+            )?
+        } else {
+            uninstall::run(plan)?
+        };
+        let described = uninstall::describe_exit(status, plan.is_msi);
+        if !self.g.json {
+            println!("Uninstaller {described}.");
+        }
+        Ok(described)
+    }
+
+    fn wait_until_gone(&self, program: &Program, plan: &uninstall::UninstallPlan) -> bool {
+        if !self.g.json && !plan.is_msi && uninstall::still_installed(program) {
+            println!("{}", term::dim("waiting for the uninstaller to finish"));
+        }
+        let gone = uninstall::wait_for_completion(program, plan, self.wait);
+        if !self.g.json && gone {
+            println!("{} is no longer registered.", program.display_name);
+        }
+        gone
+    }
+
+    fn remove(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome> {
+        if !self.g.json {
+            render_report(&ScanReport {
+                program_name: label.to_string(),
+                installed: false,
+                items: items.to_vec(),
+            });
+        }
+        remove_items(items, label, self.g)
+    }
+
+    fn machine_dirs(&self) -> Vec<PathBuf> {
+        complete::machine_dirs()
+    }
+
+    fn decided(&self, vendor: &complete::VendorStep) {
+        if self.g.json || self.g.dry_run {
+            if !self.g.json {
+                let line = match vendor {
+                    complete::VendorStep::Run { .. } => "dry run: the uninstaller would run",
+                    complete::VendorStep::Skip { .. } => {
+                        "dry run: the uninstaller would be skipped"
+                    }
+                };
+                println!("{}", term::dim(line));
+            }
+            return;
+        }
+        match vendor {
+            complete::VendorStep::Skip { reason } => {
+                println!("{}", term::dim(&format!("Uninstaller skipped: {reason}.")));
+            }
+            complete::VendorStep::Run { silent, .. } => {
+                if !silent {
+                    println!(
+                        "{}",
+                        term::dim("The uninstaller may ask questions in its own window.")
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// `--keep`: run a confirmed plan, wait for it, then scan and show the
+/// leftovers without removing them. A program that is `already_gone` goes
+/// straight to its leftovers.
+fn run_uninstall_keep(
+    program: &Program,
+    target: &ScanTarget,
+    plan: &uninstall::UninstallPlan,
+    already_gone: bool,
     g: &Global,
 ) -> Result<ProgramRun> {
     let name = &program.display_name;
@@ -954,28 +1236,14 @@ fn run_uninstall(
     }
     json_out["report"] = json!(report);
 
-    let mut removal = None;
-    if !report.is_empty() && !keep {
-        if installed {
-            if !g.json {
-                println!();
-                println!(
-                    "{}",
-                    term::dim("Leftovers are not removed while the program is still registered.")
-                );
-            }
-        } else {
-            removal = remove_from_report(&report, name, levels, g)?;
-            json_out["removal"] = removal_json(&removal);
-        }
-    }
     Ok(ProgramRun {
         name: name.clone(),
         json: json_out,
         gone,
         found: report.total(),
-        removal,
+        removal: None,
         error: None,
+        left: 0,
     })
 }
 
@@ -1179,6 +1447,7 @@ fn run_package(
         found: report.total(),
         removal,
         error: None,
+        left: 0,
     })
 }
 
@@ -1282,7 +1551,12 @@ fn cmd_trace(args: &TraceArgs, g: &Global) -> Result<()> {
             println!();
         }
         let program = best.program.clone();
-        uninstall_program(&program, args.silent, args.keep, &args.levels, g)?;
+        let how = How {
+            silent: args.silent || g.yes || g.json,
+            keep: args.keep,
+            use_uninstaller: false,
+        };
+        uninstall_program(&program, &how, &args.levels, g)?;
     } else if !g.json {
         println!();
         println!(
@@ -2167,6 +2441,7 @@ mod tests {
             found,
             removal,
             error: None,
+            left: 0,
         }
     }
 
@@ -2489,7 +2764,14 @@ mod tests {
         let env = fake_env(&store, None);
         let batch: Vec<Step> = notes_and_paint().into_iter().map(Step::Store).collect();
         let levels = LevelOpts::default();
-        uninstall_batch(&env, &batch, false, &levels, &unattended(true, false)).unwrap();
+        uninstall_batch(
+            &env,
+            &batch,
+            &How::default(),
+            &levels,
+            &unattended(true, false),
+        )
+        .unwrap();
         uninstall_package(
             &env,
             &notes_and_paint()[0],
@@ -2520,7 +2802,10 @@ mod tests {
         let err = uninstall_batch(
             &env,
             &batch,
-            true,
+            &How {
+                keep: true,
+                ..How::default()
+            },
             &LevelOpts::default(),
             &unattended(false, false),
         )
@@ -2551,7 +2836,11 @@ mod tests {
         assert_eq!(stopped.json["program"]["family_name"], notes.family_name);
 
         let batch: Vec<Step> = notes_and_paint().into_iter().map(Step::Store).collect();
-        let err = uninstall_batch(&env, &batch, true, &levels, &g).unwrap_err();
+        let keep = How {
+            keep: true,
+            ..How::default()
+        };
+        let err = uninstall_batch(&env, &batch, &keep, &levels, &g).unwrap_err();
         assert_eq!(
             format!("{err:#}"),
             "2 of 2 Store apps did not uninstall cleanly"
