@@ -17,6 +17,8 @@ use crate::registry;
 use crate::system;
 use crate::util::{self, normalize, significant_tokens};
 
+mod links;
+
 /// Top-level folder names that are never reported (OS and shared).
 const FS_DENY: &[&str] = &[
     "microsoft",
@@ -1492,8 +1494,10 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         Box::new(move || scan_registry(target, installed)),
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
+        Box::new(move || links::scan_link_handlers(target)),
     ];
-    let items = run_all(phases).into_iter().flatten().collect();
+    let mut items = run_all(phases).into_iter().flatten().collect();
+    dedupe_by_path(&mut items);
     ScanReport {
         program_name: target.display_name.clone(),
         installed,
