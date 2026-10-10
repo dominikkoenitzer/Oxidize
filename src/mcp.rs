@@ -566,8 +566,11 @@ fn apply_step(
             out["kind"] = json!("leftovers");
             let programs = m.programs(true);
             match commands::scan_subject(&programs, Vec::new, &name) {
+                Ok(None) => Ok(true),
                 Ok(Some(_)) => Err(anyhow!("{name} is installed now. Plan its removal again.")),
-                _ => Ok(true),
+                Err(e) => Err(e.context(format!(
+                    "{name} now answers to an installed program, so nothing was removed. Plan again"
+                ))),
             }
         }
     };
