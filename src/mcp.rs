@@ -29,9 +29,9 @@ use serde_json::{json, Value};
 use crate::backup::BackupInfo;
 use crate::cli::{LevelOpts, ListArgs, SortKey};
 use crate::commands::{self, Planned, Resolved, Step};
-use crate::complete::{self, Closed, Running};
+use crate::complete::{self, Closed, Running, VendorStep};
 use crate::hunter::HunterMatch;
-use crate::model::{Group, Leftover, Package, Program, ScanReport, ScanTarget};
+use crate::model::{Confidence, Group, Leftover, Package, Program, ScanReport, ScanTarget};
 use crate::orphans::OrphanReport;
 use crate::safety::{self, DeletionOutcome, ItemStatus};
 use crate::uninstall::UninstallPlan;
@@ -56,6 +56,8 @@ pub trait Inspect: Send + Sync {
     fn is_elevated(&self) -> bool;
     /// Every running process with a known image.
     fn running(&self) -> Vec<Running>;
+    /// The machine-wide folders, which need administrator rights.
+    fn machine_dirs(&self) -> Vec<PathBuf>;
 }
 
 /// The one way the server changes anything: carrying out an approved plan.
@@ -239,11 +241,12 @@ fn list_backups(m: &dyn Inspect) -> Result<Value> {
 /// One entry of a removal plan, with what carrying it out needs.
 #[derive(Debug, Clone)]
 enum PlanStep {
-    /// Close what runs from the program's folders, run its uninstaller,
-    /// then remove the leftovers listed.
+    /// Close what runs from the program's folders, run its uninstaller
+    /// unless `vendor` skips it, then remove the leftovers listed.
     Program {
         program: Box<Program>,
         uninstaller: UninstallPlan,
+        vendor: VendorStep,
         target: ScanTarget,
         leftovers: Vec<Leftover>,
     },
@@ -312,15 +315,27 @@ fn make_plan(m: &dyn Inspect, p: &PlanParams) -> Result<RemovalPlan> {
 
     let mut steps = Vec::new();
     if !installed.is_empty() {
+        let machine_dirs = m.machine_dirs();
         for step in commands::plan_batch(&programs, &packages, &installed, p.silent)? {
             steps.push(match step {
                 Step::Program(Planned { program, plan }) => {
                     let target = m.target(&program);
+                    // Scanned as if gone, so its own uninstall entry is listed.
                     let report = m.scan(&target, false);
+                    let leftovers = commands::selected_leftovers(&report, &levels);
+                    let vendor = vendor_step(
+                        &program,
+                        &plan,
+                        &target,
+                        &report.items,
+                        &leftovers,
+                        &machine_dirs,
+                    );
                     PlanStep::Program {
-                        leftovers: commands::selected_leftovers(&report, &levels),
+                        leftovers,
                         program: Box::new(program),
                         uninstaller: plan,
+                        vendor,
                         target,
                     }
                 }
@@ -354,6 +369,52 @@ fn make_plan(m: &dyn Inspect, p: &PlanParams) -> Result<RemovalPlan> {
         level: p.level,
         commands,
     })
+}
+
+/// The program's own uninstall entry, as a leftover.
+fn own_entry(program: &Program) -> Leftover {
+    Leftover::reg_key(
+        program.source.hive,
+        format!(
+            "{}\\{}",
+            program.source.view.uninstall_base(),
+            program.registry_key
+        ),
+        Confidence::High,
+        "orphaned uninstall entry",
+    )
+}
+
+/// Whether the program's uninstaller runs. Skipping it needs the program's
+/// own uninstall entry among the leftovers, or it would stay registered.
+fn vendor_step(
+    program: &Program,
+    plan: &UninstallPlan,
+    target: &ScanTarget,
+    footprint: &[Leftover],
+    leftovers: &[Leftover],
+    machine_dirs: &[PathBuf],
+) -> VendorStep {
+    let step = complete::vendor_step(program, plan, target, footprint, machine_dirs);
+    let entry = own_entry(program).path;
+    if step.runs()
+        || leftovers
+            .iter()
+            .any(|l| l.path.eq_ignore_ascii_case(&entry))
+    {
+        return step;
+    }
+    VendorStep::Run {
+        silent: complete::runs_silently(program, plan),
+        reason: "its uninstall entry was not found".to_string(),
+    }
+}
+
+/// Whether the program is still in the Uninstall list.
+fn registered(m: &dyn Inspect, program: &Program) -> bool {
+    m.programs(true)
+        .iter()
+        .any(|p| commands::same_program(p, program))
 }
 
 /// Close the processes that run from a step's folders. Returns what was
@@ -444,6 +505,7 @@ fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
                 PlanStep::Program {
                     program,
                     uninstaller,
+                    vendor,
                     ..
                 } => json!({
                     "kind": "program",
@@ -451,6 +513,7 @@ fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
                     "id": program.id(),
                     "uninstaller": uninstaller.display(),
                     "uninstaller_source": uninstaller.source,
+                    "uninstaller_step": vendor,
                 }),
                 PlanStep::Store { app, .. } => json!({
                     "kind": "store",
@@ -484,9 +547,10 @@ fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
         "needs_admin": safety::needs_elevation(&all),
         "elevated": m.is_elevated(),
         "backup_folder": m.backups_folder(),
-        "how": "Running copies of each program are closed first, then each uninstaller runs in turn \
-    and Oxidize waits up to two minutes for it to finish. Then exactly the leftovers listed are \
-    removed, each one backed up first. Nothing else is touched.",
+        "how": "Running copies of each program are closed first. A program installed for this user \
+    only, with nothing machine-wide, is removed by Oxidize alone, its uninstall entry included; any \
+    other uninstaller runs in turn and Oxidize waits up to two minutes for it to finish. Then exactly \
+    the leftovers listed are removed, each one backed up first. Nothing else is touched.",
         "apply": "apply_removal_plan with this plan_id, once the user agrees",
         "commands": plan.commands,
     })
@@ -556,17 +620,18 @@ fn apply_step(
         PlanStep::Program {
             program,
             uninstaller,
+            vendor,
             target,
             leftovers,
         } => {
             out["kind"] = json!("program");
             out["closed"] = json!(close_running(m, r, target, leftovers));
-            let registered = m
-                .programs(true)
-                .iter()
-                .any(|p| commands::same_program(p, program));
-            if !registered {
+            if !registered(m, program) {
                 out["uninstaller"] = json!("not started, no longer registered");
+                Ok(true)
+            } else if let VendorStep::Skip { reason } = vendor {
+                // The uninstall entry goes with the leftovers.
+                out["uninstaller"] = json!(format!("not started, {reason}"));
                 Ok(true)
             } else {
                 r.uninstall(uninstaller).map(|described| {
@@ -615,8 +680,8 @@ fn apply_step(
             return out;
         }
     };
-    out["still_installed"] = json!(!gone);
     if !gone {
+        out["still_installed"] = json!(true);
         out["error"] = json!(format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running, so its leftovers were not removed."
         ));
@@ -625,7 +690,7 @@ fn apply_step(
     }
 
     let planned = step.leftovers();
-    let failed = match r.remove_items(planned, &name) {
+    let mut failed = match r.remove_items(planned, &name) {
         Ok(outcome) => {
             let failed = outcome.failed > 0;
             let failed_items: Vec<Leftover> = planned
@@ -656,11 +721,24 @@ fn apply_step(
         }
     };
 
+    // A skipped uninstaller left the entry to the removal; see that it went.
+    let installed = match step {
+        PlanStep::Program { program, .. } => registered(m, program),
+        _ => false,
+    };
+    out["still_installed"] = json!(installed);
+    if installed {
+        if out["error"].is_null() {
+            out["error"] = json!(format!("{name} is still registered."));
+        }
+        failed = true;
+    }
+
     // What a fresh scan still finds: anything the plan did not list, and
     // anything that could not go.
     let after = match step {
         PlanStep::Program { target, .. } | PlanStep::Leftovers { target, .. } => {
-            m.scan(target, false)
+            m.scan(target, installed)
         }
         PlanStep::Store { app, .. } => {
             commands::store_app_leftovers(app, m.local_appdata().as_deref(), |t| {
@@ -778,11 +856,11 @@ impl Server {
 
     /// Carry out a plan from plan_removal in this session, exactly as it
     /// was shown and only once: close what runs from each program's
-    /// folders, run each uninstaller, then remove the leftovers it listed,
-    /// each one backed up first. Returns what was closed and removed, what
-    /// was not and why, what a fresh scan still finds, and the backup with
-    /// the command that restores it. Call it only after the user agreed to
-    /// that plan.
+    /// folders, run each uninstaller the plan keeps, then remove the
+    /// leftovers it listed, each one backed up first. Returns what was
+    /// closed and removed, what was not and why, what a fresh scan still
+    /// finds, and the backup with the command that restores it. Call it
+    /// only after the user agreed to that plan.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -887,12 +965,26 @@ mod tests {
         )
     }
 
-    /// A PC in memory. What it lists and finds is fixed; nothing reaches
-    /// Windows.
+    /// A PC in memory. What it lists and finds is fixed, less what the
+    /// recorder it watches removed; nothing reaches Windows.
     struct FakePc {
         programs: Vec<Program>,
         apps: Vec<Package>,
         found: HashMap<String, Vec<Leftover>>,
+        seen: Option<Arc<Recorder>>,
+    }
+
+    impl FakePc {
+        fn done(&self, call: &str) -> bool {
+            self.seen
+                .as_ref()
+                .is_some_and(|r| r.calls().iter().any(|c| c == call))
+        }
+
+        /// Removed, unless it is machine-wide and the recorder refused it.
+        fn removed(&self, item: &Leftover) -> bool {
+            item.hive != Some(Hive::LocalMachine) && self.done(&format!("remove {}", item.path))
+        }
     }
 
     fn pc() -> FakePc {
@@ -942,31 +1034,49 @@ mod tests {
             ],
             apps: vec![package("Vendor.Notes", "Notes")],
             found,
+            seen: None,
         }
     }
 
     impl Inspect for FakePc {
         fn programs(&self, _system: bool) -> Vec<Program> {
-            self.programs.clone()
+            self.programs
+                .iter()
+                .filter(|p| !self.done(&format!("wait {}", p.display_name)))
+                .filter(|p| !self.removed(&own_entry(p)))
+                .cloned()
+                .collect()
         }
         fn store_apps(&self) -> Result<Vec<Package>> {
             Ok(self.apps.clone())
         }
         fn target(&self, program: &Program) -> ScanTarget {
-            scanner::name_target(&program.display_name, program.publisher.as_deref())
+            let mut t = scanner::name_target(&program.display_name, program.publisher.as_deref());
+            t.registry = Some((program.registry_key.clone(), program.source));
+            t
         }
         fn target_by_name(&self, name: &str, publisher: Option<&str>) -> ScanTarget {
             scanner::name_target(name, publisher)
         }
         fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
+            let mut items: Vec<Leftover> = self
+                .found
+                .get(&target.display_name)
+                .into_iter()
+                .flatten()
+                .filter(|l| !self.removed(l))
+                .cloned()
+                .collect();
+            // Like the engine: a scan as if gone lists the program's own entry.
+            if let (false, Some((key, _))) = (installed, &target.registry) {
+                if let Some(p) = self.programs(true).iter().find(|p| &p.registry_key == key) {
+                    items.push(own_entry(p));
+                }
+            }
             ScanReport {
                 program_name: target.display_name.clone(),
                 installed,
-                items: self
-                    .found
-                    .get(&target.display_name)
-                    .cloned()
-                    .unwrap_or_default(),
+                items,
             }
         }
         fn orphans(&self, _programs: &[Program]) -> OrphanReport {
@@ -1015,6 +1125,12 @@ mod tests {
                 exe: PathBuf::from(exe),
             })
             .collect()
+        }
+        fn machine_dirs(&self) -> Vec<PathBuf> {
+            vec![
+                PathBuf::from(r"C:\Program Files"),
+                PathBuf::from(r"C:\ProgramData"),
+            ]
         }
     }
 
@@ -1170,8 +1286,9 @@ mod tests {
         }
     }
 
-    fn server_on(pc: FakePc) -> (Server, Arc<Recorder>) {
+    fn server_on(mut pc: FakePc) -> (Server, Arc<Recorder>) {
         let recorder = Arc::new(Recorder::default());
+        pc.seen = Some(Arc::clone(&recorder));
         let remove: Arc<dyn Remove> = recorder.clone();
         (Server::new(Arc::new(pc), remove), recorder)
     }
@@ -1338,6 +1455,15 @@ mod tests {
             steps[0]["uninstaller"],
             r"C:\Apps\example-player\uninstall.exe /S"
         );
+        // Installed for this user only with nothing machine-wide: Oxidize
+        // removes it alone, its uninstall entry included.
+        assert_eq!(
+            steps[0]["uninstaller_step"],
+            json!({
+                "action": "skip",
+                "reason": "installed for this user only; Oxidize removes all of it"
+            })
+        );
         // High only by default: the Medium temp folder stays.
         let paths: Vec<&str> = steps[0]["leftovers"]
             .as_array()
@@ -1349,7 +1475,8 @@ mod tests {
             paths,
             [
                 r"C:\Users\me\AppData\Local\ExamplePlayer",
-                r"HKCU\Software\Example Studio"
+                r"HKCU\Software\Example Studio",
+                r"HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\example-player",
             ]
         );
         assert_eq!(steps[0]["bytes"], 900);
@@ -1361,7 +1488,7 @@ mod tests {
                 "oxidize scan \"OldGame\" --remove"
             ])
         );
-        assert_eq!(plan["leftovers"], 3);
+        assert_eq!(plan["leftovers"], 4);
         assert_eq!(plan["bytes"], 970);
         assert!(plan["how"].as_str().unwrap().starts_with("Running copies"));
         assert_eq!(plan["needs_admin"], false);
@@ -1376,7 +1503,7 @@ mod tests {
                 json!({ "programs": ["Example"], "level": "medium" }),
             )
             .await;
-        assert_eq!(medium["structuredContent"]["leftovers"], 3);
+        assert_eq!(medium["structuredContent"]["leftovers"], 4);
         assert_eq!(
             medium["structuredContent"]["commands"],
             json!(["oxidize uninstall \"Example Player\" --medium"])
@@ -1397,38 +1524,48 @@ mod tests {
             .call("apply_removal_plan", json!({ "plan_id": id }))
             .await;
         assert_ne!(done["isError"], true, "{done}");
-        // What runs from its folder closes before anything else.
+        // What runs from its folder closes first; its uninstaller is skipped
+        // and the entry goes with the leftovers.
         assert_eq!(
             recorder.calls(),
             [
                 "close 100",
-                r"uninstall C:\Apps\example-player\uninstall.exe",
-                "wait Example Player",
                 r"remove C:\Users\me\AppData\Local\ExamplePlayer",
                 r"remove HKCU\Software\Example Studio",
+                r"remove HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\example-player",
             ]
         );
         let step = &done["structuredContent"]["steps"][0];
         assert_eq!(step["still_installed"], false, "{step}");
         assert_eq!(step["failed"], false, "{step}");
+        assert!(step["uninstaller"]
+            .as_str()
+            .unwrap()
+            .starts_with("not started, installed for this user only"));
         assert_eq!(
             step["closed"],
             json!([{ "pid": 100, "exe": r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe", "how": "closed" }])
         );
-        assert_eq!(step["removal"]["removed"], 2);
+        assert_eq!(step["removal"]["removed"], 3);
         assert_eq!(step["backup"], "2026-10-10_150000_Example Player");
         assert_eq!(
             step["restore_command"],
             "oxidize restore \"2026-10-10_150000_Example Player\""
         );
-        // The rescan reports what is still there, the Medium folder included.
-        assert_eq!(step["remaining"].as_array().unwrap().len(), 3);
+        // The rescan finds only the Medium folder, below the plan's level.
+        let left: Vec<&str> = step["remaining"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(left, [r"C:\Users\me\AppData\Local\Temp\ExamplePlayer"]);
 
         let again = session
             .call("apply_removal_plan", json!({ "plan_id": id }))
             .await;
         assert_eq!(again["isError"], true, "{again}");
-        assert_eq!(recorder.calls().len(), 5, "a plan runs once");
+        assert_eq!(recorder.calls().len(), 4, "a plan runs once");
     }
 
     #[tokio::test]
@@ -1507,12 +1644,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_programs_processes_close_before_its_uninstaller_runs() {
+    async fn a_machine_wide_program_runs_its_uninstaller_once_its_processes_closed() {
         let (server, recorder) = server_on(pc());
         let (mut session, _) = Session::open(server).await;
         let plan = session
             .call("plan_removal", json!({ "programs": ["Game Service"] }))
             .await;
+        let planned = &plan["structuredContent"]["steps"][0];
+        assert_eq!(
+            planned["uninstaller_step"],
+            json!({ "action": "run", "silent": true, "reason": "owns something machine-wide" }),
+            "{planned}"
+        );
         let id = plan_id(&plan);
         let done = session
             .call("apply_removal_plan", json!({ "plan_id": id }))
@@ -1525,6 +1668,7 @@ mod tests {
                 "wait Game Service",
                 r"remove HKLM\SOFTWARE\Game Service",
                 r"remove C:\Program Files\Game Service",
+                r"remove HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\game-service",
             ]
         );
         let step = &done["structuredContent"]["steps"][0];

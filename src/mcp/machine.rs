@@ -70,6 +70,10 @@ impl Inspect for ThisPc {
     fn running(&self) -> Vec<Running> {
         system::running_processes()
     }
+
+    fn machine_dirs(&self) -> Vec<PathBuf> {
+        complete::machine_dirs()
+    }
 }
 
 /// The steps `oxidize uninstall` takes, always with a backup. The
