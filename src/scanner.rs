@@ -1495,6 +1495,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
         Box::new(move || links::scan_link_handlers(target)),
+        Box::new(move || links::scan_shortcuts(target)),
     ];
     let mut items = run_all(phases).into_iter().flatten().collect();
     dedupe_by_path(&mut items);
