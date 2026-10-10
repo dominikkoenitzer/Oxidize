@@ -1016,7 +1016,7 @@ impl eframe::App for OxidizeApp {
                 {
                     action = Some(Action::RemoveCompletely(program.clone()));
                 }
-                if ui.button(RichText::new("Run uninstaller").strong()).clicked() {
+                if ui.button("Run uninstaller").clicked() {
                     action = Some(Action::Uninstall(program.clone()));
                 }
                 if ui.button("Scan for leftovers").clicked() {
