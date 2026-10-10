@@ -280,7 +280,8 @@ pub fn remove_completely(
 ) -> Outcome {
     let start = std::time::Instant::now();
     let footprint = pc.scan(target, true);
-    let vendor = if !opts.dry_run && !pc.still_installed(program) {
+    let registered = opts.dry_run || pc.still_installed(program);
+    let vendor = if !registered {
         VendorStep::Skip {
             reason: "no longer registered".to_string(),
         }
@@ -350,8 +351,13 @@ pub fn remove_completely(
     // what the uninstaller left is scanned for.
     out.report = if out.vendor.runs() {
         pc.scan(target, false)
-    } else {
+    } else if registered {
         with_own_entry(footprint, target)
+    } else {
+        ScanReport {
+            installed: false,
+            ..footprint
+        }
     };
     out.selected = at_level(&out.report, opts.level);
     if !out.selected.is_empty() {
@@ -612,6 +618,25 @@ mod tests {
         assert!(out.complete(), "{out:?}");
         // The medium item was found but never meant to go.
         assert_eq!(out.verdict.below_level, 1);
+    }
+
+    #[test]
+    fn a_program_already_gone_goes_straight_to_its_leftovers() {
+        let mut items = per_user_footprint();
+        items.remove(0);
+        let pc = FakePc::new(items);
+        *pc.installed.borrow_mut() = false;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert_eq!(
+            out.vendor,
+            VendorStep::Skip {
+                reason: "no longer registered".to_string()
+            }
+        );
+        // Only the folder: the entry that is gone is not listed again.
+        assert_eq!(out.selected.len(), 1);
+        assert!(out.complete(), "{out:?}");
     }
 
     #[test]
