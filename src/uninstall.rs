@@ -142,6 +142,41 @@ pub fn run_with(plan: &UninstallPlan, stdin: Stdio, stdout: Stdio) -> Result<Exi
     })
 }
 
+/// `run_with`, but give up waiting after `max`: `Ok(None)` means it is still
+/// running. For unattended uninstallers, which nobody is clicking through.
+pub fn run_for(
+    plan: &UninstallPlan,
+    stdin: Stdio,
+    stdout: Stdio,
+    max: Duration,
+) -> Result<Option<ExitStatus>> {
+    let (exe, args) = plan.argv.split_first().expect("plan argv is never empty");
+    let mut child = Command::new(exe)
+        .args(args)
+        .stdin(stdin)
+        .stdout(stdout)
+        .spawn()
+        .map_err(|e| {
+            if e.raw_os_error() == Some(740) {
+                anyhow::anyhow!(
+                    "the uninstaller needs administrator rights. Add --elevate or use an elevated terminal."
+                )
+            } else {
+                anyhow::Error::new(e).context(format!("failed to launch {exe}"))
+            }
+        })?;
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if start.elapsed() >= max {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Is the program's Uninstall key still there?
 pub fn still_installed(program: &Program) -> bool {
     registry::key_exists(program.source.hive, &program.uninstall_subpath())
