@@ -19,17 +19,20 @@
   program's folder, and the vendor's key under `HKCU\Software` when nothing
   else of theirs is installed.
 - A program that installs each build in a folder below the vendor's
-  (`Vendor\Versions\version-<id>`) is removed whole: its build folder, the
-  vendor's folder around it and, when nothing else of the vendor's is
-  installed, the vendor's folders in AppData, the temp folder and the Start
-  menu, its keys under `SOFTWARE`, and the shortcuts and link types of the
-  vendor's other products that lead into what goes. The vendor's word must
-  be carried by at least two of the program's name, publisher, folders,
-  uninstall key and uninstaller.
-- A folder in the Start menu can be a leftover; folders named after the
-  product that hold a longer namesake are kept only while another installed
-  program carries the name; shortcuts to a missing file whose path names the
-  product are leftovers too.
+  (`Vendor\Versions\version-<id>`) is removed whole when nothing else of the
+  vendor's is installed: its build folder, the vendor's folder around it, the
+  vendor's folders in AppData, the temp folder and the Start menu, its keys
+  under `SOFTWARE`, and the shortcuts and link types of the vendor's other
+  products that lead into what goes. The vendor's word must be in the
+  program's name or publisher and carried by at least two of its name,
+  publisher, folders, uninstall key and uninstaller. A vendor's folder that a
+  service or task runs from is listed at medium, and one on the desktop is
+  left alone.
+- A folder in the Start menu can be a leftover, never one of Windows' own;
+  folders named after the product that hold a longer namesake are kept only
+  while another installed program carries the name; shortcuts to a missing
+  file on a drive that is there, whose path names the product, are leftovers
+  too.
 - `oxidize uninstall --json` lists the items below the chosen level in `kept`.
 - The MCP server and the window close a program's running copies first and
   say whether anything is left. The window has a "Remove completely" button

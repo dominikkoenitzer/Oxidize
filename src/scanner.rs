@@ -6,7 +6,7 @@
 //! wholesale. Denylists keep the OS and shared locations out entirely.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use std::thread;
 
@@ -102,14 +102,38 @@ pub fn path_within_shared_dir(p: &Path) -> bool {
     })
 }
 
-/// `path_within_shared_dir` for the part of `p` below the deepest scan root
-/// it is in. The Start menu lives in `Microsoft\Windows`, and a vendor's
-/// folder in it is still the vendor's.
-fn shared_below_root(p: &Path, roots: &[PathBuf]) -> bool {
-    match below_root(p, roots) {
-        Some((_, segments)) => segments
-            .iter()
-            .any(|s| SHARED_DIR_DENY.contains(&s.to_lowercase().as_str())),
+/// Windows' own folders in the Start menu.
+const START_MENU_DENY: &[&str] = &[
+    "accessibility",
+    "accessories",
+    "administrative tools",
+    "maintenance",
+    "startup",
+    "system tools",
+    "windows tools",
+];
+
+fn start_menu_roots() -> Vec<PathBuf> {
+    const START_MENU: &str = r"Microsoft\Windows\Start Menu\Programs";
+    [env_dir("APPDATA"), env_dir("ProgramData")]
+        .into_iter()
+        .flatten()
+        .map(|p| p.join(START_MENU))
+        .collect()
+}
+
+/// `path_within_shared_dir`, except that in the Start menu, which lives in
+/// `Microsoft\Windows`, only the part below it counts: a vendor's folder in
+/// there is the vendor's. Windows' own folders in it, and every folder that
+/// names Windows or Microsoft, are not.
+fn shared_dir(p: &Path) -> bool {
+    match below_root(p, &start_menu_roots()) {
+        Some((_, segments)) => segments.iter().any(|s| {
+            let lower = s.to_lowercase();
+            SHARED_DIR_DENY.contains(&lower.as_str())
+                || START_MENU_DENY.contains(&lower.as_str())
+                || words(s).iter().any(|w| w == "windows" || w == "microsoft")
+        }),
         None => path_within_shared_dir(p),
     }
 }
@@ -395,8 +419,14 @@ fn install_roots() -> Vec<PathBuf> {
 }
 
 /// The deepest of `roots` that `p` is inside, and the folder names from
-/// there down to `p`. `None` when `p` is in none of them, or is one.
+/// there down to `p`. `None` when `p` is in none of them, or is one, or
+/// climbs with `..`, which would put it somewhere else than it reads.
 fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
+    if p.components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return None;
+    }
     let key = norm_path_key(p);
     let root = roots
         .iter()
@@ -459,8 +489,11 @@ fn derive_brand(
         if !brand_word(word) {
             continue;
         }
+        // The word has to be in the program's own name or its publisher's:
+        // a game that uninstalls through its launcher's folder is not the
+        // launcher's vendor.
         let count = sources.iter().filter(|s| s.contains(word)).count();
-        if count < 2 {
+        if count < 2 || !(sources[0].contains(word) || sources[1].contains(word)) {
             continue;
         }
         let rank = (sources[1].contains(word), count);
@@ -538,28 +571,19 @@ fn is_brand_name(name: &str, target: &ScanTarget) -> bool {
 
 /// Is the recorded install folder the program's own? Its path has to be
 /// below an install root, nothing another program records may be in it, and
-/// a folder on the way down has to carry the brand: `Vendor\Versions\
-/// version-3f2a` is the vendor's version folder. A folder that is itself
-/// named after the vendor is the program's only when nothing else of the
-/// vendor's is installed.
+/// it or a folder on the way down has to carry the brand: `Vendor\Versions\
+/// version-3f2a` is the vendor's version folder. Only while nothing else of
+/// the vendor's is installed: another product of theirs can share the folder
+/// without saying so, an MSI product with no folder recorded for one.
 fn install_vouched(loc: &Path, target: &ScanTarget, others: &[PathBuf], roots: &[PathBuf]) -> bool {
-    let Some(brand) = target.brand.as_deref() else {
+    let Some(brand) = target.brand.as_deref().filter(|_| target.brand_alone) else {
         return false;
     };
     if others.iter().any(|o| system::path_under(o, loc)) {
         return false;
     }
-    let Some((_, segments)) = below_root(loc, roots) else {
-        return false;
-    };
-    let Some((leaf, above)) = segments.split_last() else {
-        return false;
-    };
-    if above.iter().any(|s| carries_brand(s, brand)) {
-        return true;
-    }
-    let vendors = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
-    carries_brand(leaf, brand) && (!vendors || target.brand_alone)
+    below_root(loc, roots)
+        .is_some_and(|(_, segments)| segments.iter().any(|s| carries_brand(s, brand)))
 }
 
 /// The vendor's folder right below the install root that the install folder
@@ -1360,7 +1384,7 @@ fn push_dir_leftover(
     reason: String,
     roots: &[PathBuf],
 ) {
-    if is_protected_path_in(&path, roots) || shared_below_root(&path, roots) {
+    if is_protected_path_in(&path, roots) || shared_dir(&path) {
         return;
     }
     let empty = is_dir_empty(&path);
@@ -1428,6 +1452,35 @@ fn flag_product_children(
     }
 }
 
+/// Why a folder named after the vendor is a leftover.
+const VENDOR_FOLDER: &str = "the vendor's folder, nothing else of theirs is installed";
+
+/// A vendor's folder that a service or scheduled task still runs from is not
+/// sure to go: it can be a driver or a helper nothing registers. It is
+/// listed, at Medium.
+fn demote_vendor_folders_in_use(items: &mut [Leftover], snap: &Snapshot) {
+    if !items.iter().any(|l| l.reason == VENDOR_FOLDER) {
+        return;
+    }
+    let runs: Vec<&Path> = snap
+        .services()
+        .iter()
+        .filter_map(|s| s.exe.as_deref())
+        .chain(snap.tasks().iter().filter_map(|t| t.exe.as_deref()))
+        .collect();
+    demote_where_run(items, &runs);
+}
+
+fn demote_where_run(items: &mut [Leftover], runs: &[&Path]) {
+    for item in items.iter_mut().filter(|l| l.reason == VENDOR_FOLDER) {
+        let dir = Path::new(&item.path);
+        if runs.iter().any(|exe| system::path_under(exe, dir)) {
+            item.confidence = Confidence::Medium;
+            item.reason = "the vendor's folder, a service or task runs from it".to_string();
+        }
+    }
+}
+
 /// `name_shared`: another registered program carries the product's name, so
 /// a folder holding a longer namesake may hold its version too.
 fn scan_dir_children(
@@ -1441,6 +1494,10 @@ fn scan_dir_children(
     let Ok(entries) = fs::read_dir(root) else {
         return;
     };
+    let desktop = ["USERPROFILE", "PUBLIC"]
+        .iter()
+        .filter_map(|v| env_dir(v))
+        .any(|home| norm_path_key(&home.join("Desktop")) == norm_path_key(root));
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if fs_denied(&name) {
@@ -1468,15 +1525,16 @@ fn scan_dir_children(
             let family = std::cell::OnceCell::new();
             let family =
                 |p: &Path| *family.get_or_init(|| name_shared && holds_namesake_child(p, target));
-            if is_brand_name(&name, target) && !houses_other {
+            if is_brand_name(&name, target) && !houses_other && !desktop {
                 // The vendor's own folder, with nothing else of theirs
                 // installed and no other program inside: all of it goes,
-                // whatever the vendor's other products left in it.
+                // whatever the vendor's other products left in it. On the
+                // desktop a folder is the user's.
                 push_dir_leftover(
                     out,
                     path,
                     Confidence::High,
-                    "the vendor's folder, nothing else of theirs is installed".to_string(),
+                    VENDOR_FOLDER.to_string(),
                     roots,
                 );
             } else if is_exact_product(&name, target)
@@ -1590,6 +1648,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
         }));
     }
     let mut out: Vec<Leftover> = run_all(jobs).into_iter().flatten().collect();
+    demote_vendor_folders_in_use(&mut out, snap);
 
     dedupe_by_path(&mut out);
     let mut out = dedupe_nested_fs(out);
@@ -3139,17 +3198,78 @@ mod tests {
         // is still the vendor's, and Windows' own folders still are not.
         if let Some(data) = env_dir("ProgramData") {
             let menu = data.join(r"Microsoft\Windows\Start Menu\Programs");
-            let roots = vec![data.clone(), menu.clone()];
-            assert!(!shared_below_root(&menu.join("Brightway"), &roots));
-            assert!(shared_below_root(
-                &data.join(r"Microsoft\Brightway"),
-                &roots
-            ));
-            assert!(shared_below_root(
-                &program_files().join(r"Common Files\Brightway"),
-                &[program_files()]
-            ));
+            assert!(!shared_dir(&menu.join("Brightway")));
+            for windows in [
+                "Windows PowerShell",
+                "WindowsPowerShell",
+                "Administrative Tools",
+                "Accessibility",
+                r"Brightway\Microsoft Tools",
+            ] {
+                assert!(shared_dir(&menu.join(windows)), "{windows}");
+            }
+            assert!(shared_dir(&data.join(r"Microsoft\Brightway")));
+            assert!(shared_dir(&program_files().join(r"Common Files\Brightway")));
         }
+        // Outside the Start menu nothing changes.
+        assert!(!shared_dir(&program_files().join("WindowsTerminalTools")));
+    }
+
+    #[test]
+    fn a_vendor_folder_something_runs_from_is_only_medium() {
+        let dir = program_files().join("Brightway");
+        let folder = || {
+            vec![Leftover::fs(
+                LeftoverKind::Directory,
+                dir.clone(),
+                Confidence::High,
+                VENDOR_FOLDER,
+                None,
+                false,
+            )]
+        };
+        let driver = dir.join(r"Driver\brightwaysvc.exe");
+        let mut items = folder();
+        demote_where_run(&mut items, &[driver.as_path()]);
+        assert_eq!(items[0].confidence, Confidence::Medium);
+
+        let elsewhere = program_files().join(r"Other Tool\svc.exe");
+        let mut items = folder();
+        demote_where_run(&mut items, &[elsewhere.as_path()]);
+        assert_eq!(items[0].confidence, Confidence::High);
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_is_below_nothing() {
+        let climbing = program_files().join(r"Brightway\..\Example\App");
+        assert!(below_root(&climbing, &install_roots()).is_none());
+        let snap = Snapshot::with_programs(vec![player()]);
+        let t = build_target_from(&player(), Some(climbing), &[], &[], &snap);
+        assert!(!t.install_vouched);
+        assert_eq!(t.vendor_dir, None);
+    }
+
+    #[test]
+    fn a_launchers_folder_is_not_the_brand_of_what_it_uninstalls() {
+        // A game registered under the launcher's key, uninstalled by the
+        // launcher from the launcher's folder, by another publisher.
+        let launcher = program_files().join("Brightway");
+        let mut game = vendor_program(
+            "Tidewater Quest",
+            "Brightway App 4417",
+            &launcher,
+            "BrightwayLauncher.exe",
+        );
+        game.install_location = None;
+        game.publisher = Some("Harbor Games Ltd".to_string());
+        assert_eq!(derive_brand(&game, None, &install_roots()), None);
+        // With its own vendor's word in its name and publisher, that is its
+        // brand, never the launcher's.
+        game.publisher = Some("Tidewater Games Ltd".to_string());
+        assert_eq!(
+            derive_brand(&game, None, &install_roots()).as_deref(),
+            Some("tidewater")
+        );
     }
 
     #[test]
@@ -3166,7 +3286,10 @@ mod tests {
         let t = player_target(vec![studio.clone()]);
         assert_eq!(t.brand.as_deref(), Some("brightway"));
         assert!(!t.brand_alone);
-        assert!(t.install_vouched);
+        // The build folder may hold the other product's files without its
+        // entry saying so: it is not vouched for either.
+        assert!(!t.install_vouched);
+        assert_eq!(own_install_folder(&t), None);
         assert_eq!(t.vendor_dir, None);
         for name in ["Brightway", "Brightway Corporation"] {
             assert!(!is_brand_name(name, &t), "{name}");

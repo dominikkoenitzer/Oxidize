@@ -65,6 +65,10 @@ fn match_handler(command: &str, target: &ScanTarget, inside: &str) -> Option<(Co
 pub(super) struct Pointer {
     what: Pointee,
     to: PathBuf,
+    /// Other files its command names by full path, such as the document a
+    /// shared runtime opens. Any of them outside the removed folders makes
+    /// it someone else's.
+    args: Vec<PathBuf>,
 }
 
 enum Pointee {
@@ -91,7 +95,11 @@ pub(super) fn into_removed(
     let inside = |p: &Path, list: &[PathBuf]| list.iter().any(|d| system::path_under(p, d));
     pointers
         .into_iter()
-        .filter(|p| inside(&p.to, dirs) && !inside(&p.to, other_installs))
+        .filter(|p| {
+            inside(&p.to, dirs)
+                && !inside(&p.to, other_installs)
+                && p.args.iter().all(|a| inside(a, dirs))
+        })
         .filter_map(|p| match p.what {
             Pointee::Link { hive, key, scheme } => (!shared_scheme(&scheme)).then(|| {
                 Leftover::reg_key(
@@ -152,9 +160,16 @@ pub(super) fn scan_link_handlers(target: &ScanTarget) -> (Vec<Leftover>, Vec<Poi
                     .map(|exe| locate_exe(&exe))
                     .filter(|exe| exe.is_absolute() && !system::in_windows_dir(exe))
                 {
+                    let args = util::split_command_line(&util::expand_env_vars(&command))
+                        .into_iter()
+                        .skip(1)
+                        .map(PathBuf::from)
+                        .filter(|a| a.is_absolute())
+                        .collect();
                     pointers.push(Pointer {
                         what: Pointee::Link { hive, key, scheme },
                         to,
+                        args,
                     });
                 }
                 continue;
@@ -282,8 +297,11 @@ fn match_shortcut(link_target: &Path, target: &ScanTarget) -> Option<(Confidence
     {
         return Some((Confidence::High, "shortcut to the program".to_string()));
     }
-    (exe_missing(link_target) && path_names_product(link_target, target))
-        .then(|| (Confidence::High, "shortcut to a missing file".to_string()))
+    // A file on a drive that is not there now is not gone.
+    (exe_missing(link_target)
+        && system::volume_available(link_target)
+        && path_names_product(link_target, target))
+    .then(|| (Confidence::High, "shortcut to a missing file".to_string()))
 }
 
 /// Shortcuts in `root` and in its subfolders two levels down whose target is
@@ -336,6 +354,7 @@ fn scan_shortcuts_in(
                 pointers.push(Pointer {
                     what: Pointee::Shortcut { path, size },
                     to: link_target,
+                    args: Vec::new(),
                 });
             }
         }
@@ -689,17 +708,31 @@ mod tests {
                 size: Some(1),
             },
             to,
+            args: Vec::new(),
+        };
+        let link = |scheme: &str, to: PathBuf, args: Vec<PathBuf>| Pointer {
+            what: Pointee::Link {
+                hive: Hive::LocalMachine,
+                key: format!(r"SOFTWARE\Classes\{scheme}"),
+                scheme: scheme.to_string(),
+            },
+            to,
+            args,
         };
         let pointers = vec![
             // A sibling product's link type and shortcut into the build.
-            Pointer {
-                what: Pointee::Link {
-                    hive: Hive::LocalMachine,
-                    key: r"SOFTWARE\Classes\brightway-studio".to_string(),
-                    scheme: "brightway-studio".to_string(),
-                },
-                to: build.join("BrightwayStudioBeta.exe"),
-            },
+            link(
+                "brightway-studio",
+                build.join("BrightwayStudioBeta.exe"),
+                Vec::new(),
+            ),
+            // Another program's link type that runs the vendor's runtime on
+            // a file of its own stays.
+            link(
+                "example-notes",
+                vendor.join(r"Runtime\runtime.exe"),
+                vec![PathBuf::from(r"C:\Program Files\Example\notes.pkg")],
+            ),
             shortcut(
                 r"C:\Users\x\Desktop\Brightway Studio.lnk",
                 build.join("BrightwayStudioBeta.exe"),
