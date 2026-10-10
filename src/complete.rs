@@ -757,7 +757,13 @@ mod tests {
             ),
         ];
         for item in cases {
-            let step = vendor_step(&p, &plan(false), &target(), &[item.clone()], &machine());
+            let step = vendor_step(
+                &p,
+                &plan(false),
+                &target(),
+                std::slice::from_ref(&item),
+                &machine(),
+            );
             assert!(step.runs(), "{} should keep the uninstaller", item.path);
         }
         // Registered for every user, or an MSI product: always.
