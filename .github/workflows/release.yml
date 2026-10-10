@@ -43,21 +43,29 @@ jobs:
       - name: Build
         run: cargo build --locked --release
 
+      # The asset names carry no version, so the README can link to
+      # releases/latest/download/<name> and the link never goes stale.
       - name: Package
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/oxidize.exe dist/
           Copy-Item target/release/oxidize-gui.exe dist/
-          Compress-Archive -Path dist/* -DestinationPath "oxidize-${{ github.ref_name }}-windows-x64.zip"
-          Get-FileHash "oxidize-${{ github.ref_name }}-windows-x64.zip" -Algorithm SHA256 |
-            ForEach-Object { "$($_.Hash.ToLower())  oxidize-${{ github.ref_name }}-windows-x64.zip" } |
-            Set-Content "oxidize-${{ github.ref_name }}-windows-x64.zip.sha256"
+          Compress-Archive -Path dist/oxidize.exe, dist/oxidize-gui.exe -DestinationPath dist/oxidize-windows-x64.zip
+          foreach ($name in 'oxidize-gui.exe', 'oxidize.exe', 'oxidize-windows-x64.zip') {
+            $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+            Set-Content "dist/$name.sha256" "$hash  $name"
+          }
 
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            oxidize-${{ github.ref_name }}-windows-x64.zip
-            oxidize-${{ github.ref_name }}-windows-x64.zip.sha256
+            dist/oxidize-gui.exe
+            dist/oxidize-gui.exe.sha256
+            dist/oxidize.exe
+            dist/oxidize.exe.sha256
+            dist/oxidize-windows-x64.zip
+            dist/oxidize-windows-x64.zip.sha256
+          fail_on_unmatched_files: true
           generate_release_notes: true
