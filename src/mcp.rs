@@ -866,7 +866,11 @@ mod tests {
         found.insert(
             "Example Player".to_string(),
             vec![
-                folder(r"C:\Users\me\AppData\Local\ExamplePlayer", Confidence::High, 900),
+                folder(
+                    r"C:\Users\me\AppData\Local\ExamplePlayer",
+                    Confidence::High,
+                    900,
+                ),
                 Leftover::reg_key(
                     Hive::CurrentUser,
                     r"Software\Example Studio",
