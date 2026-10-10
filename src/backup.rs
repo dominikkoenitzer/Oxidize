@@ -323,6 +323,9 @@ pub fn backups_base() -> Result<PathBuf> {
 /// One existing backup folder.
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
+    /// Stable id for scripts: the folder name, which is unique and which
+    /// `oxidize restore <id>` takes as an exact match.
+    pub id: String,
     pub name: String,
     pub path: PathBuf,
     pub program: String,
@@ -356,12 +359,20 @@ pub fn list_backups() -> Result<Vec<BackupInfo>> {
                 .unwrap_or_default(),
             items: manifest.as_ref().map(|m| m.entries.len()).unwrap_or(0),
             size_bytes: crate::scanner::dir_size(&path),
+            id: name.clone(),
             name,
             path,
         });
     }
-    out.sort_by(|a, b| b.name.cmp(&a.name));
+    sort_newest_first(&mut out);
     Ok(out)
+}
+
+/// Newest first by the time in the manifest, then by name. The name starts
+/// with the time too, but only to the second.
+fn sort_newest_first(backups: &mut [BackupInfo]) {
+    let time = |b: &BackupInfo| chrono::DateTime::parse_from_rfc3339(&b.created).ok();
+    backups.sort_by(|a, b| time(b).cmp(&time(a)).then_with(|| b.name.cmp(&a.name)));
 }
 
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
@@ -779,5 +790,92 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries.len(), 1);
+    }
+
+    fn info(name: &str, program: &str, created: &str) -> BackupInfo {
+        BackupInfo {
+            id: name.to_string(),
+            name: name.to_string(),
+            path: PathBuf::from(name),
+            program: program.to_string(),
+            created: created.to_string(),
+            items: 1,
+            size_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn backups_list_newest_first() {
+        let mut all = vec![
+            info(
+                "2026-10-09 080000 Example Player",
+                "Example Player",
+                "2026-10-09T08:00:00+02:00",
+            ),
+            info("no manifest", "", ""),
+            info(
+                "2026-10-10 120000 Example Player (10)",
+                "Example Player",
+                "2026-10-10T12:00:00.9+02:00",
+            ),
+            info(
+                "2026-10-10 120000 Example Player (9)",
+                "Example Player",
+                "2026-10-10T12:00:00.5+02:00",
+            ),
+            // An hour later in UTC, though the local stamp reads earlier.
+            info(
+                "2026-10-25 020000 Example Tool",
+                "Example Tool",
+                "2026-10-25T02:30:00+01:00",
+            ),
+            info(
+                "2026-10-25 024500 Example Tool",
+                "Example Tool",
+                "2026-10-25T02:45:00+02:00",
+            ),
+        ];
+        sort_newest_first(&mut all);
+        let names: Vec<&str> = all.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "2026-10-25 020000 Example Tool",
+                "2026-10-25 024500 Example Tool",
+                "2026-10-10 120000 Example Player (10)",
+                "2026-10-10 120000 Example Player (9)",
+                "2026-10-09 080000 Example Player",
+                "no manifest",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_backup_id_picks_exactly_that_backup() {
+        let all = vec![
+            info("2026-10-10 120000 Example Player (2)", "Example Player", ""),
+            info("2026-10-10 120000 Example Player", "Example Player", ""),
+        ];
+        for b in &all {
+            assert_eq!(b.id, b.name);
+            assert_eq!(pick_backup(&all, &b.id).unwrap().name, b.name);
+        }
+        let err = pick_backup(&all, "Example Player").unwrap_err();
+        assert_eq!(crate::exit::outcome(&err).code, "ambiguous");
+        let err = pick_backup(&all, "Nothing").unwrap_err();
+        assert_eq!(crate::exit::outcome(&err).code, "not_found");
+
+        let json = serde_json::to_value(&all[0]).unwrap();
+        for field in [
+            "id",
+            "name",
+            "path",
+            "program",
+            "created",
+            "items",
+            "size_bytes",
+        ] {
+            assert!(json.get(field).is_some(), "{field}");
+        }
     }
 }
