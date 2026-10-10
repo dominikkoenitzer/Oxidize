@@ -1666,7 +1666,8 @@ mod tests {
         let planned = &plan["structuredContent"]["steps"][0];
         assert_eq!(
             planned["uninstaller_step"],
-            json!({ "action": "run", "silent": true, "reason": "owns something machine-wide" }),
+            // Planned without `silent`, so the recorded quiet command is not used.
+            json!({ "action": "run", "silent": false, "reason": "owns something machine-wide" }),
             "{planned}"
         );
         let id = plan_id(&plan);
