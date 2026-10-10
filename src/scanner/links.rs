@@ -6,9 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use super::{
-    dir_contains, env_dir, exe_missing, is_exact_product, locate_exe, norm_path_key,
-    other_program_install_dirs, path_names_product, path_within_shared_dir, push_dir_leftover,
-    score_product, Snapshot,
+    dir_contains, env_dir, exe_missing, fs_denied, is_exact_product, locate_exe, matches_publisher,
+    norm_path_key, other_program_install_dirs, path_names_product, path_within_shared_dir,
+    push_dir_leftover, score_product, Snapshot,
 };
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanTarget};
 use crate::{lnk, registry, system, util};
@@ -98,13 +98,17 @@ pub(super) fn scan_link_handlers(target: &ScanTarget) -> Vec<Leftover> {
     out
 }
 
-/// Can this be a file type's class (`ExamplePlayer.Project`)? Extensions,
-/// class ids and the `Applications` list cannot.
+/// Can this be a program's own file type class? Programs name theirs
+/// `Vendor.Type`, often with a version (`ExamplePlayer.Project.2`). Windows'
+/// shared classes (`Folder`, `Directory`, `*`, `exefile` ...) have no dot and
+/// hold every program's verbs, so they never count; nor do extensions and
+/// class ids.
 fn file_type_name(name: &str) -> bool {
-    !name.is_empty()
-        && !name.starts_with('.')
+    !name.starts_with('.')
         && !name.starts_with('{')
-        && !name.eq_ignore_ascii_case("Applications")
+        && name
+            .split_once('.')
+            .is_some_and(|(head, tail)| !head.is_empty() && !tail.is_empty())
 }
 
 /// Match the open command of a file type or an open-with entry.
@@ -281,6 +285,13 @@ fn scan_temp_dir(root: &Path, target: &ScanTarget, snap: &Snapshot) -> Vec<Lefto
             continue;
         }
         let name = entry.file_name().to_string_lossy().to_string();
+        // Shared names, and a folder named after the vendor rather than the
+        // product, are not the product's, here as everywhere else.
+        if fs_denied(&name)
+            || (matches_publisher(&name, target) && !is_exact_product(&name, target))
+        {
+            continue;
+        }
         let path = entry.path();
         let key = norm_path_key(&path);
         let holds_install = others
@@ -593,13 +604,21 @@ mod tests {
 
     #[test]
     fn only_class_names_can_be_file_types() {
-        for name in ["Quillmark.Document", "Quillmark.Project.2", "quillmark"] {
+        for name in ["Quillmark.Document", "Quillmark.Project.2"] {
             assert!(file_type_name(name), "{name}");
         }
         for name in [
             ".qmk",
             "{4D2F086C-6EA3-101B-A2A3-00AA00494A6A}",
             "Applications",
+            "Folder",
+            "Directory",
+            "Drive",
+            "*",
+            "exefile",
+            "SystemFileAssociations",
+            "quillmark",
+            "Quillmark.",
             "",
         ] {
             assert!(!file_type_name(name), "{name}");
