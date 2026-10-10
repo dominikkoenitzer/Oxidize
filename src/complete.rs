@@ -346,8 +346,13 @@ pub fn remove_completely(
         }
     }
 
-    // Skipped, the entry is one more leftover; run, it may have stayed behind.
-    out.report = pc.scan(target, false);
+    // Skipped, the footprint is what goes, its uninstall entry with it; run,
+    // what the uninstaller left is scanned for.
+    out.report = if out.vendor.runs() {
+        pc.scan(target, false)
+    } else {
+        with_own_entry(footprint, target)
+    };
     out.selected = at_level(&out.report, opts.level);
     if !out.selected.is_empty() {
         match pc.remove(&out.selected, &program.display_name) {
@@ -362,6 +367,31 @@ pub fn remove_completely(
     out.verdict = verdict(installed, &rescan, opts.level);
     out.seconds = start.elapsed().as_secs_f64();
     out
+}
+
+/// The footprint plus the program's own uninstall entry, which a scan of an
+/// installed program leaves out.
+fn with_own_entry(mut footprint: ScanReport, target: &ScanTarget) -> ScanReport {
+    if let Some((key, source)) = &target.registry {
+        let subpath = format!("{}\\{}", source.view.uninstall_base(), key);
+        let listed = footprint
+            .items
+            .iter()
+            .any(|l| l.hive == Some(source.hive) && l.subpath.as_deref() == Some(subpath.as_str()));
+        if !listed {
+            footprint.items.insert(
+                0,
+                Leftover::reg_key(
+                    source.hive,
+                    subpath,
+                    Confidence::High,
+                    "the program's own uninstall entry",
+                ),
+            );
+        }
+    }
+    footprint.installed = false;
+    footprint
 }
 
 fn at_level(report: &ScanReport, level: Confidence) -> Vec<Leftover> {
@@ -456,10 +486,15 @@ mod tests {
     impl Pc for FakePc {
         fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
             self.calls.borrow_mut().push(format!("scan {installed}"));
+            // A scan of an installed program leaves its own entry out.
+            let mut items = self.items.borrow().clone();
+            if installed && *self.installed.borrow() {
+                items.retain(|l| !l.path.ends_with(r"Uninstall\example-player"));
+            }
             ScanReport {
                 program_name: target.display_name.clone(),
                 installed,
-                items: self.items.borrow().clone(),
+                items,
             }
         }
 
@@ -523,7 +558,7 @@ mod tests {
                 } else {
                     o.deleted += 1;
                     self.items.borrow_mut().retain(|i| i.path != l.path);
-                    if l.reason == "orphaned uninstall entry" {
+                    if l.path.ends_with(r"Uninstall\example-player") {
                         *self.installed.borrow_mut() = false;
                     }
                 }
@@ -572,13 +607,7 @@ mod tests {
         assert!(!out.vendor.runs());
         assert_eq!(
             pc.calls(),
-            [
-                "scan true",
-                "close 100",
-                "scan false",
-                "remove 2",
-                "scan false"
-            ]
+            ["scan true", "close 100", "remove 2", "scan false"]
         );
         assert!(out.complete(), "{out:?}");
         // The medium item was found but never meant to go.
@@ -693,6 +722,10 @@ mod tests {
     fn target() -> ScanTarget {
         let mut t = scanner::name_only_target("Example Player", Some("Example Studio"));
         t.install_location = Some(PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer"));
+        t.registry = Some((
+            "example-player".to_string(),
+            RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+        ));
         t
     }
 
