@@ -687,8 +687,17 @@ fn uninstall_batch(
                 // An earlier uninstaller may have taken this one along; its
                 // own would then fail or run on a half-removed install.
                 let already_gone = !g.dry_run && !uninstall::still_installed(&b.program);
-                run_uninstall(&b.program, &target, &b.plan, already_gone, how, levels, g)
-                    .unwrap_or_else(|e| ProgramRun::stopped(&b.program, &b.plan, failed(e)))
+                run_uninstall(
+                    &b.program,
+                    &target,
+                    &b.plan,
+                    already_gone,
+                    None,
+                    how,
+                    levels,
+                    g,
+                )
+                .unwrap_or_else(|e| ProgramRun::stopped(&b.program, &b.plan, failed(e)))
             }
             Step::Store(app) => {
                 // A lookup that fails counts as registered: the removal then
@@ -789,7 +798,9 @@ fn print_batch_summary(runs: &[ProgramRun], dry_run: bool) {
 /// `trace --uninstall`.
 fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Global) -> Result<()> {
     // Capture the footprint before the entry disappears.
-    let target = scanner::build_target(program);
+    // One reading of the machine for the target and the first scan.
+    let snap = scanner::Snapshot::new();
+    let target = scanner::build_target_with(program, &snap);
     let plan = uninstall::plan(program, how.silent)?;
 
     if !g.json {
@@ -812,7 +823,7 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         return Ok(());
     }
 
-    let run = run_uninstall(program, &target, &plan, false, how, levels, g)?;
+    let run = run_uninstall(program, &target, &plan, false, Some(snap), how, levels, g)?;
     if g.json {
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
@@ -946,12 +957,15 @@ impl ProgramRun {
 /// Run a confirmed plan the complete way: close what runs from the
 /// program's folders, run its uninstaller only when Oxidize cannot do without
 /// it, remove the leftovers at `levels` and scan again. `target` is the
-/// footprint captured before anything ran.
+/// footprint captured before anything ran, `snap` the reading of the
+/// machine it was built from, when that is still current.
+#[allow(clippy::too_many_arguments)]
 fn run_uninstall(
     program: &Program,
     target: &ScanTarget,
     plan: &uninstall::UninstallPlan,
     already_gone: bool,
+    snap: Option<scanner::Snapshot>,
     how: &How,
     levels: &LevelOpts,
     g: &Global,
@@ -967,7 +981,11 @@ fn run_uninstall(
     } else {
         Duration::from_secs(120)
     };
-    let pc = CliPc { g, wait };
+    let pc = CliPc {
+        g,
+        wait,
+        first: std::cell::RefCell::new(snap),
+    };
     let opts = complete::Options {
         level,
         dry_run: g.dry_run,
@@ -1102,11 +1120,17 @@ fn print_complete(name: &str, out: &complete::Outcome, dry_run: bool) {
 struct CliPc<'a> {
     g: &'a Global,
     wait: Duration,
+    /// The reading the target was built from, for the first scan only:
+    /// later scans must see what the removal changed.
+    first: std::cell::RefCell<Option<scanner::Snapshot>>,
 }
 
 impl complete::Pc for CliPc<'_> {
     fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
-        scanner::scan(target, installed)
+        match self.first.borrow_mut().take() {
+            Some(snap) => scanner::scan_with(target, installed, &snap),
+            None => scanner::scan(target, installed),
+        }
     }
 
     fn still_installed(&self, program: &Program) -> bool {
