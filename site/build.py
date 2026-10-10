@@ -9,24 +9,6 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# Every app, for the "All apps" grid. The page leaves out its own app.
-APPS = [
-    ("inkling", "Inkling", "https://get-inkling.vercel.app/", "#4155b9", "#a4b1f0",
-     "Notes, to-dos and flashcards in one calm place.", "Windows, macOS, Linux"),
-    ("oxidize", "Oxidize", "https://get-oxidize.vercel.app/", "#a04e22", "#f7b27a",
-     "Uninstall programs and clear out what they leave behind.", "Windows"),
-    ("mochi", "Mochi", "https://get-mochi.vercel.app/", "#ae3274", "#ffbbdf",
-     "Every open window side by side, moved from the keyboard.", "Windows"),
-    ("remnants", "Remnants", "https://get-remnants.vercel.app/", "#2563eb", "#7fb2fb",
-     "A code editor with every AI feature taken out.", "Windows, macOS, Linux"),
-    ("jester", "Jester", "https://get-jester.vercel.app/", "#5e2a82", "#c397e3",
-     "A fast notepad for Windows, in purple and gold.", "Windows"),
-    ("flow", "Flow", "https://get-flow-app.vercel.app/", "#2f5ebc", "#a9c5fc",
-     "Record a task once, and it repeats it for you.", "Windows"),
-    ("daifuku", "Daifuku", "https://get-daifuku.vercel.app/", "#225ebf", "#89b4fa",
-     "A grid of AI agent terminals that shows what each one is doing.", "Windows"),
-]
-
 CSS = r"""
 @font-face {
   font-family: "Jakarta";
@@ -277,30 +259,6 @@ h2 { margin: 0; font-size: clamp(2rem, 3.6vw, 3rem); line-height: 1.05; letter-s
 .faq .answer { margin: -0.3rem 0 1.3rem; max-width: 46rem; color: var(--muted); }
 .faq .answer p { margin: 0 0 0.6rem; }
 
-.apps-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.25rem; margin: 0; padding: 0; list-style: none; }
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  border-radius: 1.4rem;
-  overflow: hidden;
-  background: var(--card);
-  border: 1px solid var(--line);
-  box-shadow: var(--shadow-sm);
-  color: inherit;
-  text-decoration: none;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-  --ink: var(--c-ink);
-}
-@media (prefers-color-scheme: dark) { .app { --ink: var(--c-ink-dark); } }
-.app:hover { transform: translateY(-2px); box-shadow: var(--shadow-lg); }
-.art { height: 9.5rem; padding: 1.25rem 1.4rem; display: flex; align-items: flex-end; background: var(--c); color: #fff; font-size: 2.1rem; font-weight: 760; letter-spacing: -0.04em; }
-.app .body { flex: 1; display: flex; flex-direction: column; padding: 1.15rem 1.4rem 1.3rem; }
-.app .line { margin: 0; color: var(--muted); font-size: 0.97rem; line-height: 1.45; flex: 1; }
-.app .row { display: flex; align-items: center; justify-content: space-between; margin-top: 1.1rem; }
-.app .os { font-size: 0.85rem; color: var(--muted); }
-.pill { font-size: 0.88rem; font-weight: 650; color: var(--ink); background: color-mix(in srgb, var(--ink) 14%, transparent); padding: 0.45rem 0.95rem; border-radius: 999px; }
-
 .closing {
   margin: clamp(5rem, 11vw, 8rem) 0 2.5rem;
   border-radius: 2rem;
@@ -322,20 +280,17 @@ footer p { margin: 0.3rem 0; }
   .hero, .feature, .assistant { grid-template-columns: minmax(0, 1fr); }
   .feature.flip { grid-template-columns: minmax(0, 1fr); }
   .feature.flip .text { order: 0; }
-  .grid2, .grid3, .apps-grid, .keys, .closing { grid-template-columns: minmax(0, 1fr); }
+  .grid2, .grid3, .keys, .closing { grid-template-columns: minmax(0, 1fr); }
   .links a:not(.btn) { display: none; }
   .stage .detail { left: auto; right: 4%; bottom: -8%; width: 52%; }
   .feature.flip .stage .detail { right: 4%; }
   .feature { margin-bottom: clamp(6rem, 18vw, 8rem); }
   .pair .shot { width: 80%; }
 }
-@media (min-width: 901px) and (max-width: 1180px) {
-  .apps-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-}
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
-  .btn, .app { transition: none; }
-  .btn:hover, .app:hover { transform: none; }
+  .btn { transition: none; }
+  .btn:hover { transform: none; }
 }
 """
 
@@ -457,7 +412,6 @@ def build(page):
     w('<a href="#features">Features</a>')
     w('<a href="#new">What\'s new</a>')
     w('<a href="#faq">Questions</a>')
-    w('<a href="#apps">All apps</a>')
     w(f'<a class="btn quiet" href="/download/{first}">Download</a>')
     w("</div>")
     w("</nav>")
@@ -608,22 +562,6 @@ def build(page):
         w('<div class="answer">' + "".join(f"<p>{x}</p>" for x in q["a"]) + "</div>")
         w("</details>")
     w("</div>")
-    w("</section>")
-
-    # all apps
-    w('<section class="apps" id="apps" aria-labelledby="apps-h">')
-    w('<div class="sectionhead">')
-    w('<h2 id="apps-h">All apps</h2>')
-    w("<p>Other apps, all free.</p>")
-    w("</div>")
-    w('<ul class="apps-grid">')
-    for s, title, url, c, cd, line, os_ in APPS:
-        if s == slug:
-            continue
-        w(f'<li><a class="app" href="{url}" style="--c:{c};--c-ink:{c};--c-ink-dark:{cd}">'
-          f'<div class="art">{esc(title)}</div><div class="body"><p class="line">{esc(line)}</p>'
-          f'<div class="row"><span class="os">{esc(os_)}</span><span class="pill">Get it</span></div></div></a></li>')
-    w("</ul>")
     w("</section>")
 
     # closing
