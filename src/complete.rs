@@ -12,6 +12,7 @@ use std::time::Duration;
 use serde::Serialize;
 
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport, ScanTarget};
+use crate::safety::{DeletionOutcome, SafetyContext};
 use crate::uninstall::UninstallPlan;
 use crate::{scanner, system};
 
@@ -206,10 +207,409 @@ pub fn close_processes(dirs: &[PathBuf], grace: Duration) -> Vec<Closed> {
     system::close_processes(&picked, grace)
 }
 
+// The flow
+// --------
+
+/// What the flow needs from a PC. The command line, the window and the MCP
+/// server each bring their own; tests bring a fake.
+pub trait Pc {
+    fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport;
+    fn still_installed(&self, program: &Program) -> bool;
+    /// Close what runs from these folders.
+    fn close(&self, dirs: &[PathBuf]) -> Vec<Closed>;
+    /// Run the vendor's uninstaller; returns how it ended, in words.
+    fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String>;
+    /// Wait until the program is unregistered; true when it is.
+    fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
+    /// Remove the items, with a backup unless told otherwise.
+    fn remove(&self, items: &[Leftover], label: &str) -> anyhow::Result<DeletionOutcome>;
+    fn machine_dirs(&self) -> Vec<PathBuf>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// The lowest confidence removed.
+    pub level: Confidence,
+    pub dry_run: bool,
+    /// Run the vendor's uninstaller even when Oxidize could do without it.
+    pub use_uninstaller: bool,
+}
+
+/// What one complete removal did.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub closed: Vec<Closed>,
+    pub vendor: VendorStep,
+    /// How the vendor's uninstaller ended, when it ran.
+    pub uninstaller: Option<String>,
+    /// What was selected for removal, or would be in a dry run.
+    pub selected: Vec<Leftover>,
+    pub removal: Option<DeletionOutcome>,
+    pub verdict: Verdict,
+    /// Why the flow stopped early, when it did.
+    pub error: Option<String>,
+    pub seconds: f64,
+}
+
+impl Outcome {
+    /// The program is gone, every item went and nothing is left.
+    pub fn complete(&self) -> bool {
+        self.error.is_none()
+            && self.verdict.nothing_left
+            && self.removal.as_ref().is_none_or(|o| o.failed == 0)
+    }
+}
+
+/// Remove `program` completely: scan its footprint, close its processes,
+/// run its uninstaller only when needed, remove everything at `opts.level`
+/// and scan again. `target` is captured before anything changes.
+pub fn remove_completely(
+    pc: &dyn Pc,
+    program: &Program,
+    target: &ScanTarget,
+    plan: &UninstallPlan,
+    opts: &Options,
+) -> Outcome {
+    let start = std::time::Instant::now();
+    let footprint = pc.scan(target, true);
+    let vendor = if opts.use_uninstaller {
+        VendorStep::Run {
+            silent: runs_silently(program, plan),
+            reason: "asked for".to_string(),
+        }
+    } else {
+        vendor_step(program, plan, target, &footprint.items, &pc.machine_dirs())
+    };
+    let mut out = Outcome {
+        closed: Vec::new(),
+        vendor,
+        uninstaller: None,
+        selected: Vec::new(),
+        removal: None,
+        verdict: Verdict {
+            still_installed: true,
+            ..Verdict::default()
+        },
+        error: None,
+        seconds: 0.0,
+    };
+
+    if opts.dry_run {
+        // Everything the removal would take: the footprint as leftovers.
+        let report = pc.scan(target, false);
+        out.selected = at_level(&report, opts.level);
+        out.removal = pc.remove(&out.selected, &program.display_name).ok();
+        out.seconds = start.elapsed().as_secs_f64();
+        return out;
+    }
+
+    out.closed = pc.close(&owned_dirs(target, &footprint.items));
+
+    let mut installed = true;
+    if out.vendor.runs() {
+        match pc.run_uninstaller(plan) {
+            Ok(how) => out.uninstaller = Some(how),
+            Err(e) => {
+                out.error = Some(format!("{e:#}"));
+                out.verdict.still_installed = pc.still_installed(program);
+                out.seconds = start.elapsed().as_secs_f64();
+                return out;
+            }
+        }
+        installed = !pc.wait_until_gone(program, plan);
+        if installed {
+            // The scan would list the live install; leave it alone.
+            out.verdict.still_installed = true;
+            out.seconds = start.elapsed().as_secs_f64();
+            return out;
+        }
+    }
+
+    // Skipped, the entry is one more leftover; run, it may have stayed behind.
+    let report = pc.scan(target, false);
+    out.selected = at_level(&report, opts.level);
+    if !out.selected.is_empty() {
+        match pc.remove(&out.selected, &program.display_name) {
+            Ok(o) => out.removal = Some(o),
+            Err(e) => out.error = Some(format!("{e:#}")),
+        }
+    }
+    if installed {
+        installed = pc.still_installed(program);
+    }
+    let rescan = pc.scan(target, installed);
+    out.verdict = verdict(installed, &rescan, opts.level);
+    out.seconds = start.elapsed().as_secs_f64();
+    out
+}
+
+fn at_level(report: &ScanReport, level: Confidence) -> Vec<Leftover> {
+    report
+        .items
+        .iter()
+        .filter(|l| l.confidence <= level)
+        .cloned()
+        .collect()
+}
+
+/// This PC. `quiet` gives the vendor's uninstaller no console, for callers
+/// whose own input and output are taken: the window and the MCP server.
+pub struct ThisPc {
+    pub safety: SafetyContext,
+    pub quiet: bool,
+}
+
+impl Pc for ThisPc {
+    fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
+        scanner::scan(target, installed)
+    }
+
+    fn still_installed(&self, program: &Program) -> bool {
+        crate::uninstall::still_installed(program)
+    }
+
+    fn close(&self, dirs: &[PathBuf]) -> Vec<Closed> {
+        close_processes(dirs, CLOSE_GRACE)
+    }
+
+    fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String> {
+        use std::process::Stdio;
+        let status = if self.quiet {
+            crate::uninstall::run_with(plan, Stdio::null(), Stdio::null())?
+        } else {
+            crate::uninstall::run(plan)?
+        };
+        Ok(crate::uninstall::describe_exit(status, plan.is_msi))
+    }
+
+    fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool {
+        crate::uninstall::wait_for_completion(program, plan, VENDOR_WAIT)
+    }
+
+    fn remove(&self, items: &[Leftover], label: &str) -> anyhow::Result<DeletionOutcome> {
+        crate::safety::remove_leftovers(items, label, &self.safety)
+    }
+
+    fn machine_dirs(&self) -> Vec<PathBuf> {
+        machine_dirs()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{RegistrySource, RegistryView};
+    use std::cell::RefCell;
+
+    /// A PC in memory: the footprint shrinks by what was removed.
+    struct FakePc {
+        items: RefCell<Vec<Leftover>>,
+        installed: RefCell<bool>,
+        /// What the removal refuses.
+        stuck: Vec<String>,
+        /// What the vendor's uninstaller takes with it.
+        vendor_takes: Vec<String>,
+        calls: RefCell<Vec<String>>,
+    }
+
+    impl FakePc {
+        fn new(items: Vec<Leftover>) -> Self {
+            FakePc {
+                items: RefCell::new(items),
+                installed: RefCell::new(true),
+                stuck: Vec::new(),
+                vendor_takes: Vec::new(),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl Pc for FakePc {
+        fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {
+            self.calls.borrow_mut().push(format!("scan {installed}"));
+            ScanReport {
+                program_name: target.display_name.clone(),
+                installed,
+                items: self.items.borrow().clone(),
+            }
+        }
+
+        fn still_installed(&self, _program: &Program) -> bool {
+            *self.installed.borrow()
+        }
+
+        fn close(&self, dirs: &[PathBuf]) -> Vec<Closed> {
+            self.calls
+                .borrow_mut()
+                .push(format!("close {}", dirs.len()));
+            Vec::new()
+        }
+
+        fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<String> {
+            self.calls.borrow_mut().push("uninstall".to_string());
+            self.items
+                .borrow_mut()
+                .retain(|l| !self.vendor_takes.contains(&l.path));
+            Ok("finished".to_string())
+        }
+
+        fn wait_until_gone(&self, _program: &Program, _plan: &UninstallPlan) -> bool {
+            *self.installed.borrow_mut() = false;
+            true
+        }
+
+        fn remove(&self, items: &[Leftover], _label: &str) -> anyhow::Result<DeletionOutcome> {
+            self.calls
+                .borrow_mut()
+                .push(format!("remove {}", items.len()));
+            let mut o = DeletionOutcome {
+                attempted: items.len(),
+                ..DeletionOutcome::default()
+            };
+            for l in items {
+                if self.stuck.contains(&l.path) {
+                    o.failed += 1;
+                } else {
+                    o.deleted += 1;
+                    self.items.borrow_mut().retain(|i| i.path != l.path);
+                    if l.reason == "orphaned uninstall entry" {
+                        *self.installed.borrow_mut() = false;
+                    }
+                }
+            }
+            Ok(o)
+        }
+
+        fn machine_dirs(&self) -> Vec<PathBuf> {
+            machine()
+        }
+    }
+
+    fn entry() -> Leftover {
+        Leftover::reg_key(
+            Hive::CurrentUser,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\example-player",
+            Confidence::High,
+            "orphaned uninstall entry",
+        )
+    }
+
+    fn per_user_footprint() -> Vec<Leftover> {
+        vec![
+            entry(),
+            dir(r"C:\Users\me\AppData\Local\ExamplePlayer", Confidence::High),
+            dir(
+                r"C:\Users\me\AppData\Local\Temp\ExamplePlayer",
+                Confidence::Medium,
+            ),
+        ]
+    }
+
+    fn opts(level: Confidence) -> Options {
+        Options {
+            level,
+            dry_run: false,
+            use_uninstaller: false,
+        }
+    }
+
+    #[test]
+    fn a_per_user_program_goes_in_one_pass_without_its_uninstaller() {
+        let pc = FakePc::new(per_user_footprint());
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(!out.vendor.runs());
+        assert_eq!(
+            pc.calls(),
+            [
+                "scan true",
+                "close 1",
+                "scan false",
+                "remove 2",
+                "scan false"
+            ]
+        );
+        assert!(out.complete(), "{out:?}");
+        // The medium item was found but never meant to go.
+        assert_eq!(out.verdict.below_level, 1);
+    }
+
+    #[test]
+    fn medium_takes_the_medium_items_too() {
+        let pc = FakePc::new(per_user_footprint());
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::Medium));
+        assert!(out.complete());
+        assert_eq!(out.verdict.below_level, 0);
+        assert_eq!(out.selected.len(), 3);
+    }
+
+    #[test]
+    fn a_machine_wide_program_runs_its_uninstaller_first() {
+        let mut items = per_user_footprint();
+        items.push(Leftover::service(
+            "ExampleSvc",
+            r"C:\Users\me\AppData\Local\ExamplePlayer\svc.exe",
+            Confidence::High,
+            "inside the install folder",
+        ));
+        let mut pc = FakePc::new(items);
+        pc.vendor_takes = vec![
+            "service ExampleSvc  (C:\\Users\\me\\AppData\\Local\\ExamplePlayer\\svc.exe)"
+                .to_string(),
+            entry().path,
+        ];
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(out.vendor.runs());
+        assert_eq!(
+            pc.calls(),
+            [
+                "scan true",
+                "close 1",
+                "uninstall",
+                "scan false",
+                "remove 1",
+                "scan false"
+            ]
+        );
+        assert!(out.complete(), "{out:?}");
+    }
+
+    #[test]
+    fn an_item_that_stays_is_named_and_the_run_is_not_complete() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.stuck = vec![r"C:\Users\me\AppData\Local\ExamplePlayer".to_string()];
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(!out.complete());
+        assert!(!out.verdict.nothing_left);
+        let left: Vec<&str> = out
+            .verdict
+            .remaining
+            .iter()
+            .map(|l| l.path.as_str())
+            .collect();
+        assert_eq!(left, [r"C:\Users\me\AppData\Local\ExamplePlayer"]);
+    }
+
+    #[test]
+    fn a_dry_run_lists_every_item_and_changes_nothing() {
+        let pc = FakePc::new(per_user_footprint());
+        let p = program(Hive::CurrentUser);
+        let mut o = opts(Confidence::Medium);
+        o.dry_run = true;
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &o);
+        assert_eq!(out.selected.len(), 3);
+        // The fake's remove is the dry-run path of the real one; nothing
+        // was closed and no uninstaller ran.
+        assert_eq!(pc.calls(), ["scan true", "scan false", "remove 3"]);
+        assert!(!out.complete());
+    }
 
     fn program(hive: Hive) -> Program {
         Program {
