@@ -27,6 +27,7 @@ oxidize orphans                  folders and references nothing owns anymore
 oxidize trace <exe or process>   which program does this belong to
 oxidize backups                  what earlier removals backed up
 oxidize restore <backup>         put a backup back
+oxidize mcp                      let an AI assistant use Oxidize
 ```
 
 `oxidize-gui.exe` is the same engine as a window.
@@ -146,6 +147,50 @@ keys are exported to `.reg` files and validated before anything is deleted.
 Files and folders are moved there, not deleted. Task definitions are copied.
 A manifest records every step, and `oxidize restore` replays it in reverse.
 
+## Use it with an AI assistant
+
+`oxidize mcp` lets an assistant that speaks MCP (the Model Context Protocol)
+use Oxidize on your PC. Add it to the assistant's MCP settings with the full
+path to `oxidize.exe`:
+
+```json
+{
+  "mcpServers": {
+    "oxidize": {
+      "command": "C:\\Tools\\oxidize.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The assistant can then list programs and Store apps, scan for a program's
+leftovers, find orphans, trace an exe or a running process to its program and
+list your backups. None of that changes anything.
+
+To remove a program it first asks for a plan, which changes nothing either:
+the uninstaller that would run, every leftover that would go with its path,
+size, confidence and reason, whether administrator rights are needed, and where
+the backup goes. Only applying that plan removes anything, and only a plan made
+in the same session, exactly as shown and once. Your assistant asks you before
+it calls a tool, unless you told it to stop asking for this one, so nothing is
+removed until you agree to that step.
+
+Every removed item is backed up the same way as from the command line, and
+there is no way to skip it. The result says what was removed, what was not and
+why, what a fresh scan still finds, and the `oxidize restore` command that puts
+the removed items back. The assistant cannot restore or delete backups, remove
+anything that was not in a plan, or start Oxidize as administrator. Items that
+need administrator rights are reported with the command that removes them as
+administrator, for you to run.
+
+Every plan also lists the commands that do the same from a terminal, for
+example `oxidize uninstall "Example Player"`, if you would rather run the
+removal yourself.
+
+The server runs only while the assistant has it open and talks to it over
+stdin and stdout, nothing else.
+
 ## Build from source
 
 You need Git, Rust 1.95 or newer and the Visual Studio Build Tools with the
@@ -194,7 +239,9 @@ The engine is a library (`src/lib.rs`); `src/main.rs` and
 `src/bin/oxidize-gui.rs` are the two front-ends. Leftovers are only ever
 deleted through `safety::remove_leftovers`; the one other destructive call is
 the Store-app removal in `packages.rs`, which Windows carries out and which
-runs only after the guard allows it.
+runs only after the guard allows it. The MCP server in `src/mcp.rs` reads
+through one trait and removes through another, `Remove` in
+`src/mcp/machine.rs`, which only `apply_removal_plan` holds.
 
 ## License
 
