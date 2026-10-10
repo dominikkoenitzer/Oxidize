@@ -1812,11 +1812,13 @@ fn report_deleted(names: &[String], g: &Global) -> Result<()> {
 
 /// The same, for a run that asked and got no answer: a script has to be able
 /// to tell "nothing to delete" from "nobody confirmed".
+/// Exits with [`exit::CANCELLED`].
 fn report_cancelled(g: &Global) -> Result<()> {
     if !g.json {
         term::info("Cancelled.");
     }
-    report_deleted_or_cancelled(&[], true, g)
+    report_deleted_or_cancelled(&[], true, g)?;
+    Err(Failure::cancelled("Cancelled.", true).into())
 }
 
 fn report_deleted_or_cancelled(names: &[String], cancelled: bool, g: &Global) -> Result<()> {
@@ -1845,9 +1847,41 @@ fn report_deleted_or_cancelled(names: &[String], cancelled: bool, g: &Global) ->
     Ok(())
 }
 
+/// Whether a restore goes ahead. A dry run never asks. Enter means yes,
+/// since a restore puts things back. `--json` cannot ask, so it needs
+/// `--yes`.
+fn restore_goes_ahead(dry_run: bool, yes: bool, json: bool, ask: impl FnOnce() -> bool) -> bool {
+    if dry_run || yes {
+        return true;
+    }
+    if json {
+        return false;
+    }
+    ask()
+}
+
 fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     let info = backup::find_backup(&args.name)?;
+    let question = format!("Restore {} items from {}?", info.items, info.name);
+    if !restore_goes_ahead(g.dry_run, g.yes, g.json, || term::confirm(&question, true)) {
+        if g.json {
+            return Err(Failure::cancelled(
+                "nothing was restored; add --yes to restore with --json",
+                false,
+            )
+            .into());
+        }
+        term::info("Cancelled.");
+        return Err(Failure::cancelled("Cancelled.", true).into());
+    }
     let items = restore::restore(&info, g.dry_run)?;
+    let failed = items.iter().filter(|i| i.result.is_err()).count();
+    let incomplete = || {
+        Failure::incomplete(
+            format!("{failed} of {} items could not be restored", items.len()),
+            g.json,
+        )
+    };
 
     if g.json {
         let arr: Vec<_> = items
@@ -1864,12 +1898,14 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&json!({ "backup": info, "items": arr }))?
         );
+        if failed > 0 && !g.dry_run {
+            return Err(incomplete().into());
+        }
         return Ok(());
     }
 
     println!("{}", term::bold(&format!("Restoring {}", info.name)));
     let mut ok = 0;
-    let mut failed = 0;
     for i in &items {
         match &i.result {
             Ok(()) if g.dry_run => println!("  {}  {}", term::dim("would restore"), i.path),
@@ -1878,7 +1914,6 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
                 println!("  {}  {}", term::green("restored"), i.path);
             }
             Err(e) => {
-                failed += 1;
                 println!("  {}  {}  {}", term::red("failed  "), i.path, term::dim(e));
             }
         }
@@ -1906,7 +1941,7 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
             );
         }
         if failed > 0 {
-            bail!("{failed} of {} items could not be restored", items.len());
+            return Err(incomplete().into());
         }
     }
     Ok(())
@@ -3299,5 +3334,39 @@ mod tests {
         rows.retain(|r| r.matches("vendor.notes"));
         assert_eq!(row_names(&rows), ["Notes"]);
         assert_eq!(list_footer(&rows), "1 Store app");
+    }
+
+    #[test]
+    fn a_restore_asks_unless_told_not_to() {
+        let never = || -> bool { panic!("asked") };
+        // dry run, yes
+        assert!(restore_goes_ahead(true, false, false, never));
+        assert!(restore_goes_ahead(true, false, true, never));
+        assert!(restore_goes_ahead(false, true, false, never));
+        assert!(restore_goes_ahead(false, true, true, never));
+        // --json cannot ask
+        assert!(!restore_goes_ahead(false, false, true, never));
+        // otherwise the answer decides
+        assert!(restore_goes_ahead(false, false, false, || true));
+        assert!(!restore_goes_ahead(false, false, false, || false));
+    }
+
+    #[test]
+    fn a_name_that_resolves_to_nothing_or_several_is_typed() {
+        let f = Resolve::NotFound.into_failure("Example Player");
+        assert_eq!((f.code, f.exit), ("not_found", exit::ERROR));
+        assert_eq!(f.message, not_found("Example Player"));
+        let f = Resolve::Ambiguous("two match".into()).into_failure("Example");
+        assert_eq!((f.code, f.message.as_str()), ("ambiguous", "two match"));
+    }
+
+    #[test]
+    fn a_batch_with_an_unknown_name_fails_as_not_found() {
+        let programs = vec![program("Example Player", "ExamplePlayer", Some("u.exe"))];
+        let targets = vec!["Example Player".to_string(), "Nothing Here".to_string()];
+        let err = plan_batch(&programs, &[], &targets, false).unwrap_err();
+        let o = exit::outcome(&err);
+        assert_eq!((o.code, o.exit), ("not_found", exit::ERROR));
+        assert!(o.message.starts_with("nothing was uninstalled"));
     }
 }
