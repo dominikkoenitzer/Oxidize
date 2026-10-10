@@ -215,8 +215,10 @@ pub fn close_processes(dirs: &[PathBuf], grace: Duration) -> Vec<Closed> {
 pub trait Pc {
     fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport;
     fn still_installed(&self, program: &Program) -> bool;
-    /// Close what runs from these folders.
-    fn close(&self, dirs: &[PathBuf]) -> Vec<Closed>;
+    /// Every running process with a known image.
+    fn running(&self) -> Vec<Running>;
+    /// Close these processes: their windows first, then end them.
+    fn close(&self, procs: &[Running]) -> Vec<Closed>;
     /// Run the vendor's uninstaller; returns how it ended, in words.
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String>;
     /// Wait until the program is unregistered; true when it is.
@@ -224,6 +226,8 @@ pub trait Pc {
     /// Remove the items, with a backup unless told otherwise.
     fn remove(&self, items: &[Leftover], label: &str) -> anyhow::Result<DeletionOutcome>;
     fn machine_dirs(&self) -> Vec<PathBuf>;
+    /// Told whether the vendor's uninstaller runs, before anything changes.
+    fn decided(&self, _vendor: &VendorStep) {}
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -239,9 +243,13 @@ pub struct Options {
 #[derive(Debug, Clone)]
 pub struct Outcome {
     pub closed: Vec<Closed>,
+    /// In a dry run, the processes that would be closed.
+    pub would_close: Vec<Running>,
     pub vendor: VendorStep,
     /// How the vendor's uninstaller ended, when it ran.
     pub uninstaller: Option<String>,
+    /// The leftovers scan the removal worked from.
+    pub report: ScanReport,
     /// What was selected for removal, or would be in a dry run.
     pub selected: Vec<Leftover>,
     pub removal: Option<DeletionOutcome>,
@@ -272,7 +280,11 @@ pub fn remove_completely(
 ) -> Outcome {
     let start = std::time::Instant::now();
     let footprint = pc.scan(target, true);
-    let vendor = if opts.use_uninstaller {
+    let vendor = if !opts.dry_run && !pc.still_installed(program) {
+        VendorStep::Skip {
+            reason: "no longer registered".to_string(),
+        }
+    } else if opts.use_uninstaller {
         VendorStep::Run {
             silent: runs_silently(program, plan),
             reason: "asked for".to_string(),
@@ -280,10 +292,13 @@ pub fn remove_completely(
     } else {
         vendor_step(program, plan, target, &footprint.items, &pc.machine_dirs())
     };
+    pc.decided(&vendor);
     let mut out = Outcome {
         closed: Vec::new(),
+        would_close: Vec::new(),
         vendor,
         uninstaller: None,
+        report: ScanReport::default(),
         selected: Vec::new(),
         removal: None,
         verdict: Verdict {
@@ -294,16 +309,22 @@ pub fn remove_completely(
         seconds: 0.0,
     };
 
+    let dirs = owned_dirs(target, &footprint.items);
+    let picked = processes_in(&pc.running(), &dirs, std::process::id());
+
     if opts.dry_run {
         // Everything the removal would take: the footprint as leftovers.
-        let report = pc.scan(target, false);
-        out.selected = at_level(&report, opts.level);
+        out.would_close = picked;
+        out.report = pc.scan(target, false);
+        out.selected = at_level(&out.report, opts.level);
         out.removal = pc.remove(&out.selected, &program.display_name).ok();
         out.seconds = start.elapsed().as_secs_f64();
         return out;
     }
 
-    out.closed = pc.close(&owned_dirs(target, &footprint.items));
+    if !picked.is_empty() {
+        out.closed = pc.close(&picked);
+    }
 
     let mut installed = true;
     if out.vendor.runs() {
@@ -326,8 +347,8 @@ pub fn remove_completely(
     }
 
     // Skipped, the entry is one more leftover; run, it may have stayed behind.
-    let report = pc.scan(target, false);
-    out.selected = at_level(&report, opts.level);
+    out.report = pc.scan(target, false);
+    out.selected = at_level(&out.report, opts.level);
     if !out.selected.is_empty() {
         match pc.remove(&out.selected, &program.display_name) {
             Ok(o) => out.removal = Some(o),
@@ -368,8 +389,12 @@ impl Pc for ThisPc {
         crate::uninstall::still_installed(program)
     }
 
-    fn close(&self, dirs: &[PathBuf]) -> Vec<Closed> {
-        close_processes(dirs, CLOSE_GRACE)
+    fn running(&self) -> Vec<Running> {
+        system::running_processes()
+    }
+
+    fn close(&self, procs: &[Running]) -> Vec<Closed> {
+        system::close_processes(procs, CLOSE_GRACE)
     }
 
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String> {
@@ -442,11 +467,33 @@ mod tests {
             *self.installed.borrow()
         }
 
-        fn close(&self, dirs: &[PathBuf]) -> Vec<Closed> {
+        fn running(&self) -> Vec<Running> {
+            vec![
+                Running {
+                    pid: 100,
+                    exe: PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe"),
+                },
+                Running {
+                    pid: 200,
+                    exe: PathBuf::from(r"C:\Users\me\AppData\Local\Other\player.exe"),
+                },
+            ]
+        }
+
+        fn close(&self, procs: &[Running]) -> Vec<Closed> {
+            let pids: Vec<String> = procs.iter().map(|p| p.pid.to_string()).collect();
             self.calls
                 .borrow_mut()
-                .push(format!("close {}", dirs.len()));
-            Vec::new()
+                .push(format!("close {}", pids.join(",")));
+            procs
+                .iter()
+                .map(|p| Closed {
+                    pid: p.pid,
+                    exe: p.exe.display().to_string(),
+                    how: CloseHow::Closed,
+                    error: None,
+                })
+                .collect()
         }
 
         fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<String> {
@@ -527,7 +574,7 @@ mod tests {
             pc.calls(),
             [
                 "scan true",
-                "close 1",
+                "close 100",
                 "scan false",
                 "remove 2",
                 "scan false"
@@ -570,7 +617,7 @@ mod tests {
             pc.calls(),
             [
                 "scan true",
-                "close 1",
+                "close 100",
                 "uninstall",
                 "scan false",
                 "remove 1",
@@ -608,6 +655,8 @@ mod tests {
         // The fake's remove is the dry-run path of the real one; nothing
         // was closed and no uninstaller ran.
         assert_eq!(pc.calls(), ["scan true", "scan false", "remove 3"]);
+        let pids: Vec<u32> = out.would_close.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, [100]);
         assert!(!out.complete());
     }
 
