@@ -137,7 +137,7 @@ pub fn vendor_step(
         LeftoverKind::RegistryKey | LeftoverKind::RegistryValue | LeftoverKind::PathEntry => {
             l.hive == Some(Hive::LocalMachine)
         }
-        LeftoverKind::ScheduledTask => false,
+        LeftoverKind::ScheduledTask => true,
         LeftoverKind::File | LeftoverKind::Directory => machine_dirs
             .iter()
             .any(|root| system::path_under(Path::new(&l.path), root)),
@@ -151,7 +151,8 @@ pub fn vendor_step(
 }
 
 /// An uninstaller that runs without asking: the plan carries the unattended
-/// switches, Windows Installer's, a recorded quiet command or Inno Setup's.
+/// switches, Windows Installer's, a recorded quiet command or the ones an
+/// `unins000.exe` uninstaller documents.
 /// A quiet command the plan does not use says nothing.
 pub fn runs_silently(_program: &Program, plan: &UninstallPlan) -> bool {
     plan.unattended
@@ -164,6 +165,7 @@ pub fn machine_dirs() -> Vec<PathBuf> {
         "ProgramFiles(x86)",
         "ProgramW6432",
         "ProgramData",
+        "PUBLIC",
     ]
     .iter()
     .filter_map(|v| scanner::env_dir(v))
