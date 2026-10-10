@@ -1,5 +1,16 @@
 # Oxidize
 
+[Download Oxidize](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-gui.exe), then double-click it.
+
+The file is not signed, so Windows may show "Windows protected your PC". Click
+More info, then Run anyway.
+
+The command-line version is
+[oxidize.exe](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize.exe),
+or get [a zip with both](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-windows-x64.zip).
+It runs from a terminal, for example `.\oxidize.exe list` in the folder you
+saved it to.
+
 Uninstall Windows programs and remove what they leave behind.
 
 Windows' own uninstall leaves things around: registry keys, folders under
@@ -22,15 +33,51 @@ oxidize restore <backup>         put a backup back
 
 ## Install
 
-Download `oxidize-<version>-windows-x64.zip` from the latest release, check it
-against the `.sha256` file next to it, and unpack `oxidize.exe` and
-`oxidize-gui.exe` into a folder on your PATH. Or build it yourself:
+Oxidize runs on Windows only and has no installer. Every release uses the same
+file names, so these links always get the latest version:
+
+| file | |
+|---|---|
+| [`oxidize-gui.exe`](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-gui.exe) | the window app |
+| [`oxidize.exe`](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize.exe) | the command line |
+| [`oxidize-windows-x64.zip`](https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-windows-x64.zip) | both in one zip |
+
+The window app runs from wherever you save it. Double-click it; if Windows
+warns that it does not know the file, click More info, then Run anyway.
+
+To type `oxidize` in any terminal, `oxidize.exe` has to be in a folder on your
+PATH. Make a folder such as `C:\Tools` and move `oxidize.exe` into it. Search
+Windows for "Edit environment variables for your account", select `Path`,
+click Edit, then New, type `C:\Tools` and close both windows with OK. Terminals
+you open after that find it.
+
+You can also skip PATH and run it from the folder you saved it to. Open a
+terminal there (right-click an empty spot in the folder, then Open in Terminal)
+and start it with its path:
 
 ```
-cargo build --release
+.\oxidize.exe list
 ```
 
-Windows only. Rust 1.95 or newer with the MSVC toolchain.
+Double-clicking `oxidize.exe` in Explorer opens the window app when
+`oxidize-gui.exe` is in the same folder. Otherwise it shows the help and waits
+for Enter.
+
+Each file has a `.sha256` file next to it in the release, for example
+`oxidize-gui.exe.sha256`. To check a download, save both into the same folder,
+open a terminal there and run:
+
+```
+Get-FileHash .\oxidize-gui.exe -Algorithm SHA256
+```
+
+The hash it prints has to match the one in `oxidize-gui.exe.sha256`; upper or
+lower case does not matter. This line compares them for you and prints `True`
+when they match:
+
+```
+(Get-FileHash .\oxidize-gui.exe -Algorithm SHA256).Hash -eq (Get-Content .\oxidize-gui.exe.sha256).Split(' ')[0]
+```
 
 ## Using it
 
@@ -99,12 +146,46 @@ keys are exported to `.reg` files and validated before anything is deleted.
 Files and folders are moved there, not deleted. Task definitions are copied.
 A manifest records every step, and `oxidize restore` replays it in reverse.
 
-## Building and testing
+## Build from source
+
+You need Git, Rust 1.95 or newer and the Visual Studio Build Tools with the
+Windows SDK. The Build Tools provide the MSVC linker; the SDK provides
+`rc.exe`, which `build.rs` needs to embed the icon. On a fresh PC, install them
+from PowerShell:
 
 ```
-cargo build --release
-cargo test
-cargo clippy --all-targets -- -D warnings
+winget install --id Git.Git -e
+winget install --id Rustlang.Rustup -e
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100"
+```
+
+Open a new terminal so PATH picks up the new tools, then build:
+
+```
+rustup default stable
+git clone https://github.com/dominikkoenitzer/Oxidize.git
+cd Oxidize
+cargo build --release --locked
+```
+
+The programs end up in `target\release\oxidize.exe` and
+`target\release\oxidize-gui.exe`.
+
+Once you have the clone, `scripts\setup.ps1` does the checking for you. It
+looks for rustup, cargo, the MSVC build tools and the Windows SDK and prints
+the winget command for anything missing; it installs nothing itself. When
+nothing is missing it runs `cargo build --release --locked`. From the
+repository root:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+```
+
+Before you send a change, run what CI runs:
+
+```
+cargo test --locked
+cargo clippy --locked --all-targets -- -D warnings
 cargo fmt --check
 ```
 
