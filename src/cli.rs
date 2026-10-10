@@ -1,6 +1,6 @@
 //! Command-line definition (clap derive).
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum};
 
 use crate::model::Confidence;
 
@@ -198,4 +198,109 @@ pub enum SortKey {
     Size,
     Date,
     Publisher,
+}
+
+/// What `oxidize` does when it is started without arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BareStart {
+    /// Started from a terminal: print the help, as always.
+    Help,
+    /// Double-clicked, with the window app next to it: open that instead.
+    OpenWindow,
+    /// Double-clicked, no window app next to it: print the help and keep the
+    /// console open until Enter.
+    HelpAndWait,
+}
+
+/// Decides what a start without arguments does. `console_processes` is the
+/// number of processes attached to the console. Windows gives a program
+/// double-clicked in Explorer a console of its own, so the count is 1; a
+/// terminal's shell makes it 2 or more. 0 means there is no console.
+pub fn bare_start(console_processes: u32, window_app_present: bool) -> BareStart {
+    match (console_processes, window_app_present) {
+        (1, true) => BareStart::OpenWindow,
+        (1, false) => BareStart::HelpAndWait,
+        _ => BareStart::Help,
+    }
+}
+
+/// Handles a start without arguments. Returns only when the usual argument
+/// parsing should go on and print the help.
+pub fn handle_bare_start() {
+    let window_app = std::env::current_exe()
+        .ok()
+        .map(|exe| exe.with_file_name("oxidize-gui.exe"))
+        .filter(|path| path.is_file());
+    match bare_start(console_process_count(), window_app.is_some()) {
+        BareStart::Help => {}
+        BareStart::OpenWindow => {
+            if let Some(path) = window_app {
+                let started = std::process::Command::new(path)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                if started.is_ok() {
+                    std::process::exit(0);
+                }
+            }
+            help_and_wait();
+        }
+        BareStart::HelpAndWait => help_and_wait(),
+    }
+}
+
+fn help_and_wait() -> ! {
+    use std::io::Write;
+
+    let _ = Cli::command().print_help();
+    println!();
+    println!("Open a terminal and run oxidize with one of the commands above.");
+    println!("oxidize-gui.exe is the same tool as a window.");
+    print!("Press Enter to close.");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    std::process::exit(0);
+}
+
+#[cfg(windows)]
+fn console_process_count() -> u32 {
+    use windows::Win32::System::Console::GetConsoleProcessList;
+    let mut ids = [0u32; 8];
+    unsafe { GetConsoleProcessList(&mut ids) }
+}
+
+#[cfg(not(windows))]
+fn console_process_count() -> u32 {
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_console_opens_the_window_app_when_it_is_there() {
+        assert_eq!(bare_start(1, true), BareStart::OpenWindow);
+    }
+
+    #[test]
+    fn own_console_without_the_window_app_waits_after_the_help() {
+        assert_eq!(bare_start(1, false), BareStart::HelpAndWait);
+    }
+
+    #[test]
+    fn a_terminal_gets_the_help_as_before() {
+        for count in [2, 3, 8] {
+            assert_eq!(bare_start(count, true), BareStart::Help);
+            assert_eq!(bare_start(count, false), BareStart::Help);
+        }
+    }
+
+    #[test]
+    fn no_console_gets_the_help() {
+        assert_eq!(bare_start(0, true), BareStart::Help);
+        assert_eq!(bare_start(0, false), BareStart::Help);
+    }
 }
