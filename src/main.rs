@@ -16,8 +16,9 @@ fn main() {
     let cli = Cli::parse();
     if let Some(path) = &cli.result_file {
         // Started by --elevate: the result goes back to the run that waits.
+        // Without a way back the run would change things nobody hears of.
         if let Err(e) = safety::send_output_to(path) {
-            term::warn(&format!("{e:#}"));
+            finish(Err(e), cli.json);
         }
     }
     term::init(cli.no_color || cli.json);
@@ -27,7 +28,19 @@ fn main() {
         finish(elevate(&cli), json);
     }
 
-    finish(commands::dispatch(cli).map(|()| exit::DONE), json);
+    // A panic still ends in one JSON document and a non-zero exit code.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        commands::dispatch(cli).map(|()| exit::DONE)
+    }))
+    .unwrap_or_else(|panic| {
+        let what = panic
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown".to_string());
+        Err(anyhow::anyhow!("internal error: {what}"))
+    });
+    finish(result, json);
 }
 
 /// Run the command line again as administrator, wait for it, and pass on
@@ -51,7 +64,7 @@ fn elevate(cli: &Cli) -> anyhow::Result<i32> {
     let code = code?;
     if let Some((out, err)) = output {
         let _ = std::io::stderr().write_all(&err);
-        if cli.json && code != exit::DONE && out.iter().all(u8::is_ascii_whitespace) {
+        if cli.json && out.iter().all(u8::is_ascii_whitespace) {
             let message =
                 format!("the elevated run ended with exit code {code} and printed nothing");
             return Err(Failure::new("error", code, message, false).into());
