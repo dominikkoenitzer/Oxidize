@@ -1,6 +1,6 @@
 //! Leftovers that point at a program from outside its own folders and keys:
-//! the link types it answers to. Each step goes by where a command or a
-//! shortcut leads, not by what it is called.
+//! link types, shortcuts, temp folders and the uninstall entries of its
+//! parts. Where a command or a shortcut leads counts before its name.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -10,8 +10,8 @@ use super::{
     other_program_install_dirs, path_names_product, path_within_shared_dir, push_dir_leftover,
     score_product, Snapshot,
 };
-use crate::model::{Confidence, Hive, Leftover, LeftoverKind, ScanTarget};
-use crate::{lnk, registry, system};
+use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanTarget};
+use crate::{lnk, registry, system, util};
 
 /// Where each hive keeps its own classes. The machine's `Classes` key is the
 /// same for 32-bit and 64-bit programs, so one read covers both.
@@ -231,6 +231,59 @@ pub(super) fn scan_temp_folders(target: &ScanTarget, snap: &Snapshot) -> Vec<Lef
     }
 }
 
+/// Is another uninstall entry a broken part of the program? It has to point
+/// into the install folder, by its uninstaller, icon or recorded folder, and
+/// its uninstaller has to be gone. An entry whose uninstaller is still there
+/// can still remove what it installed, so it stays.
+fn stale_uninstall_entry(
+    entry: &Program,
+    loc: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<(Confidence, String)> {
+    let as_path = |s: &str| PathBuf::from(util::expand_env_vars(s).trim().trim_matches('"'));
+    let uninstaller = locate_exe(&system::command_exe(entry.uninstall_string.as_deref()?)?);
+    if !uninstaller.is_absolute() || system::in_windows_dir(&uninstaller) || exists(&uninstaller) {
+        return None;
+    }
+    let icon = entry
+        .display_icon
+        .as_deref()
+        .map(|i| as_path(i.split(',').next().unwrap_or(i)));
+    let folder = entry.install_location.as_deref().map(as_path);
+    let points_in = [Some(uninstaller), icon, folder]
+        .into_iter()
+        .flatten()
+        .any(|p| p.is_absolute() && system::path_under(&p, loc));
+    points_in.then(|| {
+        (
+            Confidence::High,
+            "uninstall entry pointing to a missing file".to_string(),
+        )
+    })
+}
+
+/// Other uninstall entries left pointing into the program's folder with
+/// their uninstaller gone.
+pub(super) fn scan_stale_uninstall_entries(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
+    let Some(loc) = target.install_location.as_deref() else {
+        return Vec::new();
+    };
+    snap.programs()
+        .iter()
+        .filter(|p| {
+            target
+                .registry
+                .as_ref()
+                .is_none_or(|(key, source)| !(p.registry_key == *key && p.source == *source))
+        })
+        .filter_map(|p| {
+            let (conf, reason) = stale_uninstall_entry(p, loc, Path::exists)?;
+            let subpath = format!(r"{}\{}", p.source.view.uninstall_base(), p.registry_key);
+            Some(Leftover::reg_key(p.source.hive, subpath, conf, reason))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +449,63 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    fn entry(uninstall: Option<&str>, icon: Option<&str>, folder: Option<&str>) -> Program {
+        Program {
+            registry_key: "Quillmark Helper".to_string(),
+            source: crate::model::RegistrySource::new(
+                Hive::CurrentUser,
+                crate::model::RegistryView::Native64,
+            ),
+            display_name: "Quillmark Helper".to_string(),
+            display_version: None,
+            publisher: None,
+            install_date: None,
+            install_location: folder.map(str::to_string),
+            display_icon: icon.map(str::to_string),
+            estimated_size_kb: None,
+            uninstall_string: uninstall.map(str::to_string),
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    #[test]
+    fn an_uninstall_entry_into_the_folder_with_its_uninstaller_gone_is_stale() {
+        let loc = Path::new(HOME);
+        let inside = format!(r#""{HOME}\helper\uninst.exe" /S"#);
+        let gone = |_: &Path| false;
+        let there = |_: &Path| true;
+        let want = Some((
+            Confidence::High,
+            "uninstall entry pointing to a missing file".to_string(),
+        ));
+        assert_eq!(
+            stale_uninstall_entry(&entry(Some(&inside), None, None), loc, gone),
+            want
+        );
+        // An uninstaller kept elsewhere, with the icon or the folder inside.
+        let cached = r#""C:\ProgramData\Example Cache\setup-7f3a.exe" /uninstall"#;
+        let icon = format!(r"{HOME}\helper\helper.exe,0");
+        assert_eq!(
+            stale_uninstall_entry(&entry(Some(cached), Some(&icon), None), loc, gone),
+            want
+        );
+        assert_eq!(
+            stale_uninstall_entry(&entry(Some(cached), None, Some(HOME)), loc, gone),
+            want
+        );
+        // An uninstaller that is still there can do its job.
+        assert!(stale_uninstall_entry(&entry(Some(&inside), None, None), loc, there).is_none());
+        // Nothing points into the folder.
+        assert!(stale_uninstall_entry(&entry(Some(cached), None, None), loc, gone).is_none());
+        // No uninstaller, or one Windows runs, says nothing.
+        assert!(stale_uninstall_entry(&entry(None, Some(&icon), Some(HOME)), loc, gone).is_none());
+        let msi = "MsiExec.exe /X{2D7E0D49-0001-0000-0000-000000000000}";
+        assert!(stale_uninstall_entry(&entry(Some(msi), None, Some(HOME)), loc, gone).is_none());
     }
 
     #[test]
