@@ -54,6 +54,25 @@ pub enum Commands {
     Restore(RestoreArgs),
 }
 
+impl Cli {
+    /// Whether this command line only reads: it uninstalls, removes,
+    /// deletes, restores and elevates nothing.
+    pub fn changes_nothing(&self) -> bool {
+        if self.elevate {
+            return false;
+        }
+        match &self.command {
+            Commands::List(_) => true,
+            Commands::Uninstall(_) => self.dry_run,
+            Commands::Scan(args) => !args.remove || self.dry_run,
+            Commands::Orphans(args) => !args.remove || self.dry_run,
+            Commands::Trace(args) => !args.uninstall || self.dry_run,
+            Commands::Backups(args) => (args.delete.is_none() && !args.clear) || self.dry_run,
+            Commands::Restore(_) => self.dry_run,
+        }
+    }
+}
+
 #[derive(Args, Debug)]
 pub struct ListArgs {
     /// Only programs and apps whose name or publisher contains this text.
@@ -295,6 +314,40 @@ mod tests {
         for count in [2, 3, 8] {
             assert_eq!(bare_start(count, true), BareStart::Help);
             assert_eq!(bare_start(count, false), BareStart::Help);
+        }
+    }
+
+    fn parse(args: &str) -> Cli {
+        Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')))
+            .unwrap_or_else(|e| panic!("{args}: {e}"))
+    }
+
+    #[test]
+    fn only_command_lines_that_read_change_nothing() {
+        for args in [
+            "list --json",
+            "scan Thing --json",
+            "orphans",
+            "trace thing.exe",
+            "backups",
+            "uninstall Thing --dry-run",
+            "scan Thing --remove --dry-run",
+            "restore name --dry-run",
+        ] {
+            assert!(parse(args).changes_nothing(), "{args}");
+        }
+        for args in [
+            "uninstall Thing",
+            "uninstall Thing --yes --json",
+            "scan Thing --remove",
+            "orphans --remove",
+            "trace thing.exe --uninstall",
+            "backups --delete name",
+            "backups --clear",
+            "restore name",
+            "list --elevate",
+        ] {
+            assert!(!parse(args).changes_nothing(), "{args}");
         }
     }
 
