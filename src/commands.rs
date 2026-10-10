@@ -971,6 +971,34 @@ fn run_uninstall(
     let out = complete::remove_completely(&pc, program, target, plan, &opts);
     let v = &out.verdict;
 
+    let json_out = complete_json(program, plan, &out, level, g.dry_run);
+
+    if !g.json {
+        print_complete(name, &out, g.dry_run);
+    }
+    Ok(ProgramRun {
+        name: name.clone(),
+        json: json_out,
+        gone: !g.dry_run && !v.still_installed,
+        found: out.report.total(),
+        removal: out.removal.clone(),
+        error: out.error.clone(),
+        left: v.remaining.len(),
+    })
+}
+
+/// A complete removal as JSON. Stable fields for scripts: `nothing_left`,
+/// `still_installed`, `remaining`, `below_level`, `closed`, `uninstaller`,
+/// `uninstaller_step`, `removal`, `seconds`; a dry run has `would_close` and
+/// `would_remove` instead.
+fn complete_json(
+    program: &Program,
+    plan: &uninstall::UninstallPlan,
+    out: &complete::Outcome,
+    level: Confidence,
+    dry_run: bool,
+) -> serde_json::Value {
+    let v = &out.verdict;
     let mut json_out = json!({
         "kind": "program",
         "program": program,
@@ -980,7 +1008,7 @@ fn run_uninstall(
         "report": out.report,
         "seconds": (out.seconds * 10.0).round() / 10.0,
     });
-    if g.dry_run {
+    if dry_run {
         json_out["would_close"] = json!(out.would_close);
         json_out["would_remove"] = json!(out.selected);
     } else {
@@ -1001,19 +1029,7 @@ fn run_uninstall(
     if let Some(e) = &out.error {
         json_out["error"] = json!(e);
     }
-
-    if !g.json {
-        print_complete(name, &out, g.dry_run);
-    }
-    Ok(ProgramRun {
-        name: name.clone(),
-        json: json_out,
-        gone: !g.dry_run && !v.still_installed,
-        found: out.report.total(),
-        removal: out.removal.clone(),
-        error: out.error.clone(),
-        left: v.remaining.len(),
-    })
+    json_out
 }
 
 /// The end of a complete removal in words.
@@ -2707,6 +2723,108 @@ mod tests {
             store_app_refusal("calculator", app),
             "\"calculator\" is the Store app Windows Calculator. Its leftovers are found when it is removed: oxidize uninstall \"Microsoft.WindowsCalculator_8wekyb3d8bbwe\""
         );
+    }
+
+    fn outcome(dry_run: bool) -> complete::Outcome {
+        let folder = Leftover::fs(
+            LeftoverKind::Directory,
+            PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer"),
+            Confidence::High,
+            "named after the program",
+            Some(10),
+            false,
+        );
+        complete::Outcome {
+            closed: if dry_run {
+                Vec::new()
+            } else {
+                vec![complete::Closed {
+                    pid: 100,
+                    exe: r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe".to_string(),
+                    how: complete::CloseHow::Ended,
+                    error: None,
+                }]
+            },
+            would_close: if dry_run {
+                vec![complete::Running {
+                    pid: 100,
+                    exe: PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe"),
+                }]
+            } else {
+                Vec::new()
+            },
+            vendor: complete::VendorStep::Skip {
+                reason: "installed for this user only".to_string(),
+            },
+            uninstaller: None,
+            report: ScanReport {
+                program_name: "Example Player".to_string(),
+                installed: false,
+                items: vec![folder.clone()],
+            },
+            selected: vec![folder],
+            removal: (!dry_run).then(|| removed(1, 0, Some("2026-10-10 150000 Example Player"))),
+            verdict: complete::Verdict {
+                nothing_left: !dry_run,
+                still_installed: dry_run,
+                remaining: Vec::new(),
+                below_level: 2,
+            },
+            error: None,
+            seconds: 1.234,
+        }
+    }
+
+    #[test]
+    fn a_complete_removal_as_json_says_nothing_is_left() {
+        let p = program(
+            "Example Player",
+            "example-player",
+            Some(r"C:\x\uninstall.exe"),
+        );
+        let plan = uninstall::plan(&p, true).unwrap();
+        let j = complete_json(&p, &plan, &outcome(false), Confidence::High, false);
+        assert_eq!(j["nothing_left"], true);
+        assert_eq!(j["still_installed"], false);
+        assert_eq!(j["remaining"], json!([]));
+        assert_eq!(j["below_level"], 2);
+        assert_eq!(j["closed"][0]["how"], "ended");
+        assert_eq!(j["uninstaller_step"]["action"], "skip");
+        assert_eq!(j["uninstaller"], "skipped, installed for this user only");
+        assert_eq!(j["removal"]["backup"], "2026-10-10 150000 Example Player");
+        assert_eq!(j["level"], "high");
+        assert_eq!(j["seconds"], 1.2);
+        assert!(j.get("would_remove").is_none());
+    }
+
+    #[test]
+    fn a_dry_run_as_json_lists_every_item_it_would_remove() {
+        let p = program(
+            "Example Player",
+            "example-player",
+            Some(r"C:\x\uninstall.exe"),
+        );
+        let plan = uninstall::plan(&p, true).unwrap();
+        let j = complete_json(&p, &plan, &outcome(true), Confidence::High, true);
+        assert_eq!(
+            j["would_remove"][0]["path"],
+            r"C:\Users\me\AppData\Local\ExamplePlayer"
+        );
+        assert_eq!(j["would_remove"][0]["confidence"], "High");
+        assert_eq!(j["would_close"][0]["pid"], 100);
+        assert!(j.get("nothing_left").is_none());
+        assert!(j.get("closed").is_none());
+    }
+
+    #[test]
+    fn something_left_after_the_second_scan_fails_the_run() {
+        let mut r = run("Example Player", true, 3, Some(removed(3, 0, Some("b"))));
+        assert!(!r.failed(false));
+        r.left = 1;
+        assert!(r.failed(false));
+        assert_eq!(r.why_failed(), "1 items of Example Player are still there");
+        // A dry run removes nothing, so nothing left over counts against it.
+        assert!(!r.failed(true));
     }
 
     /// Answers yes to everything and prints JSON, so nothing waits on a prompt.
