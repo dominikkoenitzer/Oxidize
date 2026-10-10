@@ -7,7 +7,7 @@
 //! process list afterwards.
 
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
@@ -96,9 +96,20 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
 
 /// Launch the plan and wait for the spawned process to exit.
 pub fn run(plan: &UninstallPlan) -> Result<ExitStatus> {
+    run_with(plan, Stdio::inherit(), Stdio::inherit())
+}
+
+/// `run` with the uninstaller's input and output given. The MCP server
+/// passes `Stdio::null()` for both: its own are the protocol stream.
+pub fn run_with(plan: &UninstallPlan, stdin: Stdio, stdout: Stdio) -> Result<ExitStatus> {
     let (exe, args) = plan.argv.split_first().expect("plan argv is never empty");
 
-    Command::new(exe).args(args).status().map_err(|e| {
+    Command::new(exe)
+        .args(args)
+        .stdin(stdin)
+        .stdout(stdout)
+        .status()
+        .map_err(|e| {
         if e.raw_os_error() == Some(740) {
             anyhow::anyhow!("the uninstaller needs administrator rights. Add --elevate or use an elevated terminal.")
         } else {
