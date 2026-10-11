@@ -35,7 +35,7 @@
       "name": "hero",
       "w": 2880,
       "h": 1800,
-      "alt": "Oxidize with Example Player selected and the twelve items that belong to it, each with how sure Oxidize is and why"
+      "alt": "Oxidize with Quillmark selected and the eight items that belong to it, grouped by kind, each with how sure Oxidize is and why"
     }
   },
   "features": [
@@ -50,14 +50,14 @@
         "name": "f2",
         "w": 2880,
         "h": 1800,
-        "pos": "50% 30%",
+        "pos": "50% 48%",
         "zoom": 1.15,
-        "alt": "The confirmation before Demo Photo Studio is removed completely"
+        "alt": "The question before Quillmark is removed completely"
       },
       "detail": {
         "name": "c2",
-        "w": 706,
-        "h": 260,
+        "w": 800,
+        "h": 284,
         "style": "width: 40%"
       }
     },
@@ -71,15 +71,15 @@
         "name": "f3",
         "w": 2880,
         "h": 1800,
-        "pos": "30% 0",
+        "pos": "100% 40%",
         "zoom": 1.3,
-        "alt": "The result: Nothing left, removed in 3.9 seconds, with an Undo button"
+        "alt": "The result: Nothing left, nine items removed, with an Undo button"
       },
       "detail": {
         "name": "c3",
-        "w": 461,
-        "h": 166,
-        "style": "width: 34%"
+        "w": 570,
+        "h": 190,
+        "style": "width: 32%"
       }
     },
     {
@@ -94,12 +94,13 @@
         "w": 2880,
         "h": 1800,
         "pos": "40% 0",
-        "alt": "Eleven leftovers of Northwind Notes, nine ticked"
+        "alt": "Seven leftovers of Corvid Notes after its own uninstaller ran, all ticked"
       },
       "detail": {
         "name": "c1",
-        "w": 1023,
-        "h": 360
+        "w": 570,
+        "h": 520,
+        "style": "width: 34%"
       }
     },
     {
@@ -113,12 +114,12 @@
         "w": 2880,
         "h": 1800,
         "pos": "0 100%",
-        "alt": "After Undo, the program is back and the log lists every restored item"
+        "alt": "After Undo, Quillmark is back and the log lists every restored item"
       },
       "detail": {
         "name": "c4",
-        "w": 1123,
-        "h": 223,
+        "w": 1180,
+        "h": 250,
         "style": "width: 60%"
       }
     },
@@ -133,12 +134,13 @@
         "w": 2880,
         "h": 1800,
         "pos": "40% 0",
-        "alt": "A dry run listing ten items and one running process"
+        "alt": "A dry run: nine items would be removed and one running process closed"
       },
       "detail": {
         "name": "c5",
-        "w": 936,
-        "h": 310
+        "w": 570,
+        "h": 290,
+        "style": "width: 34%"
       }
     }
   ],
