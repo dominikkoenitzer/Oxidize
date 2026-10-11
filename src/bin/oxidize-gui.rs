@@ -911,10 +911,13 @@ impl eframe::App for OxidizeApp {
                 .show(ui, |ui| self.log_view(ui, &t));
         }
 
+        // At most two fifths of the window, so a small window keeps a usable
+        // table.
+        let widest = (ui.available_width() * 0.4).clamp(300.0, 560.0);
         egui::Panel::right("details")
             .resizable(true)
             .default_size(380.0)
-            .size_range(300.0..=560.0)
+            .size_range(300.0..=widest)
             .frame(
                 egui::Frame::new()
                     .fill(t.side)
