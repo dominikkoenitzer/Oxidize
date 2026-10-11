@@ -2210,7 +2210,11 @@ fn danger_button(t: &Tint, text: &str) -> egui::Button<'static> {
 /// The colour of the `n`th part of the overview bar: copper and verdigris
 /// take turns, each pair a little paler than the one before.
 fn part_color(t: &Tint, n: usize) -> Color32 {
-    let metal = if n % 2 == 0 { t.copper } else { t.verdigris };
+    let metal = if n.is_multiple_of(2) {
+        t.copper
+    } else {
+        t.verdigris
+    };
     metal.lerp_to_gamma(t.base, (n / 2) as f32 * 0.16)
 }
 
