@@ -2118,7 +2118,8 @@ fn visuals(t: &Tint) -> egui::Visuals {
     } else {
         egui::Visuals::light()
     };
-    let radius = egui::CornerRadius::same(6);
+    // Small enough that a checkbox stays a box.
+    let radius = egui::CornerRadius::same(4);
     v.panel_fill = t.base;
     v.window_fill = t.side;
     v.window_stroke = egui::Stroke::new(1.0, t.line);
