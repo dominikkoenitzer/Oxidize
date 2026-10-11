@@ -93,7 +93,7 @@
         "name": "f1",
         "w": 2880,
         "h": 1800,
-        "pos": "40% 0",
+        "pos": "100% 0",
         "alt": "Seven leftovers of Corvid Notes after its own uninstaller ran, all ticked"
       },
       "detail": {
@@ -133,7 +133,7 @@
         "name": "f5",
         "w": 2880,
         "h": 1800,
-        "pos": "40% 0",
+        "pos": "100% 0",
         "alt": "A dry run: nine items would be removed and one running process closed"
       },
       "detail": {
