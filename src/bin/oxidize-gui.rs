@@ -1,26 +1,38 @@
 //! `oxidize-gui`, the graphical front-end, built on egui/eframe.
 //!
-//! A window over the same engine the CLI uses: pick a program, scan for
-//! leftovers, tick the ones to remove, then uninstall or remove. Slow work runs
-//! on a worker thread and reports back over a channel. The dry-run and backup
-//! toggles and the confirmation work as they do on the command line.
+//! A window over the same engine the CLI uses: an overview of what is
+//! installed, a table of programs to sort and filter, and a details panel to
+//! remove one completely, run its uninstaller or scan for its leftovers. Slow
+//! work runs on a worker thread and reports back over a channel. The dry-run
+//! and backup toggles and the confirmation work as they do on the command line.
 
 // Hide the console window in release builds (keep it in debug for logs).
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+use chrono::NaiveDate;
 use eframe::egui::{self, Color32, RichText};
 
 use oxidize::complete::{self, CloseHow, Outcome, VendorStep};
-use oxidize::model::{Confidence, Group, Leftover, Program, ScanReport};
+use oxidize::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport};
 use oxidize::restore::RestoreItem;
 use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
 use oxidize::{backup, registry, restore, scanner, uninstall, util};
 
 /// The lowest confidence "Remove completely" removes.
 const COMPLETE_LEVEL: Confidence = Confidence::High;
+
+/// A program at least this big counts as large for the quick filter.
+const LARGE_BYTES: u64 = 1024 * 1024 * 1024;
+/// A program installed at most this many days ago counts as recent.
+const RECENT_DAYS: i64 = 30;
+/// How many of the biggest programs the overview bar shows on their own.
+const BAR_PROGRAMS: usize = 8;
+/// The height of one row in the program table.
+const ROW_HEIGHT: f32 = 30.0;
 
 /// The Oxidize mark for the window, the same artwork the executables embed.
 fn window_icon() -> egui::IconData {
@@ -31,7 +43,7 @@ fn window_icon() -> egui::IconData {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1040.0, 700.0])
+            .with_inner_size([1180.0, 760.0])
             .with_min_inner_size([720.0, 480.0])
             .with_title("Oxidize")
             // The window's own icon; without one eframe shows the egui logo in
@@ -125,8 +137,16 @@ struct OxidizeApp {
 
     // UI state.
     filter: String,
+    quick: QuickFilter,
     selected: Option<String>, // selected program's registry-key id
-    sort_by_size: bool,
+    sort: Sort,
+    /// The search field takes the keyboard once, when the window opens.
+    focus_search: bool,
+    /// Scroll the table to the selected program on the next frame.
+    reveal: bool,
+    /// The table's scroll offset and visible height, from the last frame.
+    table_view: (f32, f32),
+    show_log: bool,
 
     // Options (mirror the CLI flags).
     dry_run: bool,
@@ -146,9 +166,11 @@ struct OxidizeApp {
 }
 
 impl OxidizeApp {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    /// The window's state before anything is loaded: no programs, the
+    /// default settings, nothing running.
+    fn blank() -> Self {
         let (tx, rx) = channel();
-        let app = OxidizeApp {
+        OxidizeApp {
             programs: Vec::new(),
             icons: HashMap::new(),
             scan: None,
@@ -157,20 +179,33 @@ impl OxidizeApp {
             uninstalled: None,
             complete: None,
             filter: String::new(),
+            quick: QuickFilter::All,
             selected: None,
-            sort_by_size: false,
+            sort: Sort::default(),
+            focus_search: true,
+            reveal: false,
+            table_view: (0.0, 0.0),
+            show_log: false,
             dry_run: false,
             make_backups: true,
             silent: false,
             include_system: false,
-            elevated: safety::is_elevated(),
+            elevated: false,
             busy: false,
-            status: "Loading installed programs...".to_string(),
+            status: String::new(),
             log: Vec::new(),
             confirm: None,
             tx,
             rx,
-        };
+        }
+    }
+
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        apply_style(&cc.egui_ctx);
+        let mut app = OxidizeApp::blank();
+        app.elevated = safety::is_elevated();
+        app.busy = true;
+        app.status = "Loading installed programs...".to_string();
         // Kick off the initial program load on a worker thread.
         let tx = app.tx.clone();
         let ctx = cc.egui_ctx.clone();
@@ -572,39 +607,60 @@ impl OxidizeApp {
             .or_else(|| self.uninstalled.as_ref().filter(|p| p.id() == id))
     }
 
-    /// Filtered + sorted indices into `self.programs`.
-    fn display_indices(&self) -> Vec<usize> {
-        let needle = self.filter.to_lowercase();
+    /// The programs the table shows, as indices into `self.programs`: the ones
+    /// the search and the quick filter let through, in the table's order.
+    fn display_indices(&self, today: NaiveDate) -> Vec<usize> {
+        let terms = search_terms(&self.filter);
         let mut idx: Vec<usize> = self
             .programs
             .iter()
             .enumerate()
-            .filter(|(_, p)| {
-                needle.is_empty()
-                    || p.display_name.to_lowercase().contains(&needle)
-                    || p.publisher
-                        .as_deref()
-                        .map(|s| s.to_lowercase().contains(&needle))
-                        .unwrap_or(false)
-            })
+            .filter(|(_, p)| shows(p, &terms, self.quick, today))
             .map(|(i, _)| i)
             .collect();
-        if self.sort_by_size {
-            idx.sort_by(|&a, &b| {
-                self.programs[b]
-                    .size_bytes()
-                    .unwrap_or(0)
-                    .cmp(&self.programs[a].size_bytes().unwrap_or(0))
-            });
-        } else {
-            idx.sort_by(|&a, &b| {
-                self.programs[a]
-                    .display_name
-                    .to_lowercase()
-                    .cmp(&self.programs[b].display_name.to_lowercase())
-            });
-        }
+        sort_indices(&self.programs, &mut idx, self.sort);
         idx
+    }
+
+    /// Select the program with this id. A different program drops the scan
+    /// of the one before.
+    fn select(&mut self, id: &str) {
+        if self.selected.as_deref() != Some(id) {
+            self.selected = Some(id.to_string());
+            self.scan = None;
+            self.scan_for = None;
+        }
+    }
+
+    /// Move the selection with the arrow and page keys. The search field
+    /// keeps its own keys; up and down are the table's even while typing.
+    fn keyboard(&mut self, ctx: &egui::Context, display: &[usize]) {
+        if self.confirm.is_some() || display.is_empty() {
+            return;
+        }
+        let page = ((self.table_view.1 / ROW_HEIGHT).floor() as isize).max(1);
+        let step = ctx.input_mut(|i| {
+            use egui::{Key, Modifiers};
+            [
+                (Key::ArrowDown, 1),
+                (Key::ArrowUp, -1),
+                (Key::PageDown, page),
+                (Key::PageUp, -page),
+            ]
+            .into_iter()
+            .find(|(key, _)| i.consume_key(Modifiers::NONE, *key))
+            .map(|(_, by)| by)
+        });
+        let Some(by) = step else { return };
+        let at = self
+            .selected
+            .as_deref()
+            .and_then(|id| display.iter().position(|&i| self.programs[i].id() == id));
+        if let Some(row) = moved(at, display.len(), by) {
+            let id = self.programs[display[row]].id().to_string();
+            self.select(&id);
+            self.reveal = true;
+        }
     }
 
     /// Render the confirmation modal, if any, and act on the user's choice.
@@ -628,22 +684,26 @@ impl OxidizeApp {
         };
 
         let mut decision: Option<bool> = None;
-        egui::Window::new("Confirm")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(message);
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    if ui.button(RichText::new("Yes").strong()).clicked() {
-                        decision = Some(true);
-                    }
-                    if ui.button("Cancel").clicked() {
-                        decision = Some(false);
-                    }
-                });
+        let modal = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
+            let t = Tint::for_ui(ui);
+            ui.set_width(380.0);
+            ui.label(RichText::new("Confirm").strong().size(16.0).color(t.text));
+            ui.add_space(6.0);
+            ui.label(message);
+            ui.add_space(14.0);
+            ui.horizontal(|ui| {
+                if ui.add(primary_button(&t, "Yes")).clicked() {
+                    decision = Some(true);
+                }
+                if ui.button("Cancel").clicked() {
+                    decision = Some(false);
+                }
             });
+        });
+        // Escape and a click beside the question are a cancel.
+        if decision.is_none() && modal.should_close() {
+            decision = Some(false);
+        }
 
         match decision {
             Some(true) => match self.confirm.take().unwrap() {
@@ -656,22 +716,6 @@ impl OxidizeApp {
             Some(false) => self.confirm = None,
             None => {}
         }
-    }
-}
-
-fn conf_color(conf: Confidence) -> Color32 {
-    match conf {
-        Confidence::High => Color32::from_rgb(40, 170, 90),
-        Confidence::Medium => Color32::from_rgb(210, 150, 0),
-        Confidence::Low => Color32::from_rgb(140, 140, 140),
-    }
-}
-
-fn conf_tag(conf: Confidence) -> &'static str {
-    match conf {
-        Confidence::High => "high",
-        Confidence::Medium => "med",
-        Confidence::Low => "low",
     }
 }
 
@@ -836,292 +880,72 @@ impl eframe::App for OxidizeApp {
         // window still need the `Context`; cloning it is just an Arc bump.
         let ctx = ui.ctx().clone();
         let ctx = &ctx;
+        let t = Tint::for_ui(ui);
+        let today = chrono::Local::now().date_naive();
 
         self.drain_messages(ctx);
         self.show_confirm(ctx);
+        let display = self.display_indices(today);
+        self.keyboard(ctx, &display);
 
-        let display = self.display_indices();
         let mut action: Option<Action> = None;
 
-        // ---- Top toolbar -------------------------------------------------
-        egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.add_space(4.0);
-            ui.horizontal_wrapped(|ui| {
-                ui.heading("Oxidize");
-                ui.separator();
-                if self.elevated {
-                    ui.colored_label(conf_color(Confidence::High), "Administrator");
-                } else {
-                    ui.colored_label(Color32::from_rgb(210, 70, 70), "Not elevated");
-                    if ui.button("Restart as admin").clicked() {
-                        action = Some(Action::RestartAdmin);
-                    }
-                }
-                ui.separator();
-                if ui.button("Refresh").clicked() {
-                    action = Some(Action::Refresh);
-                }
-                if self.busy {
-                    ui.spinner();
-                }
-            });
-            ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut self.dry_run, "Dry run")
-                    .on_hover_text("Show what would happen without changing anything");
-                ui.checkbox(&mut self.make_backups, "Create backups")
-                    .on_hover_text(
-                        "Export registry keys to .reg and quarantine files before deleting",
-                    );
-                ui.checkbox(&mut self.silent, "Silent uninstall")
-                    .on_hover_text(
-                        "Use the program's unattended uninstall switches where available",
-                    );
-                if ui
-                    .checkbox(&mut self.include_system, "Show system components")
-                    .changed()
-                {
-                    action = Some(Action::Refresh);
-                }
-                ui.checkbox(&mut self.sort_by_size, "Sort by size");
-            });
-            ui.add_space(4.0);
-        });
+        egui::Panel::top("toolbar")
+            .frame(bar_frame(t.chrome))
+            .show(ui, |ui| self.toolbar(ui, &t, &mut action));
 
-        // ---- Bottom status / log ----------------------------------------
-        egui::Panel::bottom("status").show(ui, |ui| {
-            ui.add_space(2.0);
-            ui.label(RichText::new(&self.status).italics());
-            egui::ScrollArea::vertical()
-                .id_salt("log_scroll")
-                .max_height(90.0)
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &self.log {
-                        ui.label(line);
-                    }
-                });
-            ui.add_space(2.0);
-        });
+        egui::Panel::bottom("status")
+            .frame(bar_frame(t.chrome))
+            .show(ui, |ui| self.status_bar(ui, &t));
 
-        // ---- Left: program list -----------------------------------------
-        egui::Panel::left("programs")
-            .default_size(400.0)
+        if self.show_log {
+            egui::Panel::bottom("log")
+                .resizable(true)
+                .default_size(150.0)
+                .size_range(80.0..=360.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.base)
+                        .inner_margin(egui::Margin::symmetric(14, 8)),
+                )
+                .show(ui, |ui| self.log_view(ui, &t));
+        }
+
+        egui::Panel::right("details")
+            .resizable(true)
+            .default_size(380.0)
+            .size_range(300.0..=560.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(t.side)
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ui, |ui| self.details(ui, &t, &mut action));
+
+        let overview = overview(&self.programs, today);
+        egui::Panel::top("overview")
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
+                left: 16,
+                right: 16,
+                top: 14,
+                bottom: 10,
+            }))
+            .show(ui, |ui| self.overview_strip(ui, &t, &overview, today));
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
+                left: 12,
+                right: 8,
+                top: 0,
+                bottom: 0,
+            }))
             .show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.label("Search:");
-                    ui.text_edit_singleline(&mut self.filter);
-                });
-                ui.label(format!("{} shown", display.len()));
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("prog_scroll")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let icon_size = egui::vec2(18.0, 18.0);
-                        for &i in &display {
-                            // Compute the row's text first so the borrow of
-                            // `self.programs` ends before we touch other fields.
-                            let (id, label, is_selected) = {
-                                let p = &self.programs[i];
-                                let size = p
-                                    .size_bytes()
-                                    .map(util::human_size)
-                                    .unwrap_or_else(|| "-".to_string());
-                                (
-                                    p.id().to_string(),
-                                    format!("{}   ({size})", p.display_name),
-                                    self.selected.as_deref() == Some(p.id()),
-                                )
-                            };
-                            ui.horizontal(|ui| {
-                                // The program's own icon, or a blank of the same size.
-                                match self.icons.get(&id) {
-                                    Some(tex) => {
-                                        ui.image(egui::load::SizedTexture::new(
-                                            tex.id(),
-                                            icon_size,
-                                        ));
-                                    }
-                                    None => {
-                                        ui.allocate_space(icon_size);
-                                    }
-                                }
-                                if ui.selectable_label(is_selected, label).clicked() {
-                                    self.selected = Some(id);
-                                    self.scan = None;
-                                    self.scan_for = None;
-                                }
-                            });
-                        }
-                    });
+                self.filter_row(ui, &t, &overview, today);
+                // The search or a quick filter may have changed just now.
+                let display = self.display_indices(today);
+                self.table(ui, &t, &display);
             });
-
-        // Snapshot what the central panel needs, without holding borrows of self.
-        let selected_program = self.selected_program().cloned();
-        let scan = self.scan.clone();
-        let scan_for = self.scan_for.clone();
-        let mut checked = std::mem::take(&mut self.checked);
-
-        // ---- Central: details + scan results ----------------------------
-        egui::CentralPanel::default().show(ui, |ui| {
-            let Some(program) = &selected_program else {
-                ui.add_space(20.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("Select a program on the left to begin.").size(16.0));
-                });
-                return;
-            };
-
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if let Some(tex) = self.icons.get(program.id()) {
-                    ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(32.0, 32.0)));
-                }
-                ui.heading(&program.display_name);
-            });
-            egui::Grid::new("details").num_columns(2).show(ui, |ui| {
-                let row = |ui: &mut egui::Ui, k: &str, v: &str| {
-                    ui.label(RichText::new(k).strong());
-                    ui.label(v);
-                    ui.end_row();
-                };
-                row(ui, "Version", program.display_version.as_deref().unwrap_or("-"));
-                row(ui, "Publisher", program.publisher.as_deref().unwrap_or("-"));
-                row(
-                    ui,
-                    "Size",
-                    &program.size_bytes().map(util::human_size).unwrap_or_else(|| "-".to_string()),
-                );
-                row(ui, "Installed", program.install_date.as_deref().unwrap_or("-"));
-                row(ui, "Source", &program.source.label());
-                row(
-                    ui,
-                    "Location",
-                    program.install_location.as_deref().unwrap_or("-"),
-                );
-            });
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(!self.busy, egui::Button::new(RichText::new("Remove completely").strong()))
-                    .clicked()
-                {
-                    action = Some(Action::RemoveCompletely(program.clone()));
-                }
-                if ui.button("Run uninstaller").clicked() {
-                    action = Some(Action::Uninstall(program.clone()));
-                }
-                if ui.button("Scan for leftovers").clicked() {
-                    action = Some(Action::Scan(program.clone()));
-                }
-            });
-
-            ui.separator();
-
-            // The last complete removal of this program, until it is scanned
-            // again or undone.
-            if let Some(done) = self.shown_complete() {
-                let undo = self.undo_backup().map(str::to_string);
-                if show_complete(ui, done, undo.is_some(), !self.busy) {
-                    action = undo.map(Action::Undo);
-                }
-                return;
-            }
-
-            // Scan results, only when they belong to the selected program.
-            let belongs = scan_for.as_deref() == Some(program.id());
-            match (&scan, belongs) {
-                (Some(report), true) => {
-                    if report.installed {
-                        ui.label(
-                            RichText::new("Still installed. These items are its current footprint, not leftovers.")
-                                .color(conf_color(Confidence::Medium)),
-                        );
-                    }
-                    ui.horizontal_wrapped(|ui| {
-                        let reclaim = report.reclaimable_bytes();
-                        ui.label(format!(
-                            "{} items{}",
-                            report.total(),
-                            if reclaim > 0 {
-                                format!(", {} in files", util::human_size(reclaim))
-                            } else {
-                                String::new()
-                            }
-                        ));
-                        ui.separator();
-                        if ui.button("Check High").clicked() {
-                            for (i, l) in report.all().enumerate() {
-                                checked[i] = l.confidence == Confidence::High;
-                            }
-                        }
-                        if ui.button("Check all").clicked() {
-                            checked.iter_mut().for_each(|c| *c = true);
-                        }
-                        if ui.button("Uncheck all").clicked() {
-                            checked.iter_mut().for_each(|c| *c = false);
-                        }
-                    });
-
-                    let n_checked = checked.iter().filter(|c| **c).count();
-                    let remove_label = if self.dry_run {
-                        format!("Preview removal of {n_checked} item(s)")
-                    } else {
-                        format!("Remove {n_checked} checked item(s)")
-                    };
-                    ui.add_enabled_ui(n_checked > 0 && !report.installed, |ui| {
-                        if ui
-                            .button(RichText::new(remove_label).color(Color32::from_rgb(210, 80, 80)))
-                            .clicked()
-                        {
-                            let items: Vec<Leftover> = report
-                                .all()
-                                .enumerate()
-                                .filter(|(i, _)| checked[*i])
-                                .map(|(_, l)| l.clone())
-                                .collect();
-                            action = Some(Action::Remove(items, program.display_name.clone()));
-                        }
-                    });
-
-                    ui.add_space(4.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("scan_scroll")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            // `checked` is indexed like `report.all()`, so walk the
-                            // items in that order and pick the group per item.
-                            for group in Group::ALL {
-                                let indices: Vec<usize> = report
-                                    .all()
-                                    .enumerate()
-                                    .filter(|(_, l)| l.kind.group() == group)
-                                    .map(|(i, _)| i)
-                                    .collect();
-                                if indices.is_empty() {
-                                    continue;
-                                }
-                                render_group(ui, group.title(), &report.items, &indices, &mut checked);
-                                ui.add_space(6.0);
-                            }
-                            if report.is_empty() {
-                                ui.label(RichText::new("Nothing found.").color(conf_color(Confidence::High)));
-                            }
-                        });
-                }
-                _ => {
-                    ui.label(
-                        RichText::new("Run a scan to find this program's registry/filesystem leftovers.")
-                            .italics(),
-                    );
-                }
-            }
-        });
-
-        // Persist checkbox state back into self.
-        self.checked = checked;
 
         // ---- Execute the requested action (outside the panel borrows) ----
         if let Some(action) = action {
@@ -1169,106 +993,1676 @@ impl eframe::App for OxidizeApp {
     }
 }
 
+// The window's parts, top to bottom.
+// ------------------------------------------------------------------------
+
+impl OxidizeApp {
+    /// The bar across the top: the name, whether it runs as administrator,
+    /// the settings and Refresh.
+    fn toolbar(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
+        // The settings share the row when there is room, else get their own.
+        let wide = ui.available_width() >= 900.0;
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Oxidize").size(17.0).color(t.text));
+            ui.add_space(6.0);
+            if self.elevated {
+                badge(ui, "Administrator", t.verdigris);
+            } else {
+                badge(ui, "Not elevated", t.weak);
+                if ui.small_button("Restart as administrator").clicked() {
+                    *action = Some(Action::RestartAdmin);
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Refresh").clicked() {
+                    *action = Some(Action::Refresh);
+                }
+                if wide {
+                    ui.add_space(10.0);
+                    // Laid out from the right, so the last one comes first.
+                    for setting in Setting::ALL.into_iter().rev() {
+                        self.setting(ui, setting, action);
+                    }
+                }
+            });
+        });
+        if !wide {
+            ui.horizontal_wrapped(|ui| {
+                for setting in Setting::ALL {
+                    self.setting(ui, setting, action);
+                }
+            });
+        }
+    }
+
+    fn setting(&mut self, ui: &mut egui::Ui, setting: Setting, action: &mut Option<Action>) {
+        match setting {
+            Setting::DryRun => {
+                ui.checkbox(&mut self.dry_run, "Dry run")
+                    .on_hover_text("Show what would happen without changing anything");
+            }
+            Setting::Backups => {
+                ui.checkbox(&mut self.make_backups, "Backups")
+                    .on_hover_text(
+                        "Export registry keys to .reg and quarantine files before deleting",
+                    );
+            }
+            Setting::Silent => {
+                ui.checkbox(&mut self.silent, "Silent uninstall")
+                    .on_hover_text(
+                        "Use the program's unattended uninstall switches where available",
+                    );
+            }
+            Setting::System => {
+                if ui
+                    .checkbox(&mut self.include_system, "System components")
+                    .on_hover_text("Also list the components Windows hides from its own list")
+                    .changed()
+                {
+                    *action = Some(Action::Refresh);
+                }
+            }
+        }
+    }
+
+    /// The line at the bottom: what is happening, and the log behind it.
+    fn status_bar(&mut self, ui: &mut egui::Ui, t: &Tint) {
+        ui.horizontal(|ui| {
+            let toggle = 96.0;
+            let room = egui::vec2(
+                (ui.available_width() - toggle).max(0.0),
+                ui.spacing().interact_size.y,
+            );
+            ui.allocate_ui_with_layout(
+                room,
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if self.busy {
+                        ui.spinner();
+                    }
+                    ui.add(egui::Label::new(RichText::new(&self.status).color(t.weak)).truncate());
+                },
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if self.log.is_empty() {
+                    "Log".to_string()
+                } else {
+                    format!("Log ({})", self.log.len())
+                };
+                if ui.selectable_label(self.show_log, label).clicked() {
+                    self.show_log = !self.show_log;
+                }
+            });
+        });
+    }
+
+    fn log_view(&self, ui: &mut egui::Ui, t: &Tint) {
+        egui::ScrollArea::vertical()
+            .id_salt("log_scroll")
+            .auto_shrink([false, false])
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if self.log.is_empty() {
+                    ui.label(RichText::new("Nothing has run yet.").color(t.weak));
+                }
+                for line in &self.log {
+                    let color = if line.starts_with("ERROR") || line.starts_with("failed ") {
+                        t.red
+                    } else {
+                        t.text
+                    };
+                    ui.label(RichText::new(line).monospace().color(color));
+                }
+            });
+    }
+
+    /// The overview above the table: how many programs, how much they take,
+    /// and a bar of the biggest. Clicking one in the bar selects it.
+    fn overview_strip(&mut self, ui: &mut egui::Ui, t: &Tint, ov: &Overview, today: NaiveDate) {
+        let mut clicked = None;
+        ui.horizontal(|ui| {
+            let noun = if ov.programs == 1 {
+                "program"
+            } else {
+                "programs"
+            };
+            stat(ui, t, &ov.programs.to_string(), noun);
+            ui.add_space(22.0);
+            stat(ui, t, &util::human_size(ov.total_bytes), "in total");
+            ui.add_space(22.0);
+            let (rect, _) = ui
+                .allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::hover());
+            clicked = self.size_bar(ui, t, rect, ov);
+        });
+        if let Some(i) = clicked {
+            let terms = search_terms(&self.filter);
+            if !shows(&self.programs[i], &terms, self.quick, today) {
+                // Hidden by the search or a filter: show everything again.
+                self.filter.clear();
+                self.quick = QuickFilter::All;
+            }
+            let id = self.programs[i].id().to_string();
+            self.select(&id);
+            self.reveal = true;
+        }
+    }
+
+    /// The bar in `rect`: each of the biggest programs as its share of the
+    /// total, copper and verdigris in turn, the rest left as the track.
+    /// Returns the program clicked.
+    fn size_bar(
+        &self,
+        ui: &mut egui::Ui,
+        t: &Tint,
+        rect: egui::Rect,
+        ov: &Overview,
+    ) -> Option<usize> {
+        let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 28.0));
+        let painter = ui.painter().clone();
+        painter.rect_filled(bar, 6.0, t.track);
+        if ov.total_bytes == 0 {
+            return None;
+        }
+        let font = egui::FontId::proportional(12.0);
+        let mut x = bar.left();
+        let mut clicked = None;
+        for (n, &i) in ov.biggest.iter().enumerate() {
+            let program = &self.programs[i];
+            let bytes = program.size_bytes().unwrap_or(0);
+            let width = bar.width() * bytes as f32 / ov.total_bytes as f32;
+            let part = egui::Rect::from_min_max(
+                egui::pos2(x, bar.top()),
+                egui::pos2((x + width - 2.0).max(x + 1.0), bar.bottom()),
+            );
+            x += width;
+            let size = util::human_size(bytes);
+            let response = ui.interact(part, ui.id().with(("bar", i)), egui::Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(
+                    egui::WidgetType::Button,
+                    true,
+                    format!("{}, {size}", program.display_name),
+                )
+            });
+            let fill = part_color(t, n);
+            painter.rect_filled(part, 4.0, fill);
+            if response.hovered() {
+                painter.rect_stroke(
+                    part,
+                    4.0,
+                    egui::Stroke::new(1.5, t.text),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if part.width() >= 64.0 {
+                let inner = part.shrink2(egui::vec2(8.0, 0.0));
+                cell_text(
+                    &painter,
+                    inner,
+                    &program.display_name,
+                    font.clone(),
+                    text_on(fill),
+                    egui::Align::Min,
+                );
+            }
+            let share = 100.0 * bytes as f64 / ov.total_bytes as f64;
+            let response = response.on_hover_ui(|ui| {
+                ui.label(RichText::new(&program.display_name).color(t.text));
+                ui.label(RichText::new(format!("{size}, {share:.0}% of the total")).color(t.weak));
+            });
+            if response.clicked() {
+                clicked = Some(i);
+            }
+        }
+        let rest = egui::Rect::from_min_max(egui::pos2(x, bar.top()), bar.right_bottom());
+        let others = ov.programs - ov.biggest.len();
+        if rest.width() >= 2.0 && others > 0 {
+            let rest_bytes = ov.total_bytes - ov.biggest_bytes(&self.programs);
+            ui.interact(rest, ui.id().with("bar_rest"), egui::Sense::hover())
+                .on_hover_ui(|ui| {
+                    let noun = if others == 1 {
+                        "other program"
+                    } else {
+                        "other programs"
+                    };
+                    ui.label(RichText::new(format!("{others} {noun}")).color(t.text));
+                    ui.label(RichText::new(util::human_size(rest_bytes)).color(t.weak));
+                });
+        }
+        clicked
+    }
+
+    /// The search field, the quick filters and how many programs show.
+    fn filter_row(&mut self, ui: &mut egui::Ui, t: &Tint, ov: &Overview, today: NaiveDate) {
+        let narrow = ui.available_width() < 640.0;
+        let chips = |app: &mut OxidizeApp, ui: &mut egui::Ui| {
+            for quick in QuickFilter::ALL {
+                if chip(ui, t, app.quick == quick, quick.label(), ov.count(quick))
+                    .on_hover_text(quick.hint())
+                    .clicked()
+                {
+                    app.quick = quick;
+                }
+            }
+        };
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let width = if narrow {
+                (ui.available_width() - 110.0).max(120.0)
+            } else {
+                260.0
+            };
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut self.filter)
+                    .hint_text("Search name or publisher")
+                    .desired_width(width)
+                    .margin(egui::Margin::symmetric(8, 5)),
+            );
+            if self.focus_search {
+                search.request_focus();
+                self.focus_search = false;
+            }
+            if !narrow {
+                ui.add_space(6.0);
+                chips(self, ui);
+            }
+            let terms = search_terms(&self.filter);
+            let shown = self
+                .programs
+                .iter()
+                .filter(|p| shows(p, &terms, self.quick, today))
+                .count();
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let text = if shown == ov.programs {
+                    format!("{shown} shown")
+                } else {
+                    format!("{shown} of {}", ov.programs)
+                };
+                ui.label(RichText::new(text).color(t.weak));
+            });
+        });
+        if narrow {
+            ui.horizontal(|ui| chips(self, ui));
+        }
+        ui.add_space(8.0);
+    }
+
+    /// The program table: a header to sort by and one row per program,
+    /// drawn only where it is visible.
+    fn table(&mut self, ui: &mut egui::Ui, t: &Tint, display: &[usize]) {
+        let cols = columns(ui.available_width());
+        self.table_header(ui, t, &cols);
+        if display.is_empty() {
+            ui.add_space(48.0);
+            ui.vertical_centered(|ui| {
+                if self.programs.is_empty() && self.busy {
+                    ui.spinner();
+                    ui.label(RichText::new("Reading the installed programs...").color(t.weak));
+                } else if self.programs.is_empty() {
+                    ui.label(RichText::new("No programs found.").color(t.weak));
+                } else {
+                    ui.label(RichText::new("No program matches.").color(t.weak));
+                }
+            });
+            return;
+        }
+        let max_bytes = display
+            .iter()
+            .filter_map(|&i| self.programs[i].size_bytes())
+            .max()
+            .unwrap_or(0);
+        let mut offset = None;
+        if std::mem::take(&mut self.reveal) {
+            let row = self
+                .selected
+                .as_deref()
+                .and_then(|id| display.iter().position(|&i| self.programs[i].id() == id));
+            if let Some(row) = row {
+                offset = scroll_to_show(row, self.table_view.0, self.table_view.1);
+            }
+        }
+        let body = egui::TextStyle::Body.resolve(ui.style());
+        ui.scope(|ui| {
+            // Rows sit flush, so row n starts at n * ROW_HEIGHT.
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let mut area = egui::ScrollArea::vertical()
+                .id_salt("programs")
+                .auto_shrink([false, false]);
+            if let Some(y) = offset {
+                area = area.vertical_scroll_offset(y);
+            }
+            let out = area.show_rows(ui, ROW_HEIGHT, display.len(), |ui, rows| {
+                let mut clicked = None;
+                for row in rows {
+                    let i = display[row];
+                    if self.program_row(ui, t, &cols, i, max_bytes, &body) {
+                        clicked = Some(i);
+                    }
+                }
+                clicked
+            });
+            self.table_view = (out.state.offset.y, out.inner_rect.height());
+            if let Some(i) = out.inner {
+                let id = self.programs[i].id().to_string();
+                self.select(&id);
+            }
+        });
+    }
+
+    fn table_header(&mut self, ui: &mut egui::Ui, t: &Tint, cols: &[Placed]) {
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), egui::Sense::hover());
+        let painter = ui.painter().clone();
+        let font = egui::FontId::proportional(12.0);
+        for col in cols {
+            let cell = col.cell(rect);
+            // The name's header also covers the icon in front of it.
+            let hit = if col.column == Column::Name {
+                cell.with_min_x(rect.left())
+            } else {
+                cell
+            };
+            let id = ui.id().with(("sort", col.column.title()));
+            let response = ui.interact(hit, id, egui::Sense::click());
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, col.column.title())
+            });
+            let active = self.sort.column == col.column;
+            let color = if active || response.hovered() {
+                t.text
+            } else {
+                t.weak
+            };
+            let galley =
+                painter.layout_no_wrap(col.column.title().to_string(), font.clone(), color);
+            let arrow = if active { 12.0 } else { 0.0 };
+            let x = if col.column.right_aligned() {
+                cell.right() - galley.size().x - arrow
+            } else {
+                cell.left()
+            };
+            let y = cell.center().y - galley.size().y / 2.0;
+            let text_right = x + galley.size().x;
+            painter.galley(egui::pos2(x, y), galley, color);
+            if active {
+                let center = egui::pos2(text_right + 7.0, cell.center().y);
+                sort_arrow(&painter, center, self.sort.descending, t.copper);
+            }
+            if response.clicked() {
+                self.sort = self.sort.clicked(col.column);
+            }
+        }
+        painter.hline(
+            rect.x_range(),
+            rect.bottom() - 0.5,
+            egui::Stroke::new(1.0, t.line),
+        );
+    }
+
+    /// One program's row. True when it was clicked.
+    fn program_row(
+        &self,
+        ui: &mut egui::Ui,
+        t: &Tint,
+        cols: &[Placed],
+        i: usize,
+        max_bytes: u64,
+        font: &egui::FontId,
+    ) -> bool {
+        let program = &self.programs[i];
+        let selected = self.selected.as_deref() == Some(program.id());
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), ROW_HEIGHT),
+            egui::Sense::click(),
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::WidgetType::SelectableLabel,
+                true,
+                selected,
+                &program.display_name,
+            )
+        });
+        if !ui.is_rect_visible(rect) {
+            return response.clicked();
+        }
+        let painter = ui.painter_at(rect);
+        if selected {
+            painter.rect_filled(rect, 4.0, t.selected);
+            let mark = egui::Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height()))
+                .shrink2(egui::vec2(0.0, 6.0));
+            painter.rect_filled(mark, 1.5, t.copper);
+        } else if response.hovered() {
+            painter.rect_filled(rect, 4.0, t.hover);
+        }
+        if let Some(tex) = self.icons.get(program.id()) {
+            let icon = egui::Rect::from_center_size(
+                egui::pos2(rect.left() + ROW_PAD + ICON / 2.0, rect.center().y),
+                egui::vec2(ICON, ICON),
+            );
+            let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+            painter.image(tex.id(), icon, uv, Color32::WHITE);
+        }
+        for col in cols {
+            let cell = col.cell(rect);
+            let weak = |text: &str| {
+                cell_text(&painter, cell, text, font.clone(), t.weak, egui::Align::Min)
+            };
+            match col.column {
+                Column::Name => cell_text(
+                    &painter,
+                    cell,
+                    &program.display_name,
+                    font.clone(),
+                    t.text,
+                    egui::Align::Min,
+                ),
+                Column::Publisher => weak(program.publisher.as_deref().unwrap_or("")),
+                Column::Size => size_cell(&painter, t, cell, program.size_bytes(), max_bytes, font),
+                Column::Installed => weak(program.install_date.as_deref().unwrap_or("")),
+                Column::Source => weak(scope_label(program)),
+            }
+        }
+        response.clicked()
+    }
+
+    /// The panel on the right: the selected program, its three actions, what
+    /// is known about it, and the result of the last scan or removal.
+    fn details(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
+        let Some(program) = self.selected_program().cloned() else {
+            ui.add_space(48.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Select a program to see its details.").color(t.weak));
+            });
+            return;
+        };
+        // Taken for the frame and put back, so the report is not copied.
+        let scan = self.scan.take();
+        let mut checked = std::mem::take(&mut self.checked);
+        egui::ScrollArea::vertical()
+            .id_salt("details_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                self.details_head(ui, t, &program, action);
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // The last complete removal of this program, until it is
+                // scanned again or undone.
+                if let Some(done) = self.shown_complete() {
+                    let undo = self.undo_backup().map(str::to_string);
+                    if show_complete(ui, t, done, undo.is_some(), !self.busy) {
+                        *action = undo.map(Action::Undo);
+                    }
+                    return;
+                }
+
+                // Scan results, only when they belong to the selected program.
+                let belongs = self.scan_for.as_deref() == Some(program.id());
+                match (&scan, belongs) {
+                    (Some(report), true) => {
+                        scan_results(ui, t, &program, report, &mut checked, self.dry_run, action)
+                    }
+                    _ => {
+                        ui.label(
+                            RichText::new(
+                                "Scan for leftovers to list what it keeps in its folders, \
+                                 the registry and the system.",
+                            )
+                            .color(t.weak),
+                        );
+                    }
+                }
+            });
+        self.scan = scan;
+        self.checked = checked;
+    }
+
+    fn details_head(
+        &self,
+        ui: &mut egui::Ui,
+        t: &Tint,
+        program: &Program,
+        action: &mut Option<Action>,
+    ) {
+        ui.horizontal_top(|ui| {
+            if let Some(tex) = self.icons.get(program.id()) {
+                ui.image(egui::load::SizedTexture::new(
+                    tex.id(),
+                    egui::vec2(32.0, 32.0),
+                ));
+                ui.add_space(4.0);
+            }
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(&program.display_name)
+                            .size(18.0)
+                            .color(t.text),
+                    )
+                    .wrap(),
+                );
+                let line: Vec<String> = [
+                    program
+                        .display_version
+                        .as_deref()
+                        .map(|v| format!("Version {v}")),
+                    program.publisher.clone(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                if !line.is_empty() {
+                    ui.add(
+                        egui::Label::new(RichText::new(line.join("  ·  ")).color(t.weak)).wrap(),
+                    );
+                }
+            });
+        });
+        ui.add_space(14.0);
+        let idle = !self.busy;
+        let full = egui::vec2(ui.available_width(), 34.0);
+        if ui
+            .add_enabled(idle, primary_button(t, "Remove completely").min_size(full))
+            .clicked()
+        {
+            *action = Some(Action::RemoveCompletely(program.clone()));
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let half = egui::vec2(
+                (ui.available_width() - ui.spacing().item_spacing.x) / 2.0,
+                30.0,
+            );
+            if ui
+                .add_enabled(idle, egui::Button::new("Run uninstaller").min_size(half))
+                .clicked()
+            {
+                *action = Some(Action::Uninstall(program.clone()));
+            }
+            if ui
+                .add_enabled(idle, egui::Button::new("Scan for leftovers").min_size(half))
+                .clicked()
+            {
+                *action = Some(Action::Scan(program.clone()));
+            }
+        });
+        ui.add_space(14.0);
+        let size = program.size_bytes().map(util::human_size);
+        fact(ui, t, "Size", size.as_deref().unwrap_or("-"));
+        fact(
+            ui,
+            t,
+            "Installed",
+            program.install_date.as_deref().unwrap_or("-"),
+        );
+        fact(ui, t, "Scope", scope_label(program));
+        fact(ui, t, "Registry", &program.source.label());
+        fact(
+            ui,
+            t,
+            "Location",
+            program.install_location.as_deref().unwrap_or("-"),
+        );
+    }
+}
+
+/// The settings in the top bar, in reading order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Setting {
+    DryRun,
+    Backups,
+    Silent,
+    System,
+}
+
+impl Setting {
+    const ALL: [Setting; 4] = [
+        Setting::DryRun,
+        Setting::Backups,
+        Setting::Silent,
+        Setting::System,
+    ];
+}
+
+/// The findings of a scan: a summary, the buttons to tick and remove them,
+/// and the findings grouped by kind.
+fn scan_results(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    program: &Program,
+    report: &ScanReport,
+    checked: &mut [bool],
+    dry_run: bool,
+    action: &mut Option<Action>,
+) {
+    if report.installed {
+        ui.add(
+            egui::Label::new(
+                RichText::new(
+                    "Still installed. These items are its current footprint, not leftovers.",
+                )
+                .color(t.amber),
+            )
+            .wrap(),
+        );
+        ui.add_space(4.0);
+    }
+    let reclaim = report.reclaimable_bytes();
+    let mut summary = format!("{} items", report.total());
+    if reclaim > 0 {
+        summary.push_str(&format!(", {} in files", util::human_size(reclaim)));
+    }
+    ui.label(RichText::new(summary).size(15.0).color(t.text));
+    if report.is_empty() {
+        ui.label(RichText::new("Nothing found.").color(t.verdigris));
+        return;
+    }
+    ui.horizontal(|ui| {
+        if ui.small_button("Check High").clicked() {
+            for (i, l) in report.all().enumerate() {
+                checked[i] = l.confidence == Confidence::High;
+            }
+        }
+        if ui.small_button("Check all").clicked() {
+            checked.iter_mut().for_each(|c| *c = true);
+        }
+        if ui.small_button("Uncheck all").clicked() {
+            checked.iter_mut().for_each(|c| *c = false);
+        }
+    });
+    let n_checked = checked.iter().filter(|c| **c).count();
+    let remove_label = if dry_run {
+        format!("Preview removal of {n_checked} item(s)")
+    } else {
+        format!("Remove {n_checked} checked item(s)")
+    };
+    let full = egui::vec2(ui.available_width(), 30.0);
+    if ui
+        .add_enabled(
+            n_checked > 0 && !report.installed,
+            danger_button(t, &remove_label).min_size(full),
+        )
+        .clicked()
+    {
+        let items: Vec<Leftover> = report
+            .all()
+            .enumerate()
+            .filter(|(i, _)| checked[*i])
+            .map(|(_, l)| l.clone())
+            .collect();
+        *action = Some(Action::Remove(items, program.display_name.clone()));
+    }
+    ui.add_space(8.0);
+    render_sections(ui, t, &report.items, checked, "scan");
+}
+
 /// Render how a complete removal ended. True when "Undo" was clicked; the
 /// button shows only when `undo` is true and works only when `idle`.
-fn show_complete(ui: &mut egui::Ui, done: &Completed, undo: bool, idle: bool) -> bool {
+fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle: bool) -> bool {
     let out = &done.outcome;
     let v = &out.verdict;
     let mut clicked = false;
     if done.dry_run {
-        ui.label(format!(
-            "Dry run: {} items would be removed, {} would be closed.",
-            out.selected.len(),
-            running_processes(out.would_close.len())
-        ));
-        render_items(ui, &out.selected);
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "Dry run: {} items would be removed, {} would be closed.",
+                    out.selected.len(),
+                    running_processes(out.would_close.len())
+                ))
+                .color(t.text),
+            )
+            .wrap(),
+        );
+        ui.add_space(8.0);
+        render_sections(ui, t, &out.selected, &mut [], "dry_run");
         return false;
     }
     if out.complete() {
-        ui.label(RichText::new("Nothing left.").color(conf_color(Confidence::High)));
-        ui.label(format!(
-            "Removed {} items in {:.1} s",
-            removed_count(out),
-            out.seconds
-        ));
-    } else if v.still_installed {
+        ui.label(RichText::new("Nothing left.").size(18.0).color(t.verdigris));
         ui.label(
             RichText::new(format!(
-                "{} is still registered. The uninstaller may have been cancelled or is still running.",
-                done.program.display_name
+                "Removed {} items in {:.1} s",
+                removed_count(out),
+                out.seconds
             ))
-            .color(conf_color(Confidence::Medium)),
+            .color(t.weak),
+        );
+    } else if v.still_installed {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!(
+                    "{} is still registered. The uninstaller may have been cancelled or is still running.",
+                    done.program.display_name
+                ))
+                .color(t.amber),
+            )
+            .wrap(),
         );
     }
     if v.below_level > 0 {
-        ui.label(format!(
-            "{} lower-confidence items were kept",
-            v.below_level
-        ));
+        ui.label(
+            RichText::new(format!(
+                "{} lower-confidence items were kept",
+                v.below_level
+            ))
+            .color(t.weak),
+        );
     }
     if let Some(e) = &out.error {
-        ui.colored_label(Color32::from_rgb(210, 70, 70), e);
+        ui.add(egui::Label::new(RichText::new(e).color(t.red)).wrap());
     }
     if undo {
-        ui.add_space(4.0);
-        clicked = ui.add_enabled(idle, egui::Button::new("Undo")).clicked();
+        ui.add_space(6.0);
+        clicked = ui
+            .add_enabled(
+                idle,
+                egui::Button::new("Undo").min_size(egui::vec2(96.0, 28.0)),
+            )
+            .clicked();
     }
     if !v.remaining.is_empty() {
-        ui.add_space(6.0);
-        ui.label(RichText::new("Still there:").strong());
-        render_items(ui, &v.remaining);
+        ui.add_space(10.0);
+        ui.label(RichText::new("Still there").color(t.text));
+        render_sections(ui, t, &v.remaining, &mut [], "remaining");
     }
     clicked
 }
 
-/// A list of leftovers without checkboxes, grouped like a scan.
-fn render_items(ui: &mut egui::Ui, items: &[Leftover]) {
-    egui::ScrollArea::vertical()
-        .id_salt("complete_scroll")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for group in Group::ALL {
-                let indices: Vec<usize> = items
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, l)| l.kind.group() == group)
-                    .map(|(i, _)| i)
-                    .collect();
-                if indices.is_empty() {
-                    continue;
+/// Leftovers grouped by kind, each group folding open and shut. `checked` is
+/// indexed like `items`; an empty one shows no checkboxes.
+fn render_sections(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    items: &[Leftover],
+    checked: &mut [bool],
+    salt: &str,
+) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    for section in Section::ALL {
+        let indices: Vec<usize> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| Section::of(l) == section)
+            .map(|(i, _)| i)
+            .collect();
+        if indices.is_empty() {
+            continue;
+        }
+        let bytes: u64 = indices.iter().filter_map(|&i| items[i].size_bytes).sum();
+        let count = if bytes > 0 {
+            format!("{}  ·  {}", indices.len(), util::human_size(bytes))
+        } else {
+            indices.len().to_string()
+        };
+        let mut title = egui::text::LayoutJob::default();
+        title.append(
+            section.title(),
+            0.0,
+            egui::TextFormat::simple(font.clone(), t.text),
+        );
+        title.append(&count, 10.0, egui::TextFormat::simple(font.clone(), t.weak));
+        egui::CollapsingHeader::new(title)
+            .id_salt((salt, section.title()))
+            // A long list starts folded, so the groups after it stay in view.
+            .default_open(indices.len() <= 100)
+            .show(ui, |ui| {
+                for &i in &indices {
+                    leftover_row(ui, t, &items[i], checked.get_mut(i));
                 }
-                render_group(ui, group.title(), items, &indices, &mut []);
-                ui.add_space(6.0);
-            }
-        });
+            });
+    }
 }
 
-/// Render one group of leftovers with checkboxes. `indices` are positions
-/// into `items` and into `checked`; an empty `checked` shows no checkboxes.
-fn render_group(
-    ui: &mut egui::Ui,
-    title: &str,
-    items: &[Leftover],
-    indices: &[usize],
-    checked: &mut [bool],
-) {
-    ui.label(RichText::new(format!("{title} ({})", indices.len())).strong());
-    for &i in indices {
-        let item = &items[i];
-        ui.horizontal(|ui| {
-            if i < checked.len() {
-                ui.checkbox(&mut checked[i], "");
+/// One leftover: its checkbox, how sure the scan is, where it is and why it
+/// was found.
+fn leftover_row(ui: &mut egui::Ui, t: &Tint, item: &Leftover, checked: Option<&mut bool>) {
+    ui.horizontal_top(|ui| {
+        if let Some(checked) = checked {
+            ui.add(egui::Checkbox::without_text(checked));
+        }
+        let (tag, _) = ui.allocate_exact_size(egui::vec2(46.0, 18.0), egui::Sense::hover());
+        ui.painter().text(
+            tag.left_center(),
+            egui::Align2::LEFT_CENTER,
+            item.confidence.label(),
+            egui::FontId::proportional(11.5),
+            t.confidence(item.confidence),
+        );
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.add(egui::Label::new(RichText::new(&item.path).color(t.text)).wrap());
+            let mut about = item.reason.clone();
+            if let Some(bytes) = item.size_bytes {
+                about.push_str(&format!(", {}", util::human_size(bytes)));
             }
-            ui.colored_label(conf_color(item.confidence), conf_tag(item.confidence));
-            let size = item
-                .size_bytes
-                .map(|b| format!("  [{}]", util::human_size(b)))
-                .unwrap_or_default();
-            let empty = if item.is_empty_dir { "  (empty)" } else { "" };
-            ui.label(format!("{}{size}{empty}", item.path));
+            if item.is_empty_dir {
+                about.push_str(", empty");
+            }
+            ui.add(egui::Label::new(RichText::new(about).small().color(t.weak)).wrap());
         });
-        ui.label(RichText::new(format!("      {}", item.reason)).weak());
+    });
+    ui.add_space(4.0);
+}
+
+/// A number with what it counts under it, for the overview.
+fn stat(ui: &mut egui::Ui, t: &Tint, value: &str, label: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 0.0;
+        ui.label(RichText::new(value).size(22.0).color(t.text));
+        ui.label(RichText::new(label).small().color(t.weak));
+    });
+}
+
+/// One line of facts in the details panel: a name, and its value wrapping
+/// beside it.
+fn fact(ui: &mut egui::Ui, t: &Tint, name: &str, value: &str) {
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(74.0, 18.0), egui::Sense::hover());
+        ui.painter().text(
+            rect.left_center(),
+            egui::Align2::LEFT_CENTER,
+            name,
+            egui::TextStyle::Body.resolve(ui.style()),
+            t.weak,
+        );
+        ui.add(egui::Label::new(RichText::new(value).color(t.text)).wrap());
+    });
+}
+
+/// A small rounded label in `color`, such as "Administrator".
+fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), color);
+    let size = galley.size() + egui::vec2(16.0, 6.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    if ui.is_rect_visible(rect) {
+        ui.painter()
+            .rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.16));
+        ui.painter()
+            .galley(rect.center() - galley.size() / 2.0, galley, color);
     }
+}
+
+/// A quick filter above the table: its name and how many it lets through.
+fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) -> egui::Response {
+    let font = egui::FontId::proportional(13.0);
+    let mut job = egui::text::LayoutJob::default();
+    let color = if selected { t.copper } else { t.text };
+    job.append(label, 0.0, egui::TextFormat::simple(font.clone(), color));
+    job.append(
+        &count.to_string(),
+        6.0,
+        egui::TextFormat::simple(font, t.weak),
+    );
+    let galley = ui.painter().layout_job(job);
+    let size = egui::vec2(galley.size().x + 22.0, 26.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let fill = if selected {
+            t.selected
+        } else if response.hovered() {
+            t.hover
+        } else {
+            Color32::TRANSPARENT
+        };
+        let stroke = if selected { t.copper } else { t.line };
+        ui.painter().rect_filled(rect, 13.0, fill);
+        ui.painter().rect_stroke(
+            rect,
+            13.0,
+            egui::Stroke::new(1.0, stroke),
+            egui::StrokeKind::Inside,
+        );
+        let pos = rect.center() - galley.size() / 2.0;
+        ui.painter().galley(pos, galley, t.text);
+    }
+    response
+}
+
+/// The size column: a bar against the biggest program shown, and the size.
+fn size_cell(
+    painter: &egui::Painter,
+    t: &Tint,
+    cell: egui::Rect,
+    bytes: Option<u64>,
+    max_bytes: u64,
+    font: &egui::FontId,
+) {
+    let Some(bytes) = bytes else { return };
+    let track = egui::Rect::from_min_size(
+        egui::pos2(cell.left(), cell.center().y - 2.0),
+        egui::vec2(44.0, 4.0),
+    );
+    painter.rect_filled(track, 2.0, t.track);
+    if max_bytes > 0 && bytes > 0 {
+        let share = (bytes as f32 / max_bytes as f32).clamp(0.0, 1.0);
+        let fill = track.with_max_x(track.left() + (track.width() * share).max(2.0));
+        painter.rect_filled(fill, 2.0, t.copper);
+    }
+    let text = cell.with_min_x(track.right() + 8.0);
+    cell_text(
+        painter,
+        text,
+        &util::human_size(bytes),
+        font.clone(),
+        t.text,
+        egui::Align::Max,
+    );
+}
+
+/// `text` on one line in `cell`, cut with an ellipsis when it does not fit.
+fn cell_text(
+    painter: &egui::Painter,
+    cell: egui::Rect,
+    text: &str,
+    font: egui::FontId,
+    color: Color32,
+    align: egui::Align,
+) {
+    if text.is_empty() || cell.width() <= 0.0 {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_string(), font, color);
+    job.wrap = egui::text::TextWrapping::truncate_at_width(cell.width());
+    let galley = painter.layout_job(job);
+    let x = match align {
+        egui::Align::Max => cell.right() - galley.size().x,
+        _ => cell.left(),
+    };
+    let y = cell.center().y - galley.size().y / 2.0;
+    painter.galley(egui::pos2(x, y), galley, color);
+}
+
+/// The triangle beside the column the table is sorted by.
+fn sort_arrow(painter: &egui::Painter, center: egui::Pos2, descending: bool, color: Color32) {
+    let (w, h) = (4.0, 3.0);
+    let (tip, base) = if descending { (h, -h) } else { (-h, h) };
+    let points = vec![
+        egui::pos2(center.x - w, center.y + base),
+        egui::pos2(center.x + w, center.y + base),
+        egui::pos2(center.x, center.y + tip),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        points,
+        color,
+        egui::Stroke::NONE,
+    ));
+}
+
+/// "All users" or "This user", from the hive the program is registered in.
+fn scope_label(program: &Program) -> &'static str {
+    match program.source.hive {
+        Hive::LocalMachine => "All users",
+        Hive::CurrentUser => "This user",
+    }
+}
+
+// The look.
+// ------------------------------------------------------------------------
+
+/// The window's colours for one theme. Copper and verdigris come from the
+/// Oxidize mark; everything else is a warm grey.
+#[derive(Debug, Clone, Copy)]
+struct Tint {
+    dark: bool,
+    /// The bars at the top and the bottom.
+    chrome: Color32,
+    /// Behind the overview and the table.
+    base: Color32,
+    /// Behind the details panel.
+    side: Color32,
+    /// Inside the search field.
+    field: Color32,
+    text: Color32,
+    weak: Color32,
+    line: Color32,
+    line_strong: Color32,
+    button: Color32,
+    button_hover: Color32,
+    button_active: Color32,
+    /// A row under the pointer.
+    hover: Color32,
+    /// The selected row and quick filter.
+    selected: Color32,
+    /// The empty part of a bar.
+    track: Color32,
+    copper: Color32,
+    /// Text on a copper fill.
+    on_copper: Color32,
+    verdigris: Color32,
+    amber: Color32,
+    red: Color32,
+}
+
+impl Tint {
+    fn of(dark: bool) -> Tint {
+        let rgb = Color32::from_rgb;
+        if dark {
+            Tint {
+                dark,
+                chrome: rgb(0x15, 0x13, 0x12),
+                base: rgb(0x1b, 0x19, 0x18),
+                side: rgb(0x22, 0x1f, 0x1d),
+                field: rgb(0x11, 0x10, 0x0f),
+                text: rgb(0xeb, 0xe6, 0xe1),
+                weak: rgb(0x9d, 0x96, 0x8f),
+                line: rgb(0x33, 0x2f, 0x2c),
+                line_strong: rgb(0x4a, 0x44, 0x3e),
+                button: rgb(0x29, 0x26, 0x24),
+                button_hover: rgb(0x32, 0x2e, 0x2b),
+                button_active: rgb(0x3b, 0x36, 0x32),
+                hover: rgb(0x25, 0x22, 0x20),
+                selected: rgb(0x3b, 0x29, 0x1f),
+                track: rgb(0x2e, 0x2a, 0x27),
+                copper: rgb(0xe2, 0x79, 0x3d),
+                on_copper: rgb(0x1b, 0x12, 0x0c),
+                verdigris: rgb(0x5e, 0xc3, 0xb3),
+                amber: rgb(0xdb, 0xa5, 0x43),
+                red: rgb(0xec, 0x72, 0x62),
+            }
+        } else {
+            Tint {
+                dark,
+                chrome: rgb(0xf2, 0xef, 0xeb),
+                base: rgb(0xfa, 0xf9, 0xf7),
+                side: rgb(0xff, 0xff, 0xff),
+                field: rgb(0xff, 0xff, 0xff),
+                text: rgb(0x1f, 0x1c, 0x19),
+                weak: rgb(0x6e, 0x68, 0x60),
+                line: rgb(0xe4, 0xde, 0xd6),
+                line_strong: rgb(0xcf, 0xc6, 0xbb),
+                button: rgb(0xff, 0xff, 0xff),
+                button_hover: rgb(0xf6, 0xf2, 0xee),
+                button_active: rgb(0xed, 0xe7, 0xe0),
+                hover: rgb(0xf1, 0xed, 0xe8),
+                selected: rgb(0xf7, 0xe3, 0xd4),
+                track: rgb(0xe9, 0xe3, 0xdc),
+                copper: rgb(0xb5, 0x52, 0x1d),
+                on_copper: rgb(0xff, 0xff, 0xff),
+                verdigris: rgb(0x21, 0x7a, 0x6e),
+                amber: rgb(0x94, 0x63, 0x00),
+                red: rgb(0xbd, 0x3a, 0x2a),
+            }
+        }
+    }
+
+    fn for_ui(ui: &egui::Ui) -> Tint {
+        Tint::of(ui.visuals().dark_mode)
+    }
+
+    fn confidence(&self, confidence: Confidence) -> Color32 {
+        match confidence {
+            Confidence::High => self.verdigris,
+            Confidence::Medium => self.amber,
+            Confidence::Low => self.weak,
+        }
+    }
+}
+
+/// egui's visuals in the window's colours.
+fn visuals(t: &Tint) -> egui::Visuals {
+    let mut v = if t.dark {
+        egui::Visuals::dark()
+    } else {
+        egui::Visuals::light()
+    };
+    let radius = egui::CornerRadius::same(6);
+    v.panel_fill = t.base;
+    v.window_fill = t.side;
+    v.window_stroke = egui::Stroke::new(1.0, t.line);
+    v.window_corner_radius = egui::CornerRadius::same(10);
+    v.menu_corner_radius = egui::CornerRadius::same(8);
+    v.extreme_bg_color = t.field;
+    v.text_edit_bg_color = Some(t.field);
+    v.faint_bg_color = t.hover;
+    v.code_bg_color = t.hover;
+    v.hyperlink_color = t.verdigris;
+    v.warn_fg_color = t.amber;
+    v.error_fg_color = t.red;
+    v.weak_text_color = Some(t.weak);
+    v.selection.bg_fill = t.selected;
+    v.selection.stroke = egui::Stroke::new(1.0, t.copper);
+    let widgets = &mut v.widgets;
+    widgets.noninteractive.fg_stroke.color = t.text;
+    widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, t.line);
+    widgets.noninteractive.corner_radius = radius;
+    for (state, fill, stroke) in [
+        (&mut widgets.inactive, t.button, t.line),
+        (&mut widgets.hovered, t.button_hover, t.line_strong),
+        (&mut widgets.active, t.button_active, t.line_strong),
+        (&mut widgets.open, t.button_hover, t.line_strong),
+    ] {
+        state.weak_bg_fill = fill;
+        state.bg_fill = fill;
+        state.bg_stroke = egui::Stroke::new(1.0, stroke);
+        state.corner_radius = radius;
+        state.fg_stroke.color = t.text;
+    }
+    v
+}
+
+/// Give both themes the window's colours, type sizes and spacing. Which one
+/// shows follows Windows.
+fn apply_style(ctx: &egui::Context) {
+    use egui::{FontFamily, FontId, TextStyle};
+    for theme in [egui::Theme::Dark, egui::Theme::Light] {
+        let tint = Tint::of(theme == egui::Theme::Dark);
+        ctx.style_mut_of(theme, |style| {
+            style.visuals = visuals(&tint);
+            style.text_styles = [
+                (
+                    TextStyle::Heading,
+                    FontId::new(20.0, FontFamily::Proportional),
+                ),
+                (TextStyle::Body, FontId::new(13.5, FontFamily::Proportional)),
+                (
+                    TextStyle::Button,
+                    FontId::new(13.5, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Small,
+                    FontId::new(11.5, FontFamily::Proportional),
+                ),
+                (
+                    TextStyle::Monospace,
+                    FontId::new(12.5, FontFamily::Monospace),
+                ),
+            ]
+            .into();
+            style.spacing.item_spacing = egui::vec2(8.0, 6.0);
+            style.spacing.button_padding = egui::vec2(10.0, 4.0);
+            style.spacing.interact_size.y = 24.0;
+            // Labels are read, not selected like text in a document.
+            style.interaction.selectable_labels = false;
+        });
+    }
+}
+
+/// The frame of the bars at the top and the bottom.
+fn bar_frame(fill: Color32) -> egui::Frame {
+    egui::Frame::new()
+        .fill(fill)
+        .inner_margin(egui::Margin::symmetric(14, 8))
+}
+
+/// The one copper button of a view.
+fn primary_button(t: &Tint, text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).color(t.on_copper))
+        .fill(t.copper)
+        .stroke(egui::Stroke::NONE)
+}
+
+/// A button that deletes something.
+fn danger_button(t: &Tint, text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).color(t.red))
+        .stroke(egui::Stroke::new(1.0, t.red.gamma_multiply(0.5)))
+}
+
+/// The colour of the `n`th part of the overview bar: copper and verdigris
+/// take turns, each pair a little paler than the one before.
+fn part_color(t: &Tint, n: usize) -> Color32 {
+    let metal = if n % 2 == 0 { t.copper } else { t.verdigris };
+    metal.lerp_to_gamma(t.base, (n / 2) as f32 * 0.16)
+}
+
+/// Text that reads on `fill`: dark on a light fill, white on a dark one.
+fn text_on(fill: Color32) -> Color32 {
+    let [r, g, b, _] = fill.to_array();
+    let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
+    if luma > 150.0 {
+        Color32::from_rgb(0x1b, 0x12, 0x0c)
+    } else {
+        Color32::WHITE
+    }
+}
+
+// The program list: filtering, sorting, the overview and the table's
+// geometry. Nothing here draws, so all of it is tested.
+// ------------------------------------------------------------------------
+
+/// A column of the program table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Name,
+    Publisher,
+    Size,
+    Installed,
+    Source,
+}
+
+impl Column {
+    fn title(self) -> &'static str {
+        match self {
+            Column::Name => "Name",
+            Column::Publisher => "Publisher",
+            Column::Size => "Size",
+            Column::Installed => "Installed",
+            Column::Source => "Source",
+        }
+    }
+
+    /// Sizes and dates sort biggest and newest first on the first click.
+    fn starts_descending(self) -> bool {
+        matches!(self, Column::Size | Column::Installed)
+    }
+
+    fn right_aligned(self) -> bool {
+        self == Column::Size
+    }
+
+    /// The width of a column that does not stretch.
+    fn fixed_width(self) -> Option<f32> {
+        match self {
+            Column::Size => Some(132.0),
+            Column::Installed => Some(92.0),
+            Column::Source => Some(80.0),
+            Column::Name | Column::Publisher => None,
+        }
+    }
+}
+
+/// The order of the table: a column and its direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Sort {
+    column: Column,
+    descending: bool,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort {
+            column: Column::Name,
+            descending: false,
+        }
+    }
+}
+
+impl Sort {
+    /// The order after a click on `column`'s header: the same column turns
+    /// around, another one starts in its own direction.
+    fn clicked(self, column: Column) -> Sort {
+        if column == self.column {
+            Sort {
+                column,
+                descending: !self.descending,
+            }
+        } else {
+            Sort {
+                column,
+                descending: column.starts_descending(),
+            }
+        }
+    }
+}
+
+/// Compare two values in the given direction, a missing one last either way.
+fn present_first<T: Ord>(a: Option<T>, b: Option<T>, descending: bool) -> Ordering {
+    match (a, b) {
+        (Some(a), Some(b)) if descending => b.cmp(&a),
+        (Some(a), Some(b)) => a.cmp(&b),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+/// Put `idx`, positions in `programs`, in `sort`'s order. A program without
+/// the value sorted by goes last in both directions; equal values keep the
+/// name order.
+fn sort_indices(programs: &[Program], idx: &mut [usize], sort: Sort) {
+    // Lower-cased once, not on every comparison.
+    let names: Vec<String> = programs
+        .iter()
+        .map(|p| p.display_name.to_lowercase())
+        .collect();
+    let publishers: Vec<Option<String>> = programs
+        .iter()
+        .map(|p| {
+            p.publisher
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_lowercase)
+        })
+        .collect();
+    let descending = sort.descending;
+    idx.sort_by(|&a, &b| {
+        let (pa, pb) = (&programs[a], &programs[b]);
+        let by_name = names[a].cmp(&names[b]).then_with(|| pa.id().cmp(pb.id()));
+        let first = match sort.column {
+            Column::Name if descending => return by_name.reverse(),
+            Column::Name => return by_name,
+            Column::Publisher => present_first(
+                publishers[a].as_deref(),
+                publishers[b].as_deref(),
+                descending,
+            ),
+            Column::Size => present_first(pa.size_bytes(), pb.size_bytes(), descending),
+            Column::Installed => present_first(
+                pa.install_date.as_deref(),
+                pb.install_date.as_deref(),
+                descending,
+            ),
+            Column::Source => {
+                present_first(Some(scope_label(pa)), Some(scope_label(pb)), descending)
+            }
+        };
+        first.then(by_name)
+    });
+}
+
+/// The quick filters above the table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickFilter {
+    All,
+    Large,
+    Recent,
+    PerUser,
+}
+
+impl QuickFilter {
+    const ALL: [QuickFilter; 4] = [
+        QuickFilter::All,
+        QuickFilter::Large,
+        QuickFilter::Recent,
+        QuickFilter::PerUser,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            QuickFilter::All => "All",
+            QuickFilter::Large => "Large",
+            QuickFilter::Recent => "Recent",
+            QuickFilter::PerUser => "Per user",
+        }
+    }
+
+    fn hint(self) -> &'static str {
+        match self {
+            QuickFilter::All => "Every program",
+            QuickFilter::Large => "1 GB or more",
+            QuickFilter::Recent => "Installed in the last 30 days",
+            QuickFilter::PerUser => "Installed for this user only",
+        }
+    }
+
+    fn lets_through(self, program: &Program, today: NaiveDate) -> bool {
+        match self {
+            QuickFilter::All => true,
+            QuickFilter::Large => program.size_bytes().is_some_and(|b| b >= LARGE_BYTES),
+            QuickFilter::Recent => installed_on(program).is_some_and(|d| is_recent(d, today)),
+            QuickFilter::PerUser => program.source.hive == Hive::CurrentUser,
+        }
+    }
+}
+
+/// The search as lower-cased words.
+fn search_terms(text: &str) -> Vec<String> {
+    text.split_whitespace().map(str::to_lowercase).collect()
+}
+
+/// True when `program` passes the quick filter and each search word is in
+/// its name or its publisher.
+fn shows(program: &Program, terms: &[String], quick: QuickFilter, today: NaiveDate) -> bool {
+    if !quick.lets_through(program, today) {
+        return false;
+    }
+    if terms.is_empty() {
+        return true;
+    }
+    let name = program.display_name.to_lowercase();
+    let publisher = program.publisher.as_deref().unwrap_or("").to_lowercase();
+    terms
+        .iter()
+        .all(|term| name.contains(term.as_str()) || publisher.contains(term.as_str()))
+}
+
+/// The day the program was installed, when it has a real date.
+fn installed_on(program: &Program) -> Option<NaiveDate> {
+    NaiveDate::parse_from_str(program.install_date.as_deref()?, "%Y-%m-%d").ok()
+}
+
+/// Installed at most `RECENT_DAYS` days before `today`. A date after today
+/// comes from a clock that was off and counts as recent too.
+fn is_recent(date: NaiveDate, today: NaiveDate) -> bool {
+    (today - date).num_days() <= RECENT_DAYS
+}
+
+/// What the overview says about the installed programs.
+#[derive(Debug, Default, PartialEq)]
+struct Overview {
+    programs: usize,
+    total_bytes: u64,
+    /// The biggest programs, biggest first, as positions in the list.
+    biggest: Vec<usize>,
+    large: usize,
+    recent: usize,
+    per_user: usize,
+}
+
+impl Overview {
+    /// How many programs a quick filter lets through, before any search.
+    fn count(&self, quick: QuickFilter) -> usize {
+        match quick {
+            QuickFilter::All => self.programs,
+            QuickFilter::Large => self.large,
+            QuickFilter::Recent => self.recent,
+            QuickFilter::PerUser => self.per_user,
+        }
+    }
+
+    /// What the biggest programs take together.
+    fn biggest_bytes(&self, programs: &[Program]) -> u64 {
+        self.biggest
+            .iter()
+            .filter_map(|&i| programs[i].size_bytes())
+            .sum()
+    }
+}
+
+fn overview(programs: &[Program], today: NaiveDate) -> Overview {
+    let mut biggest: Vec<usize> = (0..programs.len())
+        .filter(|&i| programs[i].size_bytes().unwrap_or(0) > 0)
+        .collect();
+    let by_size = Sort {
+        column: Column::Size,
+        descending: true,
+    };
+    sort_indices(programs, &mut biggest, by_size);
+    biggest.truncate(BAR_PROGRAMS);
+    let count = |quick: QuickFilter| {
+        programs
+            .iter()
+            .filter(|p| quick.lets_through(p, today))
+            .count()
+    };
+    Overview {
+        programs: programs.len(),
+        total_bytes: programs.iter().filter_map(Program::size_bytes).sum(),
+        biggest,
+        large: count(QuickFilter::Large),
+        recent: count(QuickFilter::Recent),
+        per_user: count(QuickFilter::PerUser),
+    }
+}
+
+/// The groups a scan's findings are listed in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Files,
+    Shortcuts,
+    Registry,
+    LinkTypes,
+    Services,
+    Tasks,
+    PathEntries,
+    Firewall,
+}
+
+impl Section {
+    const ALL: [Section; 8] = [
+        Section::Files,
+        Section::Shortcuts,
+        Section::Registry,
+        Section::LinkTypes,
+        Section::Services,
+        Section::Tasks,
+        Section::PathEntries,
+        Section::Firewall,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Section::Files => "Files and folders",
+            Section::Shortcuts => "Shortcuts",
+            Section::Registry => "Registry",
+            Section::LinkTypes => "Link and file types",
+            Section::Services => "Services",
+            Section::Tasks => "Scheduled tasks",
+            Section::PathEntries => "PATH entries",
+            Section::Firewall => "Firewall rules",
+        }
+    }
+
+    fn of(item: &Leftover) -> Section {
+        match item.kind {
+            LeftoverKind::File if is_shortcut(&item.path) => Section::Shortcuts,
+            LeftoverKind::File | LeftoverKind::Directory => Section::Files,
+            LeftoverKind::RegistryKey | LeftoverKind::RegistryValue if is_link_type(item) => {
+                Section::LinkTypes
+            }
+            LeftoverKind::RegistryKey | LeftoverKind::RegistryValue => Section::Registry,
+            LeftoverKind::Service => Section::Services,
+            LeftoverKind::ScheduledTask => Section::Tasks,
+            LeftoverKind::PathEntry => Section::PathEntries,
+            LeftoverKind::FirewallRule => Section::Firewall,
+        }
+    }
+}
+
+fn is_shortcut(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.ends_with(".lnk") || path.ends_with(".url")
+}
+
+/// A key or value under `Classes` that registers a link type, a file type
+/// or an application to open them with, or a browser's permission to open
+/// a link type without asking. Windows Installer's and COM's own keys under
+/// `Classes` are plain registry.
+fn is_link_type(item: &Leftover) -> bool {
+    let path = item
+        .subpath
+        .as_deref()
+        .unwrap_or(&item.path)
+        .to_ascii_lowercase();
+    if path.contains(r"\protocolexecute") || path.contains(r"\urlassociations") {
+        return true;
+    }
+    let mut parts = path.split('\\');
+    if parts.by_ref().all(|part| part != "classes") {
+        return false;
+    }
+    parts.next().is_some_and(|next| {
+        !matches!(
+            next,
+            "installer" | "clsid" | "interface" | "typelib" | "appid" | "wow6432node"
+        )
+    })
+}
+
+/// The row a move by `by` rows lands on from `at`, in a list of `len` rows,
+/// kept inside the list. Without a selection the move starts at the top.
+fn moved(at: Option<usize>, len: usize, by: isize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match at {
+        None => 0,
+        Some(at) => (at as isize).saturating_add(by).clamp(0, len as isize - 1) as usize,
+    })
+}
+
+/// The scroll offset that brings `row` into a view `height` tall that is
+/// scrolled to `offset`. None when the row is already in view.
+fn scroll_to_show(row: usize, offset: f32, height: f32) -> Option<f32> {
+    let top = row as f32 * ROW_HEIGHT;
+    let bottom = top + ROW_HEIGHT;
+    if top < offset {
+        Some(top)
+    } else if bottom > offset + height {
+        Some((bottom - height).max(0.0))
+    } else {
+        None
+    }
+}
+
+/// Room left of the name for the program's icon.
+const ICON: f32 = 18.0;
+/// Space at both ends of a row.
+const ROW_PAD: f32 = 10.0;
+
+/// A column as laid out: where it starts and how wide it is, from the
+/// table's left edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Placed {
+    column: Column,
+    x: f32,
+    width: f32,
+}
+
+impl Placed {
+    /// The column's part of a row or the header at `row`.
+    fn cell(&self, row: egui::Rect) -> egui::Rect {
+        egui::Rect::from_min_max(
+            egui::pos2(row.left() + self.x, row.top()),
+            egui::pos2(row.left() + self.x + self.width, row.bottom()),
+        )
+    }
+}
+
+/// The columns a table `width` wide has room for, laid out. Name and size
+/// always show; the date, the publisher and the source join as it widens.
+fn columns(width: f32) -> Vec<Placed> {
+    const GAP: f32 = 16.0;
+    let publisher = width >= 680.0;
+    let mut shown = vec![Column::Name];
+    if publisher {
+        shown.push(Column::Publisher);
+    }
+    shown.push(Column::Size);
+    if width >= 560.0 {
+        shown.push(Column::Installed);
+    }
+    if width >= 820.0 {
+        shown.push(Column::Source);
+    }
+    let lead = ROW_PAD + ICON + 10.0;
+    let fixed: f32 = shown.iter().filter_map(|c| c.fixed_width()).sum();
+    let gaps = GAP * (shown.len() - 1) as f32;
+    let flexible = (width - lead - ROW_PAD - fixed - gaps).max(120.0);
+    let mut x = lead;
+    shown
+        .into_iter()
+        .map(|column| {
+            let width = column.fixed_width().unwrap_or(match column {
+                Column::Publisher => flexible * 0.4,
+                _ if publisher => flexible * 0.6,
+                _ => flexible,
+            });
+            let placed = Placed { column, x, width };
+            x += width + GAP;
+            placed
+        })
+        .collect()
 }
 
 // Program icons, used by spawn_icon_load.
@@ -1371,7 +2765,6 @@ fn icon_sources(program: &Program, product_icon: Option<&str>) -> Vec<IconSource
 /// a per-user one under the user; the program's own hive is read first.
 #[cfg(windows)]
 fn product_icon(program: &Program) -> Option<String> {
-    use oxidize::model::Hive;
     if !program.is_windows_installer {
         return None;
     }
@@ -1706,30 +3099,7 @@ mod tests {
     use oxidize::model::{Hive, RegistrySource, RegistryView};
 
     fn app() -> OxidizeApp {
-        let (tx, rx) = channel();
-        OxidizeApp {
-            programs: Vec::new(),
-            icons: HashMap::new(),
-            scan: None,
-            scan_for: None,
-            checked: Vec::new(),
-            uninstalled: None,
-            complete: None,
-            filter: String::new(),
-            selected: None,
-            sort_by_size: false,
-            dry_run: false,
-            make_backups: true,
-            silent: false,
-            include_system: false,
-            elevated: false,
-            busy: false,
-            status: String::new(),
-            log: Vec::new(),
-            confirm: None,
-            tx,
-            rx,
-        }
+        OxidizeApp::blank()
     }
 
     #[test]
@@ -2246,5 +3616,466 @@ mod tests {
         let icon = super::window_icon();
         assert_eq!((icon.width, icon.height), (256, 256));
         assert_eq!(icon.rgba.len(), 256 * 256 * 4);
+    }
+
+    fn day(text: &str) -> NaiveDate {
+        NaiveDate::parse_from_str(text, "%Y-%m-%d").unwrap()
+    }
+
+    /// A program for the list tests, `size_mb` megabytes big.
+    fn listed(
+        name: &str,
+        publisher: Option<&str>,
+        size_mb: Option<u32>,
+        date: Option<&str>,
+        hive: Hive,
+    ) -> Program {
+        let mut program = example_program();
+        program.registry_key = name.to_lowercase().replace(' ', "-");
+        program.display_name = name.to_string();
+        program.publisher = publisher.map(str::to_string);
+        program.estimated_size_kb = size_mb.map(|mb| mb * 1024);
+        program.install_date = date.map(str::to_string);
+        program.source = RegistrySource::new(hive, RegistryView::Native64);
+        program
+    }
+
+    fn list() -> Vec<Program> {
+        vec![
+            listed(
+                "Quillmark",
+                Some("Example Studio"),
+                Some(300),
+                Some("2026-10-01"),
+                Hive::CurrentUser,
+            ),
+            listed(
+                "brightway Studio",
+                Some("Brightway"),
+                Some(2048),
+                Some("2025-03-14"),
+                Hive::LocalMachine,
+            ),
+            listed("Atlas Notes", None, None, None, Hive::LocalMachine),
+            listed(
+                "Delta Sync",
+                Some("example studio"),
+                Some(1500),
+                Some("2026-09-20"),
+                Hive::LocalMachine,
+            ),
+            listed(
+                "Cobalt",
+                Some(" "),
+                Some(300),
+                Some("2026-10-10"),
+                Hive::CurrentUser,
+            ),
+        ]
+    }
+
+    fn names(programs: &[Program], idx: &[usize]) -> Vec<String> {
+        idx.iter()
+            .map(|&i| programs[i].display_name.clone())
+            .collect()
+    }
+
+    fn sorted(programs: &[Program], column: Column, descending: bool) -> Vec<String> {
+        let mut idx: Vec<usize> = (0..programs.len()).collect();
+        sort_indices(programs, &mut idx, Sort { column, descending });
+        names(programs, &idx)
+    }
+
+    #[test]
+    fn the_table_sorts_by_each_column_with_missing_values_last() {
+        let programs = list();
+        assert_eq!(
+            sorted(&programs, Column::Name, false),
+            [
+                "Atlas Notes",
+                "brightway Studio",
+                "Cobalt",
+                "Delta Sync",
+                "Quillmark"
+            ]
+        );
+        assert_eq!(
+            sorted(&programs, Column::Name, true),
+            [
+                "Quillmark",
+                "Delta Sync",
+                "Cobalt",
+                "brightway Studio",
+                "Atlas Notes"
+            ]
+        );
+        // Equal sizes keep the name order; no size goes last both ways.
+        assert_eq!(
+            sorted(&programs, Column::Size, true),
+            [
+                "brightway Studio",
+                "Delta Sync",
+                "Cobalt",
+                "Quillmark",
+                "Atlas Notes"
+            ]
+        );
+        assert_eq!(
+            sorted(&programs, Column::Size, false),
+            [
+                "Cobalt",
+                "Quillmark",
+                "Delta Sync",
+                "brightway Studio",
+                "Atlas Notes"
+            ]
+        );
+        assert_eq!(
+            sorted(&programs, Column::Installed, true),
+            [
+                "Cobalt",
+                "Quillmark",
+                "Delta Sync",
+                "brightway Studio",
+                "Atlas Notes"
+            ]
+        );
+        // Publishers compare without case; a blank one counts as none.
+        assert_eq!(
+            sorted(&programs, Column::Publisher, false),
+            [
+                "brightway Studio",
+                "Delta Sync",
+                "Quillmark",
+                "Atlas Notes",
+                "Cobalt"
+            ]
+        );
+        assert_eq!(
+            sorted(&programs, Column::Publisher, true),
+            [
+                "Delta Sync",
+                "Quillmark",
+                "brightway Studio",
+                "Atlas Notes",
+                "Cobalt"
+            ]
+        );
+        assert_eq!(
+            sorted(&programs, Column::Source, false),
+            [
+                "Atlas Notes",
+                "brightway Studio",
+                "Delta Sync",
+                "Cobalt",
+                "Quillmark"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_header_click_turns_the_order_around_or_starts_a_new_one() {
+        let by = |column, descending| Sort { column, descending };
+        let name = Sort::default();
+        assert_eq!(name, by(Column::Name, false));
+        assert_eq!(name.clicked(Column::Name), by(Column::Name, true));
+        // Sizes and dates start biggest and newest first.
+        let size = name.clicked(Column::Size);
+        assert_eq!(size, by(Column::Size, true));
+        assert_eq!(size.clicked(Column::Size), by(Column::Size, false));
+        assert_eq!(name.clicked(Column::Installed), by(Column::Installed, true));
+        assert_eq!(
+            size.clicked(Column::Publisher),
+            by(Column::Publisher, false)
+        );
+        assert_eq!(size.clicked(Column::Source), by(Column::Source, false));
+    }
+
+    #[test]
+    fn the_search_and_the_quick_filters_pick_the_rows() {
+        let programs = list();
+        let today = day("2026-10-11");
+        let shown = |text: &str, quick: QuickFilter| {
+            let terms = search_terms(text);
+            programs
+                .iter()
+                .filter(|p| shows(p, &terms, quick, today))
+                .map(|p| p.display_name.as_str())
+                .collect::<Vec<_>>()
+        };
+        // Name or publisher, any case, every word somewhere.
+        assert_eq!(
+            shown("STUDIO", QuickFilter::All),
+            ["Quillmark", "brightway Studio", "Delta Sync"]
+        );
+        assert_eq!(shown("example  sync", QuickFilter::All), ["Delta Sync"]);
+        assert!(shown("nothing like it", QuickFilter::All).is_empty());
+        assert_eq!(shown("", QuickFilter::All).len(), programs.len());
+        assert_eq!(
+            shown("", QuickFilter::Large),
+            ["brightway Studio", "Delta Sync"]
+        );
+        assert_eq!(
+            shown("", QuickFilter::Recent),
+            ["Quillmark", "Delta Sync", "Cobalt"]
+        );
+        assert_eq!(shown("", QuickFilter::PerUser), ["Quillmark", "Cobalt"]);
+        assert_eq!(shown("Q", QuickFilter::PerUser), ["Quillmark"]);
+    }
+
+    #[test]
+    fn recent_means_the_last_thirty_days() {
+        let today = day("2026-10-11");
+        assert!(is_recent(day("2026-10-11"), today));
+        assert!(is_recent(day("2026-09-11"), today));
+        assert!(!is_recent(day("2026-09-10"), today));
+        assert!(
+            is_recent(day("2026-10-20"), today),
+            "a clock that was ahead"
+        );
+        let mut program = example_program();
+        program.install_date = Some("not a date".to_string());
+        assert_eq!(installed_on(&program), None);
+        program.install_date = Some("2026-02-30".to_string());
+        assert_eq!(installed_on(&program), None);
+    }
+
+    #[test]
+    fn the_overview_counts_and_finds_the_biggest() {
+        let mut programs = list();
+        for n in 0..10u32 {
+            programs.push(listed(
+                &format!("Tool {n}"),
+                None,
+                Some(10 + n),
+                None,
+                Hive::LocalMachine,
+            ));
+        }
+        let ov = overview(&programs, day("2026-10-11"));
+        let mb = 1024 * 1024;
+        assert_eq!(ov.programs, 15);
+        assert_eq!(ov.total_bytes, 4293 * mb);
+        assert_eq!(
+            names(&programs, &ov.biggest),
+            [
+                "brightway Studio",
+                "Delta Sync",
+                "Cobalt",
+                "Quillmark",
+                "Tool 9",
+                "Tool 8",
+                "Tool 7",
+                "Tool 6"
+            ]
+        );
+        assert_eq!(ov.biggest_bytes(&programs), 4218 * mb);
+        let counts = QuickFilter::ALL.map(|q| ov.count(q));
+        assert_eq!(counts, [15, 2, 3, 2]);
+        assert_eq!(overview(&[], day("2026-10-11")), Overview::default());
+    }
+
+    #[test]
+    fn the_table_shows_the_filtered_programs_and_a_new_selection_drops_the_scan() {
+        let today = day("2026-10-11");
+        let mut app = app();
+        app.programs = list();
+        app.sort = Sort {
+            column: Column::Size,
+            descending: true,
+        };
+        app.quick = QuickFilter::Recent;
+        let shown = |app: &OxidizeApp| names(&app.programs, &app.display_indices(today));
+        assert_eq!(shown(&app), ["Delta Sync", "Cobalt", "Quillmark"]);
+        app.filter = "studio".to_string();
+        assert_eq!(shown(&app), ["Delta Sync", "Quillmark"]);
+
+        app.select("quillmark");
+        app.scan = Some(ScanReport::default());
+        app.scan_for = Some("quillmark".to_string());
+        app.select("quillmark");
+        assert!(app.scan.is_some(), "the same program keeps its scan");
+        app.select("cobalt");
+        assert!(app.scan.is_none() && app.scan_for.is_none());
+        assert_eq!(app.selected.as_deref(), Some("cobalt"));
+    }
+
+    #[test]
+    fn findings_are_grouped_by_what_they_are() {
+        use std::path::PathBuf;
+        let high = Confidence::High;
+        let fs =
+            |kind, path: &str| Leftover::fs(kind, PathBuf::from(path), high, "found", None, false);
+        let key = |hive, path: &str| Leftover::reg_key(hive, path, high, "found");
+        let home = r"C:\Program Files\Quillmark";
+        let cases = [
+            (
+                fs(
+                    LeftoverKind::Directory,
+                    r"C:\Users\me\AppData\Local\Quillmark",
+                ),
+                Section::Files,
+            ),
+            (
+                fs(
+                    LeftoverKind::File,
+                    r"C:\Users\me\AppData\Local\Quillmark\notes.db",
+                ),
+                Section::Files,
+            ),
+            (
+                fs(LeftoverKind::File, r"C:\Users\me\Desktop\Quillmark.LNK"),
+                Section::Shortcuts,
+            ),
+            (
+                fs(LeftoverKind::File, r"C:\Users\me\Favorites\Quillmark.url"),
+                Section::Shortcuts,
+            ),
+            (
+                key(Hive::CurrentUser, r"Software\Example Studio\Quillmark"),
+                Section::Registry,
+            ),
+            (
+                key(Hive::CurrentUser, r"Software\Classes\quillmark"),
+                Section::LinkTypes,
+            ),
+            (
+                key(Hive::LocalMachine, r"SOFTWARE\Classes\.qmk"),
+                Section::LinkTypes,
+            ),
+            (
+                key(
+                    Hive::LocalMachine,
+                    r"SOFTWARE\Classes\Applications\quillmark.exe",
+                ),
+                Section::LinkTypes,
+            ),
+            (
+                key(
+                    Hive::LocalMachine,
+                    r"SOFTWARE\WOW6432Node\Classes\Quillmark.Doc",
+                ),
+                Section::LinkTypes,
+            ),
+            (
+                key(
+                    Hive::LocalMachine,
+                    r"SOFTWARE\Classes\Installer\Products\87654321DCBA10FE32547698BADCFE10",
+                ),
+                Section::Registry,
+            ),
+            (
+                key(
+                    Hive::LocalMachine,
+                    r"SOFTWARE\Classes\CLSID\{12345678-ABCD-EF01-2345-6789ABCDEF01}",
+                ),
+                Section::Registry,
+            ),
+            (
+                key(Hive::LocalMachine, r"SOFTWARE\Classes"),
+                Section::Registry,
+            ),
+            (
+                Leftover::reg_value(
+                    Hive::CurrentUser,
+                    r"Software\Microsoft\Internet Explorer\ProtocolExecute\quillmark",
+                    "WarnOnOpen",
+                    high,
+                    "found",
+                ),
+                Section::LinkTypes,
+            ),
+            (
+                Leftover::service(
+                    "QuillmarkUpdate",
+                    &format!(r"{home}\update.exe"),
+                    high,
+                    "found",
+                ),
+                Section::Services,
+            ),
+            (
+                Leftover::task(r"\Example Studio\Quillmark Update", "", high, "found"),
+                Section::Tasks,
+            ),
+            (
+                Leftover::path_entry(Hive::CurrentUser, format!(r"{home}\bin"), high, "found"),
+                Section::PathEntries,
+            ),
+            (
+                Leftover::firewall_rule(
+                    "{rule}",
+                    "Quillmark",
+                    "",
+                    &format!(r"{home}\quillmark.exe"),
+                    high,
+                    "found",
+                ),
+                Section::Firewall,
+            ),
+        ];
+        for (item, section) in &cases {
+            assert_eq!(Section::of(item), *section, "{}", item.path);
+        }
+    }
+
+    #[test]
+    fn arrow_keys_stay_inside_the_list_and_the_view_follows() {
+        assert_eq!(moved(None, 0, 1), None);
+        assert_eq!(moved(None, 5, 1), Some(0));
+        assert_eq!(moved(None, 5, -1), Some(0));
+        assert_eq!(moved(Some(0), 5, -1), Some(0));
+        assert_eq!(moved(Some(3), 5, 1), Some(4));
+        assert_eq!(moved(Some(4), 5, 1), Some(4));
+        assert_eq!(moved(Some(1), 5, 10), Some(4));
+        assert_eq!(moved(Some(4), 5, -10), Some(0));
+
+        // A view ten rows tall.
+        let height = 10.0 * ROW_HEIGHT;
+        assert_eq!(scroll_to_show(3, 0.0, height), None);
+        assert_eq!(scroll_to_show(10, 0.0, height), Some(ROW_HEIGHT));
+        assert_eq!(
+            scroll_to_show(2, 5.0 * ROW_HEIGHT, height),
+            Some(2.0 * ROW_HEIGHT)
+        );
+        assert_eq!(scroll_to_show(14, 5.0 * ROW_HEIGHT, height), None);
+    }
+
+    #[test]
+    fn the_table_drops_columns_as_it_narrows() {
+        let shown = |width: f32| columns(width).iter().map(|c| c.column).collect::<Vec<_>>();
+        assert_eq!(
+            shown(1000.0),
+            [
+                Column::Name,
+                Column::Publisher,
+                Column::Size,
+                Column::Installed,
+                Column::Source
+            ]
+        );
+        assert_eq!(
+            shown(700.0),
+            [
+                Column::Name,
+                Column::Publisher,
+                Column::Size,
+                Column::Installed
+            ]
+        );
+        assert_eq!(
+            shown(600.0),
+            [Column::Name, Column::Size, Column::Installed]
+        );
+        assert_eq!(shown(400.0), [Column::Name, Column::Size]);
+        // Left to right without overlapping, inside the row.
+        for width in [400.0, 600.0, 700.0, 1000.0, 1600.0] {
+            let cols = columns(width);
+            for pair in cols.windows(2) {
+                assert!(pair[0].x + pair[0].width <= pair[1].x, "{width}: {pair:?}");
+            }
+            let last = cols.last().unwrap();
+            assert!(last.x + last.width <= width - ROW_PAD + 0.01, "{width}");
+        }
     }
 }
