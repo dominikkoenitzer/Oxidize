@@ -935,8 +935,8 @@ impl eframe::App for OxidizeApp {
 
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
-                left: 12,
-                right: 8,
+                left: 16,
+                right: 12,
                 top: 0,
                 bottom: 0,
             }))
