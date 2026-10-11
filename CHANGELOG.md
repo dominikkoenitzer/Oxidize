@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.5, 2026-10-11
+
+- The window opens on an overview: how many programs are installed, their
+  total size and a bar of the eight biggest. Hovering a part names the
+  program and its size, clicking it selects the program.
+- The programs are a table with name, publisher, size, install date and
+  source. A click on a header sorts by it, a second click reverses the order;
+  Sort by size is gone. Search takes several words and covers name and
+  publisher. The arrow keys and Page Up/Down move the selection, also while
+  typing. Quick filters show programs of 1 GB or more, those installed in the
+  last 30 days and those installed for the current user alone.
+- The selected program's details sit on the right, with Remove completely as
+  the main button. A scan's results are grouped by kind (files and folders,
+  shortcuts, registry, link and file types, services, tasks, PATH entries,
+  firewall rules), each with its count and size, and fold away.
+- The settings share one row with Refresh, the log opens from the status
+  line, and Escape cancels the question before a removal. Light and dark
+  both get Oxidize's copper and verdigris.
+
 ## 0.2.4, 2026-10-11
 
 - The window finds icons for more programs: the icon Windows Installer keeps
