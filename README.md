@@ -34,11 +34,66 @@ oxidize orphans                  folders and references nothing owns anymore
 oxidize trace <exe or process>   which program does this belong to
 oxidize backups                  what earlier removals backed up
 oxidize restore <backup>         put a backup back
+oxidize clean                    temp files, crash dumps, caches, folders of removed programs
 oxidize mcp                      let an AI assistant use Oxidize
 ```
 
 `oxidize-gui.exe` is the same engine as a window. The full command-line
 reference is [further down](#command-line-reference).
+
+## Clean up
+
+`oxidize clean` looks at what piles up on a PC and changes nothing: temporary
+files, crash dumps and error reports, the Recycle Bin, browser caches, the
+stores Windows cleans with its own tools, and folders of programs that are
+gone. Every size is counted from the files themselves. For each category it
+says what would go and what stays, and why: changed in the last 7 days, in
+use by a running program, protected, needs administrator rights, the browser
+is running. `oxidize clean --yes` then cleans the safe set, which is
+temporary files, crash dumps, browser caches and folders of removed programs
+at high confidence. Every file is checked again right before it goes, and
+the run ends with what was freed per category and what stayed.
+
+```
+oxidize clean                         what would go, nothing changes
+oxidize clean --yes                   clean the safe set
+oxidize clean --recycle-bin --yes     only Recycle Bin items deleted 30 or more days ago
+```
+
+Naming categories cleans exactly those: `--temp`, `--crash-dumps`,
+`--recycle-bin`, `--browser-cache`, `--component-store`,
+`--delivery-optimization`, `--windows-old` and `--orphans`.
+`--recycle-bin-days` sets the Recycle Bin's age. In the window, the Clean up
+tab does the same: Analyse, tick, clean.
+
+Temporary files go only when they were neither written nor created for 7
+days, in your temp folder and in Windows' own. Crash dumps are the `.dmp`
+files Windows and programs write, and the error reports Windows keeps
+queued. Windows' own temp folder and dumps need administrator rights; without
+them they are counted and listed as such, and `--elevate` includes them.
+Browser caches are only the cache folders of Chrome, Edge, Brave,
+Vivaldi, Chromium and Firefox profiles: cookies, history, sessions, saved
+logins and site data are never opened, and a browser that is running is
+left alone. The Windows component store is cleaned by
+`DISM /Online /Cleanup-Image /StartComponentCleanup`, the cleanup Windows
+runs on its own schedule (never with `/ResetBase`, so installed updates can
+still be removed), and the Delivery Optimization cache by Windows' own
+cmdlet; both need administrator rights. A previous Windows installation
+(`Windows.old`) is shown with its size and removed only when you name it,
+through Disk Cleanup: after that there is no going back to the Windows you
+upgraded from. Folders of removed programs are the folders no installed
+program claims, scored against the programs Oxidize and Windows Installer
+removed: only high-confidence ones are chosen by default, and they go into a
+backup like any other leftover, so `oxidize restore` puts them back. Deleted
+temporary files, dumps, caches and Recycle Bin items do not come back.
+
+Folders you list in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line,
+are never cleaned, with everything in them, temp folders included. `%TEMP%`
+and other variables work in the list, and the Clean up tab edits it.
+
+Oxidize never cleans the registry, prefetch files, `WinSxS` or
+`C:\Windows\Installer` directly, cookies, passwords or history, and it does
+not wipe free space.
 
 ## Use it with an AI assistant
 
@@ -84,7 +139,8 @@ stdout then holds exactly one JSON document. See [JSON output](#json-output).
 
 ## Your data, updates and removal
 
-Oxidize stores nothing but its backups. Each removal gets a folder
+Oxidize stores nothing but its backups and the list of protected folders in
+`%LOCALAPPDATA%\Oxidize\protected.txt`. Each removal gets a folder
 `%LOCALAPPDATA%\Oxidize\backups\<date and time> <program>\`. Registry keys are
 exported to `.reg` files and validated before anything is deleted. Files and
 folders are moved there, not deleted. Task definitions are copied. A manifest
@@ -164,6 +220,12 @@ oxidize orphans --remove              drops PATH entries, autostart values, serv
 `oxidize scan <program> --remove` is for leftovers of a program that is
 already gone; while it is still installed, use `oxidize uninstall`.
 
+`oxidize clean` only shows what it would clean; `--yes` cleans it. Without a
+category flag it takes the safe set, with one or more it takes exactly those.
+`--orphans` takes high-confidence folders, `--medium` and `--all` widen it as
+for leftovers. `--elevate` brings back the elevated run's output, because
+`clean` never asks a question.
+
 `oxidize uninstall <program> --yes` removes a program completely in one go.
 Whatever runs from its folders is closed first: each process is asked to close
 its windows and ended if it is still running three seconds later. Nothing that
@@ -241,6 +303,16 @@ prints `{"programs": [...], "uninstalled", "failed", "cancelled"}`; a single
 name keeps the single-program shape. `oxidize scan <program> --json` prints
 `program_name`, `installed` and `items`. In `oxidize list --json` every entry
 has a `kind`, `program` or `store`.
+
+`oxidize clean --json` prints `analysis` (each category in `findings` with
+`bytes`, `count`, `kept`, `notes`, `needs_admin` and `preselected`, and the
+`folders` of removed programs with their confidence), `chosen`,
+`chosen_folders` and `chosen_bytes`. Each `kept` entry has a `code`
+(`recent`, `recently_deleted`, `in_use`, `protected`, `access_denied`,
+`unreadable`, `needs_admin`, `running`, `failed`), the `reason` in words, a
+`count` and `bytes`. With `--yes` it prints `cleaned`, one entry per category
+with `freed`, `removed`, `kept`, `backup` and `notes`, and the total `freed`;
+a category that did not clean fully exits with 4.
 
 ### What gets checked
 
