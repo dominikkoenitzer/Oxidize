@@ -35,7 +35,7 @@
       "name": "hero",
       "w": 2880,
       "h": 1800,
-      "alt": "Oxidize with Quillmark selected and the seven items that belong to it, grouped by kind, each with how sure Oxidize is and why"
+      "alt": "Oxidize with Quillmark selected and the eight items that belong to it, grouped by kind, each with how sure Oxidize is and why"
     }
   },
   "features": [
@@ -73,7 +73,7 @@
         "h": 1800,
         "pos": "100% 40%",
         "zoom": 1.3,
-        "alt": "The result: Nothing left, eight items removed, with an Undo button"
+        "alt": "The result: Nothing left, nine items removed, with an Undo button"
       },
       "detail": {
         "name": "c3",
@@ -94,7 +94,7 @@
         "w": 2880,
         "h": 1800,
         "pos": "100% 0",
-        "alt": "Four leftovers of Corvid Notes after its own uninstaller ran, all ticked"
+        "alt": "Five leftovers of Corvid Notes after its own uninstaller ran, all ticked"
       },
       "detail": {
         "name": "c1",
@@ -114,7 +114,7 @@
         "w": 2880,
         "h": 1800,
         "pos": "0 100%",
-        "alt": "After Undo, Quillmark's seven items are back where they were"
+        "alt": "After Undo, Quillmark is back with everything that belonged to it"
       },
       "detail": {
         "name": "c4",
@@ -134,13 +134,34 @@
         "w": 2880,
         "h": 1800,
         "pos": "100% 0",
-        "alt": "A dry run: eight items would be removed and one running process closed"
+        "alt": "A dry run: nine items would be removed and one running process closed"
       },
       "detail": {
         "name": "c5",
         "w": 570,
         "h": 290,
         "style": "width: 34%"
+      }
+    },
+    {
+      "label": "Clean up",
+      "title": "Clear out what Windows piles up",
+      "body": [
+        "The Clean up tab measures temporary files, crash dumps, the Recycle Bin, browser caches, Windows' component store, the Delivery Optimization cache, an old Windows installation and folders of removed programs.",
+        "The safe ones start ticked. Recent files, a running browser and folders you protect stay, and caches never take cookies, history or logins with them."
+      ],
+      "main": {
+        "name": "f6",
+        "w": 2880,
+        "h": 1800,
+        "pos": "0 0",
+        "alt": "The Clean up tab after an analysis: temporary files, crash dumps and browser caches ticked, 1.2 GB in all"
+      },
+      "detail": {
+        "name": "c6",
+        "w": 680,
+        "h": 220,
+        "style": "width: 40%"
       }
     }
   ],
