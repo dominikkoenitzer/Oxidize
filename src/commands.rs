@@ -9,7 +9,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::backup;
-use crate::clean::{self, Analysis, Category, Choice, Cleaned, Finding, Kept};
+use crate::clean::{self, Analysis, Category, Choice, Cleaned, Finding};
 use crate::cli::{
     BackupsArgs, CleanArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs,
     SortKey, TraceArgs, UninstallArgs,
@@ -2128,7 +2128,7 @@ fn print_finding(f: &Finding, choice: Option<&Choice>) {
             .sum(),
         _ => f.bytes,
     };
-    let size = if !f.size_known && bytes == 0 {
+    let size = if (!f.size_known || !f.actionable()) && bytes == 0 {
         "-".to_string()
     } else {
         util::human_size(bytes)
@@ -2141,7 +2141,7 @@ fn print_finding(f: &Finding, choice: Option<&Choice>) {
     for note in &f.notes {
         println!("{INDENT}{}", term::dim(note));
     }
-    if let Some(stays) = stays_line(&f.kept) {
+    if let Some(stays) = clean::stays_text(&f.kept) {
         println!("{INDENT}{}", term::dim(&stays));
     }
     if let Some(c) = choice {
@@ -2157,6 +2157,9 @@ fn print_finding(f: &Finding, choice: Option<&Choice>) {
 }
 
 fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
+    if !f.actionable() && f.kept.is_empty() && f.notes.is_empty() {
+        return "nothing found".to_string();
+    }
     let n = f.count;
     let plural = |one: &str, many: &str| {
         if n == 1 {
@@ -2176,28 +2179,6 @@ fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
         Category::WindowsOld if f.actionable() => "1 folder".to_string(),
         _ => String::new(),
     }
-}
-
-/// "stays: 812 changed in the last 7 days (1.2 GB), 14 in use ..."
-fn stays_line(kept: &[Kept]) -> Option<String> {
-    if kept.is_empty() {
-        return None;
-    }
-    let parts: Vec<String> = kept
-        .iter()
-        .map(|k| {
-            let mut s = if k.count > 0 {
-                format!("{} {}", k.count, k.reason.text())
-            } else {
-                k.reason.text()
-            };
-            if k.bytes > 0 {
-                s.push_str(&format!(" ({})", util::human_size(k.bytes)));
-            }
-            s
-        })
-        .collect();
-    Some(format!("stays: {}", parts.join(", ")))
 }
 
 fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool) {
@@ -2252,7 +2233,7 @@ fn print_cleaned(done: &[Cleaned], freed: u64) {
         for note in &c.notes {
             println!("{INDENT}{}", term::dim(note));
         }
-        if let Some(stays) = stays_line(&c.kept) {
+        if let Some(stays) = clean::stays_text(&c.kept) {
             println!("{INDENT}{}", term::dim(&stays));
         }
     }
