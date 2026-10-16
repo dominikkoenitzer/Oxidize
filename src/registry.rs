@@ -64,7 +64,11 @@ pub fn enum_string_values(hive: Hive, subpath: &str) -> Vec<(String, String)> {
 /// keys use the name itself as the data, a file path with a counter behind it.
 pub fn enum_value_names(hive: Hive, subpath: &str) -> Vec<String> {
     match open_read(hive, subpath) {
-        Some(key) => key.enum_values().filter_map(Result::ok).map(|(name, _)| name).collect(),
+        Some(key) => key
+            .enum_values()
+            .filter_map(Result::ok)
+            .map(|(name, _)| name)
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -77,7 +81,11 @@ pub fn enum_multi_values(hive: Hive, subpath: &str) -> Vec<(String, Vec<String>)
     key.enum_values()
         .filter_map(Result::ok)
         .filter(|(_, value)| value.vtype == REG_MULTI_SZ)
-        .filter_map(|(name, value)| Vec::<String>::from_reg_value(&value).ok().map(|e| (name, e)))
+        .filter_map(|(name, value)| {
+            Vec::<String>::from_reg_value(&value)
+                .ok()
+                .map(|e| (name, e))
+        })
         .collect()
 }
 
