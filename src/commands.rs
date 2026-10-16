@@ -1849,10 +1849,13 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
     }
     let name_w = column_width(all.iter().map(|b| b.name.as_str()), 60);
     for b in &all {
+        let items = match b.restored {
+            Some(_) => "restored ".to_string(),
+            None => format!("{:>3} items", b.items),
+        };
         println!(
-            "{}  {:>3} items  {:>9}",
+            "{}  {items}  {:>9}",
             fit(&b.name, name_w),
-            b.items,
             util::human_size(b.size_bytes)
         );
     }
