@@ -165,7 +165,7 @@ pub fn confirm_text(analysis: &Analysis, choice: &Choice, make_backups: bool) ->
 }
 
 /// The strip above the tab, laid out like the program overview: what is
-/// ticked, what was found, what is protected, and Analyse.
+/// ticked, in how many categories, what is protected, and Analyse.
 pub fn strip(
     ui: &mut egui::Ui,
     t: &Tint,
@@ -179,8 +179,12 @@ pub fn strip(
                 let choice = state.choice_in(a);
                 stat(ui, t, &util::human_size(a.chosen_bytes(&choice)), "ticked");
                 ui.add_space(22.0);
-                let found: u64 = a.findings.iter().map(|f| f.bytes).sum();
-                stat(ui, t, &util::human_size(found), "found");
+                stat(
+                    ui,
+                    t,
+                    &format!("{} of {}", choice.categories.len(), a.findings.len()),
+                    "categories",
+                );
             }
             None => stat(ui, t, "-", "not analysed yet"),
         }
@@ -245,7 +249,12 @@ pub fn view(
                 }
                 return;
             };
-            let biggest = analysis.findings.iter().map(|f| f.bytes).max().unwrap_or(0);
+            let biggest = analysis
+                .findings
+                .iter()
+                .map(|f| shown_bytes(state, f))
+                .max()
+                .unwrap_or(0);
             for f in &analysis.findings {
                 category_row(ui, t, state, f, biggest);
             }
@@ -284,6 +293,33 @@ pub fn view(
         });
 }
 
+/// The size a category row shows: what cleaning it would free. For the
+/// folders of removed programs that is the ticked ones, not every folder
+/// no program claims.
+fn shown_bytes(state: &Cleanup, f: &Finding) -> u64 {
+    match f.category {
+        Category::Orphans => f
+            .folders
+            .iter()
+            .filter(|o| state.folders.contains(&o.path))
+            .map(|o| o.bytes)
+            .sum(),
+        _ => f.bytes,
+    }
+}
+
+/// The notes of a category as one line. The one that says the size comes
+/// afterwards is left to the size column, which says it already.
+fn notes_line(f: &Finding) -> Option<String> {
+    let notes: Vec<&str> = f
+        .notes
+        .iter()
+        .map(String::as_str)
+        .filter(|n| f.size_known || !n.contains("measured"))
+        .collect();
+    (!notes.is_empty()).then(|| notes.join("  \u{b7}  "))
+}
+
 /// Where the lines under a category start: past its tick.
 const ROW_INDENT: f32 = 28.0;
 
@@ -303,7 +339,8 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, b
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (cell, _) = ui.allocate_exact_size(egui::vec2(150.0, 20.0), egui::Sense::hover());
             let font = egui::TextStyle::Body.resolve(ui.style());
-            if !f.size_known && f.bytes == 0 {
+            let bytes = shown_bytes(state, f);
+            if !f.size_known && bytes == 0 {
                 cell_text(
                     ui.painter(),
                     cell,
@@ -312,7 +349,7 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, b
                     t.weak,
                     egui::Align::Max,
                 );
-            } else if !f.actionable() && f.bytes == 0 {
+            } else if !f.actionable() && bytes == 0 {
                 cell_text(
                     ui.painter(),
                     cell,
@@ -322,7 +359,7 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, b
                     egui::Align::Max,
                 );
             } else {
-                size_cell(ui.painter(), t, cell, Some(f.bytes), biggest, &font);
+                size_cell(ui.painter(), t, cell, Some(bytes), biggest, &font);
             }
         });
     });
@@ -334,13 +371,25 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, b
                 ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
             };
             line(ui, f.category.about(), t.weak);
-            for note in &f.notes {
+            if f.category == Category::Orphans && !f.folders.is_empty() {
+                let all: u64 = f.folders.iter().map(|o| o.bytes).sum();
+                line(
+                    ui,
+                    &format!(
+                        "{} folders, {} in all",
+                        f.folders.len(),
+                        util::human_size(all)
+                    ),
+                    t.weak,
+                );
+            }
+            if let Some(notes) = notes_line(f) {
                 let color = if f.category == Category::WindowsOld {
                     t.amber
                 } else {
                     t.weak
                 };
-                line(ui, note, color);
+                line(ui, &notes, color);
             }
             if let Some(stays) = clean::stays_text(&f.kept) {
                 line(ui, &stays, if f.needs_admin { t.amber } else { t.weak });
@@ -465,6 +514,16 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
         )
         .wrap(),
     );
+    if let Ok(path) = protect::file_path() {
+        ui.add(
+            egui::Label::new(
+                RichText::new(format!("Kept in {}", path.display()))
+                    .small()
+                    .color(t.weak),
+            )
+            .wrap(),
+        );
+    }
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let field = ui.add(
@@ -492,23 +551,26 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
         .show(ui, |ui| {
             for entry in state.protected.entries() {
                 ui.horizontal(|ui| {
-                    if ui.small_button("Remove").clicked() {
+                    ui.set_min_height(22.0);
+                    // Remove shows on the row under the pointer only, so a
+                    // long list reads as a list.
+                    let hovered = ui.ui_contains_pointer();
+                    let room = ui.available_width() - if hovered { 70.0 } else { 0.0 };
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(room.max(40.0), 22.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.add(egui::Label::new(RichText::new(entry).color(t.text)).truncate())
+                        },
+                    );
+                    if hovered && ui.small_button("Remove").clicked() {
                         remove = Some(entry.clone());
                     }
-                    ui.add(egui::Label::new(RichText::new(entry).color(t.text)).truncate());
                 });
             }
         });
     if let Some(entry) = remove {
         state.remove_protected(&entry);
-    }
-    if let Ok(path) = protect::file_path() {
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(format!("Kept in {}", path.display()))
-                .small()
-                .color(t.weak),
-        );
     }
 }
 
