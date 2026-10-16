@@ -34,6 +34,11 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
             result: result.map_err(|e| format!("{e:#}")),
         });
     }
+    // Listed as restored from now on, so its old item count does not read
+    // as something still waiting in it. A partial restore stays unmarked.
+    if !dry_run && out.iter().all(|i| i.result.is_ok()) {
+        let _ = backup::mark_restored(&info.path);
+    }
     Ok(out)
 }
 
@@ -205,4 +210,75 @@ fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
 pub(crate) fn put_back<'a>(parts: &mut Vec<&'a str>, entry: &'a str, index: Option<usize>) {
     let at = index.unwrap_or(parts.len()).min(parts.len());
     parts.insert(at, entry);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backup::BackupSession;
+    use crate::model::LeftoverKind;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!("oxidize_restore_{name}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn listed(session: &BackupSession) -> BackupInfo {
+        backup::list_backups()
+            .unwrap()
+            .into_iter()
+            .find(|b| b.path == session.root())
+            .unwrap()
+    }
+
+    fn cleanup(session: &BackupSession, root: &Path) {
+        let base = backup::backups_base().unwrap();
+        let _ = fs::remove_dir_all(session.root());
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir(&base);
+        let _ = fs::remove_dir(base.parent().unwrap());
+    }
+
+    #[test]
+    fn a_complete_restore_lists_the_backup_as_restored() {
+        let root = fixture("complete");
+        let file = root.join("settings.ini");
+        fs::write(&file, "x=1").unwrap();
+        let mut session = BackupSession::new("Oxidize Restored Test").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        assert!(listed(&session).restored.is_none());
+
+        // A dry run checks, and marks nothing.
+        restore(&listed(&session), true).unwrap();
+        assert!(listed(&session).restored.is_none());
+
+        let items = restore(&listed(&session), false).unwrap();
+        assert!(items.iter().all(|i| i.result.is_ok()));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "x=1");
+        let info = listed(&session);
+        assert!(info.restored.is_some());
+        assert_eq!(info.items, 1);
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json["restored"].is_string());
+        cleanup(&session, &root);
+    }
+
+    #[test]
+    fn a_partial_restore_stays_unmarked() {
+        let root = fixture("partial");
+        let (a, b) = (root.join("a.txt"), root.join("b.txt"));
+        fs::write(&a, "a").unwrap();
+        fs::write(&b, "b").unwrap();
+        let mut session = BackupSession::new("Oxidize Partial Restore Test").unwrap();
+        session.quarantine(LeftoverKind::File, &a).unwrap();
+        session.quarantine(LeftoverKind::File, &b).unwrap();
+        // Something new sits where b was, so b cannot go back.
+        fs::write(&b, "new").unwrap();
+        let items = restore(&listed(&session), false).unwrap();
+        assert_eq!(items.iter().filter(|i| i.result.is_err()).count(), 1);
+        assert!(listed(&session).restored.is_none());
+        cleanup(&session, &root);
+    }
 }

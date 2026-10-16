@@ -79,6 +79,9 @@ pub struct Manifest {
     pub program: String,
     pub created: String,
     pub entries: Vec<ManifestEntry>,
+    /// When everything in it was put back, if it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restored: Option<String>,
 }
 
 pub struct BackupSession {
@@ -103,6 +106,7 @@ impl BackupSession {
                 program: program_label.to_string(),
                 created: now.to_rfc3339(),
                 entries: Vec::new(),
+                restored: None,
             },
         })
     }
@@ -125,13 +129,7 @@ impl BackupSession {
             path: path.to_string(),
             undo,
         });
-        let json = serde_json::to_string_pretty(&self.manifest)?;
-        // Written beside the real file and renamed over it: a manifest half
-        // written by a crash would take every earlier entry down with it.
-        let tmp = self.root.join("manifest.json.new");
-        fs::write(&tmp, json).context("writing manifest")?;
-        fs::rename(&tmp, self.root.join(MANIFEST)).context("replacing manifest")?;
-        Ok(())
+        write_manifest(&self.root, &self.manifest)
     }
 
     /// Export a key (with its subtree) to a validated `.reg` file. For a
@@ -332,6 +330,8 @@ pub struct BackupInfo {
     pub created: String,
     pub items: usize,
     pub size_bytes: u64,
+    /// When everything in it was put back, or null.
+    pub restored: Option<String>,
 }
 
 /// Every backup, newest first.
@@ -358,6 +358,7 @@ pub fn list_backups() -> Result<Vec<BackupInfo>> {
                 .map(|m| m.created.clone())
                 .unwrap_or_default(),
             items: manifest.as_ref().map(|m| m.entries.len()).unwrap_or(0),
+            restored: manifest.as_ref().and_then(|m| m.restored.clone()),
             size_bytes: crate::scanner::dir_size(&path),
             id: name.clone(),
             name,
@@ -373,6 +374,24 @@ pub fn list_backups() -> Result<Vec<BackupInfo>> {
 fn sort_newest_first(backups: &mut [BackupInfo]) {
     let time = |b: &BackupInfo| chrono::DateTime::parse_from_rfc3339(&b.created).ok();
     backups.sort_by(|a, b| time(b).cmp(&time(a)).then_with(|| b.name.cmp(&a.name)));
+}
+
+/// Write a backup's manifest. It goes beside the real file and is renamed
+/// over it: a manifest half written by a crash would take every earlier
+/// entry down with it.
+fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
+    let json = serde_json::to_string_pretty(manifest)?;
+    let tmp = dir.join("manifest.json.new");
+    fs::write(&tmp, json).context("writing manifest")?;
+    fs::rename(&tmp, dir.join(MANIFEST)).context("replacing manifest")?;
+    Ok(())
+}
+
+/// Note in a backup's manifest that everything in it was put back.
+pub fn mark_restored(dir: &Path) -> Result<()> {
+    let mut manifest = read_manifest(dir)?;
+    manifest.restored = Some(chrono::Local::now().to_rfc3339());
+    write_manifest(dir, &manifest)
 }
 
 pub fn read_manifest(dir: &Path) -> Result<Manifest> {
@@ -777,6 +796,7 @@ mod tests {
         let m = Manifest {
             program: "X".into(),
             created: "now".into(),
+            restored: None,
             entries: vec![ManifestEntry {
                 kind: LeftoverKind::PathEntry,
                 path: "PATH entry C:\\x".into(),
@@ -801,6 +821,7 @@ mod tests {
             created: created.to_string(),
             items: 1,
             size_bytes: 0,
+            restored: None,
         }
     }
 
@@ -874,6 +895,7 @@ mod tests {
             "created",
             "items",
             "size_bytes",
+            "restored",
         ] {
             assert!(json.get(field).is_some(), "{field}");
         }
