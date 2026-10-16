@@ -21,6 +21,9 @@ It names no author and does not link to this repository.
   - `/download/windows`
   - `/download/cli`
   - `/download/zip`
+  - `/download/windows.sha256`
+  - `/download/cli.sha256`
+  - `/download/zip.sha256`
 - `llms.txt` describes the app for AI assistants.
 - `skill/oxidize/` is the assistant skill, and `skill/oxidize.zip` is that folder zipped. Rebuild the zip
   after an edit, from this folder:
