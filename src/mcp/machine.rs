@@ -36,7 +36,7 @@ impl Inspect for ThisPc {
     }
 
     fn target_by_name(&self, name: &str, publisher: Option<&str>) -> ScanTarget {
-        scanner::name_only_target(name, publisher)
+        scanner::removed_program_target(name, publisher)
     }
 
     fn scan(&self, target: &ScanTarget, installed: bool) -> ScanReport {

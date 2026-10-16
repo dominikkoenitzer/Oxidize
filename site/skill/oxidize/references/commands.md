@@ -65,7 +65,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 Finds a program's leftovers. Reads only unless `--remove` is given.
 
 - `PROGRAM`: a name, a unique part of it, or its registry id. A program that is not installed is scanned by name.
-- `--publisher`: the publisher, so vendor folders are recognised when scanning by name.
+- `--publisher`: the publisher, so vendor folders are recognised when scanning by name. Without it, the publisher comes from the uninstall entry a backup of an earlier removal holds, or from the company Windows cached for files it shows under the program's name; the text output says which.
 - `--remove`: remove what was found at the chosen level, after a question. Refused while the program is still installed, except with `--dry-run`.
 - A name that only matches a Store app is refused; use `uninstall` for those.
 

@@ -427,6 +427,51 @@ fn pick_backup(all: &[BackupInfo], name: &str) -> Result<BackupInfo> {
     }
 }
 
+/// The publisher an earlier removal of `program` recorded: the uninstall
+/// entry it exported names it. The newest backup that has one wins.
+pub fn recorded_publisher(program: &str) -> Option<String> {
+    let wanted = crate::util::significant_tokens(program);
+    if wanted.is_empty() {
+        return None;
+    }
+    list_backups().ok()?.into_iter().find_map(|b| {
+        if crate::util::significant_tokens(&b.program) != wanted {
+            return None;
+        }
+        let entries = fs::read_dir(b.path.join("registry")).ok()?;
+        entries.flatten().find_map(|e| {
+            let bytes = fs::read(e.path()).ok()?;
+            uninstall_publisher(&system::decode_utf16_or_utf8(&bytes))
+        })
+    })
+}
+
+/// `"Publisher"="..."` in an exported uninstall entry.
+fn uninstall_publisher(reg: &str) -> Option<String> {
+    let mut in_uninstall = false;
+    for line in reg.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_uninstall = line
+                .to_ascii_lowercase()
+                .contains(r"\currentversion\uninstall\");
+            continue;
+        }
+        if !in_uninstall {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("\"Publisher\"=\"") {
+            let value = rest.strip_suffix('"')?;
+            let value = value.replace("\\\"", "\"").replace("\\\\", "\\");
+            let value = value.trim().to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
 pub fn delete_backup(info: &BackupInfo) -> Result<()> {
     let base = backups_base()?;
     if !info.path.starts_with(&base) {
@@ -789,6 +834,24 @@ mod tests {
         let _ = fs::remove_dir_all(session.root());
         let _ = fs::remove_dir(&base);
         let _ = fs::remove_dir(base.parent().unwrap());
+    }
+
+    #[test]
+    fn the_publisher_comes_from_an_exported_uninstall_entry() {
+        let reg = "Windows Registry Editor Version 5.00\r\n\r\n\
+            [HKEY_CURRENT_USER\\SOFTWARE\\Example\\Settings]\r\n\
+            \"Publisher\"=\"Not This One\"\r\n\r\n\
+            [HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\quillmark]\r\n\
+            \"DisplayName\"=\"Quillmark\"\r\n\
+            \"Publisher\"=\"Quill \\\"&\\\" Ink Ltd\"\r\n";
+        assert_eq!(
+            uninstall_publisher(reg).as_deref(),
+            Some("Quill \"&\" Ink Ltd")
+        );
+        assert_eq!(
+            uninstall_publisher("[HKEY_CURRENT_USER\\Software]\r\n"),
+            None
+        );
     }
 
     #[test]

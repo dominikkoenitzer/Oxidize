@@ -246,8 +246,11 @@ their candidates. The plan is shown once, each program then gets its own
 leftover scan, removal and backup, and a summary follows. If any program
 failed, the batch exits with the code of the first one that did.
 
-A program Windows no longer lists is scanned by name alone, and a vendor folder
-is only recognised as one when you name the publisher:
+A program Windows no longer lists is scanned by name alone. Its publisher,
+which tells vendor folders and the vendor's files Windows remembers apart,
+comes from the uninstall entry an earlier removal backed up, or else from
+the company Windows cached for the program's files; the scan says which.
+Name it yourself when neither knows:
 `oxidize scan "Example Player" --publisher "Example Corp"`.
 
 `oxidize list` shows Store apps next to programs, marked `store`;

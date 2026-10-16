@@ -332,6 +332,10 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
             program.display_name.clone(),
         ),
         None => {
+            let hint = match &args.publisher {
+                Some(_) => None,
+                None => scanner::publisher_hint(&args.target),
+            };
             if !g.json {
                 println!(
                     "{}",
@@ -340,9 +344,20 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
                         args.target
                     ))
                 );
+                if let Some((publisher, source)) = &hint {
+                    let from = match source {
+                        scanner::PublisherSource::Backup => "an earlier removal",
+                        scanner::PublisherSource::CachedName => "the names Windows cached",
+                    };
+                    println!(
+                        "{}",
+                        term::dim(&format!("publisher {publisher}, from {from}"))
+                    );
+                }
             }
+            let publisher = args.publisher.clone().or_else(|| hint.map(|(p, _)| p));
             (
-                scanner::name_only_target(&args.target, args.publisher.as_deref()),
+                scanner::name_only_target(&args.target, publisher.as_deref()),
                 args.target.clone(),
             )
         }

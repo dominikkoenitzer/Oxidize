@@ -186,6 +186,45 @@ pub(super) fn scan_windows_records(
     out
 }
 
+/// The company Windows cached for the files it shows as `name`: the
+/// `FriendlyAppName` of a file equals the product, and the same file's
+/// `ApplicationCompany` names the vendor. The company most files share wins.
+pub(super) fn cached_company(name: &str) -> Option<String> {
+    company_among(
+        name,
+        &registry::enum_string_values(Hive::CurrentUser, NAME_CACHE),
+    )
+}
+
+fn company_among(name: &str, values: &[(String, String)]) -> Option<String> {
+    let wanted = crate::util::significant_tokens(name);
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for (value, shown) in values {
+        let Some(file) = value.strip_suffix(NAME_FIELD) else {
+            continue;
+        };
+        if crate::util::significant_tokens(shown) != wanted {
+            continue;
+        }
+        let company_value = format!("{file}{COMPANY_FIELD}");
+        let Some((_, company)) = values.iter().find(|(v, _)| *v == company_value) else {
+            continue;
+        };
+        let company = company.trim();
+        if company.is_empty() {
+            continue;
+        }
+        match counts.iter_mut().find(|(c, _)| c == company) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((company.to_string(), 1)),
+        }
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c)
+}
+
 /// The cached names of the vendor's files that are gone, and the vendor's
 /// files still waiting in Downloads.
 fn vendor_files(publisher: &str) -> Vec<Leftover> {
@@ -347,6 +386,47 @@ mod tests {
             Some(r"\Device\HarddiskVolume3\Users\jdoe\AppData\Local\Quillmark\app.exe")
         );
         assert_eq!(sound_device_file("no separator"), None);
+    }
+
+    #[test]
+    fn the_cached_company_of_the_product_names_the_vendor() {
+        let v = |n: &str, d: &str| (n.to_string(), d.to_string());
+        let values = vec![
+            v(
+                r"C:\Users\jdoe\Downloads\QuillSetup.exe.FriendlyAppName",
+                "Quillmark",
+            ),
+            v(
+                r"C:\Users\jdoe\Downloads\QuillSetup.exe.ApplicationCompany",
+                "Quill Labs Ltd",
+            ),
+            v(
+                r"C:\Apps\Quillmark\quill.exe.FriendlyAppName",
+                "Quillmark 2",
+            ),
+            v(
+                r"C:\Apps\Quillmark\quill.exe.ApplicationCompany",
+                "Quill Labs Ltd",
+            ),
+            v(r"C:\Apps\Other\q.exe.FriendlyAppName", "Quillmark"),
+            v(r"C:\Apps\Other\q.exe.ApplicationCompany", "Someone Else"),
+            v(r"C:\Apps\Inkwell\ink.exe.FriendlyAppName", "Inkwell"),
+            v(r"C:\Apps\Inkwell\ink.exe.ApplicationCompany", "Inkwell Inc"),
+        ];
+        assert_eq!(
+            company_among("Quillmark", &values).as_deref(),
+            Some("Quill Labs Ltd")
+        );
+        assert_eq!(
+            company_among("Inkwell", &values).as_deref(),
+            Some("Inkwell Inc")
+        );
+        assert_eq!(company_among("Nothing Here", &values), None);
+        // A name with no company beside it says nothing.
+        assert_eq!(
+            company_among("Lonely", &[v(r"C:\a\l.exe.FriendlyAppName", "Lonely")]),
+            None
+        );
     }
 
     #[test]

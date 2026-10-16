@@ -84,7 +84,7 @@ If it prints `False` and the plan has such items, tell the user that Windows wil
 
 If `still_installed` is true (exit code 3) after the uninstaller ran, it was cancelled or is still running, and no leftovers were removed. Check `oxidize list "<name>" --json` again. Once the program is gone, remove the leftovers with the scan task below.
 
-For a review between the uninstaller and the removal, add `--keep`. `oxidize uninstall "<name>" --keep -y --json` closes nothing, always runs the uninstaller, and lists the leftovers in `report` but removes nothing. Then use the scan task below, with `--publisher` set to the program's publisher, because a scan after the program is gone knows only its name.
+For a review between the uninstaller and the removal, add `--keep`. `oxidize uninstall "<name>" --keep -y --json` closes nothing, always runs the uninstaller, and lists the leftovers in `report` but removes nothing. Then use the scan task below. A scan after the program is gone finds the publisher in the backup of an earlier removal or in the names Windows cached; pass `--publisher` set to the program's publisher to be sure.
 
 Several programs: `oxidize uninstall "<a>" "<b>" --dry-run --json`, then the same with `-y`. Every name must match exactly one program before anything runs. The JSON has `programs`, `uninstalled`, `failed` and `cancelled`.
 
@@ -92,7 +92,7 @@ Store apps: `oxidize list --store --json` lists them with `"kind": "store"`. An 
 
 ### Remove leftovers of a program that is already gone
 
-1. `oxidize scan "<name>" --json`, with `--publisher "<publisher>"` if you know it. Without the publisher, a vendor folder is not recognised as one.
+1. `oxidize scan "<name>" --json`, with `--publisher "<publisher>"` if you know it. Without it, Oxidize takes the publisher from the uninstall entry an earlier removal backed up, or from the company Windows cached for the program's files. When neither has it, a vendor folder is not recognised as one.
 2. Show the user the items and their confidence.
 3. Preview: `oxidize scan "<name>" --remove --dry-run --json`.
 4. After the user confirms: `oxidize scan "<name>" --remove -y --json`, with `--medium` or `--all` only as agreed.

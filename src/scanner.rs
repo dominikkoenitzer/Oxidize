@@ -827,6 +827,37 @@ pub fn name_only_target(name: &str, publisher: Option<&str>) -> ScanTarget {
     name_only_target_with(name, publisher, &Snapshot::new())
 }
 
+/// Where the publisher of a program that is gone came from, when the user
+/// named none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublisherSource {
+    /// The uninstall entry an earlier removal backed up.
+    Backup,
+    /// The company Windows cached for the program's files.
+    CachedName,
+}
+
+/// The publisher of a program that is gone: from the uninstall entry a
+/// backup of its removal holds, or from the company Windows cached for the
+/// files it shows under that name.
+pub fn publisher_hint(name: &str) -> Option<(String, PublisherSource)> {
+    crate::backup::recorded_publisher(name)
+        .map(|p| (p, PublisherSource::Backup))
+        .or_else(|| records::cached_company(name).map(|p| (p, PublisherSource::CachedName)))
+}
+
+/// `name_only_target` for a program that is gone, with the publisher from
+/// `publisher_hint` when none is given.
+pub fn removed_program_target(name: &str, publisher: Option<&str>) -> ScanTarget {
+    match publisher {
+        Some(p) => name_only_target(name, Some(p)),
+        None => match publisher_hint(name) {
+            Some((p, _)) => name_only_target(name, Some(&p)),
+            None => name_only_target(name, None),
+        },
+    }
+}
+
 /// `name_only_target` reading the installed programs through `snap`.
 pub fn name_only_target_with(name: &str, publisher: Option<&str>, snap: &Snapshot) -> ScanTarget {
     if publisher.is_some() {
