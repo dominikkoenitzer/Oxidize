@@ -710,6 +710,15 @@ mod tests {
         bytes
     }
 
+    /// An install folder no machine has, so that its files are missing.
+    fn unique_home() -> String {
+        use std::hash::{BuildHasher, Hasher};
+        let n = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        format!(r"{HOME} {n:016x}")
+    }
+
     #[test]
     fn a_shortcut_into_the_install_folder_is_the_programs_whatever_its_name() {
         let root =
@@ -718,7 +727,8 @@ mod tests {
         let deep = root.join(r"Tools\Group");
         let too_deep = deep.join("Deeper");
         fs::create_dir_all(&too_deep).unwrap();
-        let ours = format!(r"{HOME}\quillmark.exe");
+        let home = unique_home();
+        let ours = format!(r"{home}\quillmark.exe");
         let write = |dir: &Path, name: &str, to: &str| {
             fs::write(dir.join(name), shortcut_bytes(to)).unwrap();
         };
@@ -744,7 +754,7 @@ mod tests {
         };
         let mut out = Vec::new();
         let mut pointers = Vec::new();
-        scan_shortcuts_in(&root, &quillmark(Some(HOME)), &mut out, &mut pointers);
+        scan_shortcuts_in(&root, &quillmark(Some(&home)), &mut out, &mut pointers);
         assert_eq!(names(&out), ["Start.lnk", "Writer.lnk"]);
         assert!(out
             .iter()
