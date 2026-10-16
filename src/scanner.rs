@@ -875,7 +875,15 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
 /// Thunderbird" by Mozilla: the vendor word is not the product, so it is
 /// dropped as long as something else remains.
 fn product_tokens(name: &str, publisher_tokens: &[String]) -> Vec<String> {
-    let tokens = significant_tokens(name);
+    product_tokens_for(name, publisher_tokens, util::account_tokens())
+}
+
+/// `product_tokens` with the account's words given. The account's name in a
+/// display name is dropped like the vendor word, as long as something remains.
+fn product_tokens_for(name: &str, publisher_tokens: &[String], account: &[String]) -> Vec<String> {
+    let all = significant_tokens(name);
+    let not_account: Vec<String> = all.iter().filter(|t| !account.contains(t)).cloned().collect();
+    let tokens = if not_account.is_empty() { all } else { not_account };
     let without_vendor: Vec<String> = tokens
         .iter()
         .filter(|t| !publisher_tokens.contains(t))
@@ -2238,6 +2246,27 @@ mod tests {
         ));
         // A shared vendor folder is not.
         assert!(score_product("Mozilla-1de4eec8", &t).is_none());
+    }
+
+    #[test]
+    fn the_account_name_in_a_display_name_is_not_the_product() {
+        let account = vec!["jdoe".to_string()];
+        let vendor = vec!["example".to_string()];
+        // "for jdoe" says whose copy it is: only the vendor word is left, and
+        // the user's own folders named after the account are no match.
+        assert_eq!(
+            product_tokens_for("Example Player for jdoe", &vendor, &account),
+            vec!["example".to_string()]
+        );
+        assert_eq!(
+            product_tokens_for("Quillmark Studio for jdoe", &[], &account),
+            vec!["quillmark".to_string(), "studio".to_string()]
+        );
+        // A program named only like the account keeps its name.
+        assert_eq!(
+            product_tokens_for("Jdoe", &[], &account),
+            vec!["jdoe".to_string()]
+        );
     }
 
     #[test]

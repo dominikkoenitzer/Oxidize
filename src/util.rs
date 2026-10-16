@@ -134,6 +134,31 @@ pub fn significant_tokens(s: &str) -> Vec<String> {
     out
 }
 
+/// The words of the signed-in account: its user name and its profile folder.
+/// Per-user installers write the account into the display name ("Example
+/// Player for jdoe"), where it says whose copy this is, never which product,
+/// and would otherwise match the user's own folders.
+pub fn account_tokens() -> &'static [String] {
+    static TOKENS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    TOKENS.get_or_init(|| {
+        let profile = std::env::var("USERPROFILE").ok().and_then(|p| {
+            std::path::Path::new(&p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+        });
+        let mut out: Vec<String> = Vec::new();
+        for name in std::env::var("USERNAME").ok().into_iter().chain(profile) {
+            for t in significant_tokens(&name) {
+                if !out.contains(&t) {
+                    out.push(t);
+                }
+            }
+        }
+        out
+    })
+}
+
 /// Expand `%VAR%` references using the current process environment. Unknown
 /// variables are left untouched (percent signs preserved), matching the OS's
 /// pass-through behaviour closely enough for uninstall/registry strings.
