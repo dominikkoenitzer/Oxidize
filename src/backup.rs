@@ -111,6 +111,26 @@ impl BackupSession {
         })
     }
 
+    /// Go on writing into the backup at `root`, so one restore puts back
+    /// what both removals took.
+    pub fn resume(root: &Path, program_label: &str) -> Result<BackupSession> {
+        let manifest = if root.join(MANIFEST).exists() {
+            read_manifest(root)?
+        } else {
+            fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+            Manifest {
+                program: program_label.to_string(),
+                created: chrono::Local::now().to_rfc3339(),
+                entries: Vec::new(),
+                restored: None,
+            }
+        };
+        Ok(BackupSession {
+            root: root.to_path_buf(),
+            manifest,
+        })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

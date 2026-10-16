@@ -56,6 +56,24 @@ pub struct DeletionOutcome {
     pub dry_run: bool,
 }
 
+impl DeletionOutcome {
+    /// Count a later removal in with this one. The backup stays this one's
+    /// unless only the later one made one.
+    pub fn absorb(&mut self, later: DeletionOutcome) {
+        self.attempted += later.attempted;
+        self.deleted += later.deleted;
+        self.skipped += later.skipped;
+        self.failed += later.failed;
+        self.items.extend(later.items);
+        self.emptied_parents.extend(later.emptied_parents);
+        self.emptied_keys.extend(later.emptied_keys);
+        if self.backup_dir.is_none() {
+            self.backup_dir = later.backup_dir;
+            self.backup_name = later.backup_name;
+        }
+    }
+}
+
 // Elevation
 // ---------
 
@@ -340,6 +358,17 @@ pub fn remove_leftovers(
     program_label: &str,
     ctx: &SafetyContext,
 ) -> Result<DeletionOutcome> {
+    remove_leftovers_into(items, program_label, ctx, None)
+}
+
+/// [`remove_leftovers`], adding to the backup at `backup` when one is given
+/// instead of starting a new one.
+pub fn remove_leftovers_into(
+    items: &[Leftover],
+    program_label: &str,
+    ctx: &SafetyContext,
+    backup: Option<&Path>,
+) -> Result<DeletionOutcome> {
     let mut outcome = DeletionOutcome::default();
     if items.is_empty() {
         return Ok(outcome);
@@ -362,7 +391,11 @@ pub fn remove_leftovers(
     // With backups on, failing to create the backup folder aborts. There is
     // no fall-through to an unbacked deletion; --no-backup is the opt out.
     let mut session = if ctx.make_backups {
-        match BackupSession::new(program_label) {
+        let session = match backup {
+            Some(dir) => BackupSession::resume(dir, program_label),
+            None => BackupSession::new(program_label),
+        };
+        match session {
             Ok(session) => Some(session),
             Err(e) => bail!(
                 "could not create the backup folder ({e:#}); refusing to delete without a backup. \
