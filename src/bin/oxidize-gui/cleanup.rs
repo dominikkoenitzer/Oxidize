@@ -8,6 +8,7 @@ use oxidize::clean::{self, protect, Analysis, Category, Choice, Cleaned, Finding
 use oxidize::model::Confidence;
 use oxidize::util;
 
+use super::slate::{self, Slate};
 use super::{cell_text, primary_button, size_cell, stat, Action, Tint};
 
 /// What the tab holds between frames.
@@ -25,6 +26,8 @@ pub struct Cleanup {
     pub new_protected: String,
     /// A problem reading or saving the protected list.
     pub protect_error: Option<String>,
+    /// The usage traces, cleared apart from the categories.
+    pub slate: Slate,
 }
 
 impl Cleanup {
@@ -41,6 +44,7 @@ impl Cleanup {
             protected,
             new_protected: String::new(),
             protect_error,
+            slate: Slate::default(),
         }
     }
 
@@ -133,6 +137,7 @@ impl Cleanup {
             self.analysis = None;
             self.results = None;
         }
+        self.slate.found = None;
     }
 }
 
@@ -234,9 +239,12 @@ pub fn view(
                 ui.add_space(8.0);
                 ui.separator();
             }
+            if !state.slate.is_empty() {
+                slate::section(ui, t, &state.slate, busy, dry_run, action);
+            }
             // Taken for the frame and put back, so the analysis is not copied.
             let Some((places, analysis)) = state.analysis.take() else {
-                if !busy && state.results.is_none() {
+                if !busy && state.results.is_none() && state.slate.is_empty() {
                     ui.add_space(48.0);
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -647,6 +655,7 @@ mod tests {
             protected: protect::Protected::default(),
             new_protected: String::new(),
             protect_error: None,
+            slate: Slate::default(),
         }
     }
 
