@@ -824,9 +824,14 @@ fn is_hash(token: &str) -> bool {
 /// Chrome" is read as vendor plus product, so the vendor folder is descended
 /// into rather than flagged.
 pub fn name_only_target(name: &str, publisher: Option<&str>) -> ScanTarget {
+    name_only_target_with(name, publisher, &Snapshot::new())
+}
+
+/// `name_only_target` reading the installed programs through `snap`.
+pub fn name_only_target_with(name: &str, publisher: Option<&str>, snap: &Snapshot) -> ScanTarget {
     if publisher.is_some() {
         let mut target = name_target(name, publisher);
-        target.vendor_is_shared = vendor_is_shared(&target, &Snapshot::new());
+        target.vendor_is_shared = vendor_is_shared(&target, snap);
         return target;
     }
     let tokens = significant_tokens(name);
@@ -883,8 +888,16 @@ fn product_tokens(name: &str, publisher_tokens: &[String]) -> Vec<String> {
 /// display name is dropped like the vendor word, as long as something remains.
 fn product_tokens_for(name: &str, publisher_tokens: &[String], account: &[String]) -> Vec<String> {
     let all = significant_tokens(name);
-    let not_account: Vec<String> = all.iter().filter(|t| !account.contains(t)).cloned().collect();
-    let tokens = if not_account.is_empty() { all } else { not_account };
+    let not_account: Vec<String> = all
+        .iter()
+        .filter(|t| !account.contains(t))
+        .cloned()
+        .collect();
+    let tokens = if not_account.is_empty() {
+        all
+    } else {
+        not_account
+    };
     let without_vendor: Vec<String> = tokens
         .iter()
         .filter(|t| !publisher_tokens.contains(t))
@@ -1052,6 +1065,12 @@ fn score_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)
         return Some((Confidence::Medium, format!("matches \"{hit}\"")));
     }
     None
+}
+
+/// How sure a folder named `name` is the program's, by the rules every
+/// leftover folder is scored with.
+pub fn folder_score(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
+    score_product(name, target)
 }
 
 fn contains_subslice(haystack: &[String], needle: &[String]) -> bool {
@@ -1728,10 +1747,11 @@ fn dedupe_nested_fs(items: Vec<Leftover>) -> Vec<Leftover> {
 /// `dedupe_nested_fs`, across every phase, order kept.
 fn drop_files_inside_removed_folders(items: &mut Vec<Leftover>) {
     let is_fs = |l: &Leftover| matches!(l.kind, LeftoverKind::File | LeftoverKind::Directory);
-    let kept: std::collections::HashSet<String> = dedupe_nested_fs(items.iter().filter(|l| is_fs(l)).cloned().collect())
-        .into_iter()
-        .map(|l| l.path)
-        .collect();
+    let kept: std::collections::HashSet<String> =
+        dedupe_nested_fs(items.iter().filter(|l| is_fs(l)).cloned().collect())
+            .into_iter()
+            .map(|l| l.path)
+            .collect();
     items.retain(|l| !is_fs(l) || kept.contains(&l.path));
 }
 
@@ -2157,7 +2177,9 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
     // names the product, or of the vendor's files when nothing else of theirs
     // is installed.
     let alone = vendor_alone(target, snap.programs());
-    items.extend(records::scan_windows_records(target, &removed, &others, alone));
+    items.extend(records::scan_windows_records(
+        target, &removed, &others, alone,
+    ));
     dedupe_by_path(&mut items);
     drop_files_inside_removed_folders(&mut items);
     // A link type that goes takes its permission to open without asking with
@@ -2291,18 +2313,29 @@ mod tests {
 
     #[test]
     fn a_shortcut_inside_a_removed_folder_goes_with_it() {
-        let fs = |kind, p: &str| Leftover::fs(kind, PathBuf::from(p), Confidence::High, "x", None, false);
+        let fs = |kind, p: &str| {
+            Leftover::fs(kind, PathBuf::from(p), Confidence::High, "x", None, false)
+        };
         let mut items = vec![
             fs(LeftoverKind::File, r"C:\Menu\Quillmark\Quillmark.lnk"),
             fs(LeftoverKind::Directory, r"C:\Menu\Quillmark"),
             fs(LeftoverKind::File, r"C:\Desktop\Quillmark.lnk"),
-            Leftover::reg_key(Hive::CurrentUser, r"Software\Quillmark", Confidence::High, "x"),
+            Leftover::reg_key(
+                Hive::CurrentUser,
+                r"Software\Quillmark",
+                Confidence::High,
+                "x",
+            ),
         ];
         drop_files_inside_removed_folders(&mut items);
         let paths: Vec<&str> = items.iter().map(|l| l.path.as_str()).collect();
         assert_eq!(
             paths,
-            vec![r"C:\Menu\Quillmark", r"C:\Desktop\Quillmark.lnk", r"HKCU\Software\Quillmark"]
+            vec![
+                r"C:\Menu\Quillmark",
+                r"C:\Desktop\Quillmark.lnk",
+                r"HKCU\Software\Quillmark"
+            ]
         );
     }
 
