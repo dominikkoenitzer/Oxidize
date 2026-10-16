@@ -198,15 +198,16 @@
     }
   },
   "new": {
-    "version": "0.2.5",
+    "version": "0.2.6",
     "items": [
-      "A new window: an overview of what takes the most space, a table that sorts by any column, and quick filters for large, recent and per-user programs.",
-      "Icons for far more programs in the window, also for Windows Installer products and programs that keep their executable in a subfolder.",
-      "Remove completely and Undo in the window.",
-      "<code>oxidize uninstall &lt;program&gt; --yes</code> removes a program in one go and ends with Nothing left or a list of what stayed.",
-      "A program installed for you alone is removed without its own uninstaller.",
-      "New leftovers: link and file types, open-with entries, shortcuts, temp folders and the vendor's own key.",
-      "Faster scans: registry, files and system are read at the same time."
+      "A Clean up tab and <code>oxidize clean</code>: temporary files, crash dumps, the Recycle Bin, browser caches, Windows' component store, the Delivery Optimization cache, an old Windows installation and folders of removed programs. Folders you protect, recent files and a running browser are left alone.",
+      "Clean slate and <code>oxidize clean --traces</code> clear recent items, jump lists, Run, search and Open and Save history, launch counts, the thumbnail cache and the clipboard history. The files stay, and so do pinned items.",
+      "A complete removal also removes Windows' own records of the program's files: tray icons, per-app sound settings, Start tiles, shortcut history, and the compatibility and name caches. One more pass catches what only shows after the removal.",
+      "A removed program's publisher is found in its backup or in Windows' cached names, so a scan by name still finds the vendor's folders.",
+      "The Windows account name no longer counts as part of a product's name.",
+      "A dry run counts nothing as already gone and scans once, and a shortcut inside a removed folder is listed once.",
+      "The program count and total size sit beside the filters; the size bar is gone.",
+      "The Store apps list loads about four times faster, and a backup that was put back in full is listed as restored."
     ]
   },
   "requirements": [

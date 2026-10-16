@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.2.6, 2026-10-17
+
+- A Clean up tab and `oxidize clean` clear temporary files, crash dumps, the
+  Recycle Bin, browser caches, Windows' component store, the Delivery
+  Optimization cache, an old Windows installation and folders of removed
+  programs. Folders you protect, recent files and a running browser are left
+  alone.
+- Clean slate on the Clean up tab and `oxidize clean --traces` clear the
+  lists of recently used files and programs: recent items, jump lists, the
+  Run, search and Open and Save history, launch counts, the thumbnail cache
+  and the clipboard history. The files they point to stay, and so do pinned
+  items.
+- A complete removal also removes Windows' own records of the program's
+  files: tray icons, per-app sound settings, Start tiles, shortcut history,
+  and the compatibility and name caches. One more pass catches what only
+  shows after the removal.
+- A removed program's publisher is found in its backup or in Windows' cached
+  names, so a scan by name still finds the vendor's folders.
+- The Windows account name no longer counts as part of a product's name.
+- A dry run counts nothing as already gone and scans once, and a shortcut
+  inside a removed folder is listed once.
+- The program count and total size sit beside the filters; the size bar is
+  gone.
+- The Store apps list loads about four times faster.
+- A backup that was put back in full is listed as restored.
+
 ## 0.2.5, 2026-10-11
 
 - The window opens on an overview: how many programs are installed, their
