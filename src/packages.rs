@@ -59,7 +59,23 @@ impl PackageStore for WindowsPackageStore {
         let found = Self::manager()?
             .FindPackagesByUserSecurityIdWithPackageTypes(&HSTRING::new(), PackageTypes::Main)
             .context("listing the Store apps failed")?;
-        found.into_iter().map(|p| read_package(&p)).collect()
+        let found: Vec<appx::Package> = found.into_iter().collect();
+        // Each app's names come from its resources, which takes Windows a few
+        // milliseconds per app; read on several threads, kept in order.
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .clamp(1, 8);
+        let chunk = found.len().div_ceil(threads).max(1);
+        std::thread::scope(|s| {
+            let parts: Vec<_> = found
+                .chunks(chunk)
+                .map(|part| s.spawn(move || part.iter().map(read_package).collect::<Vec<_>>()))
+                .collect();
+            parts
+                .into_iter()
+                .flat_map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+                .collect()
+        })
     }
 
     fn is_registered(&self, family_name: &str) -> Result<bool> {
