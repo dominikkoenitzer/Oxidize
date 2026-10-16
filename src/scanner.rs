@@ -2158,6 +2158,35 @@ fn run_all<'a, T: Send + 'a>(jobs: Vec<Job<'a, T>>) -> Vec<T> {
     })
 }
 
+/// The footprint of an installed program, from a scan of it as if it were
+/// gone: the same items without its own uninstall entry, which is the only
+/// thing `installed` changes.
+pub fn as_footprint(report: &ScanReport, target: &ScanTarget) -> ScanReport {
+    let own = target.registry.as_ref().map(|(key, source)| {
+        (
+            source.hive,
+            format!("{}\\{}", source.view.uninstall_base(), key),
+        )
+    });
+    let is_own = |l: &Leftover| {
+        own.as_ref().is_some_and(|(hive, subpath)| {
+            l.kind == LeftoverKind::RegistryKey
+                && l.hive == Some(*hive)
+                && l.subpath.as_deref() == Some(subpath.as_str())
+        })
+    };
+    ScanReport {
+        program_name: report.program_name.clone(),
+        installed: true,
+        items: report
+            .items
+            .iter()
+            .filter(|l| !is_own(l))
+            .cloned()
+            .collect(),
+    }
+}
+
 /// Run a full scan. `installed` says whether the program is still registered,
 /// in which case its own uninstall entry is not a leftover.
 pub fn scan(target: &ScanTarget, installed: bool) -> ScanReport {
