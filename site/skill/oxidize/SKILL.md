@@ -122,7 +122,7 @@ Folders and files listed in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line
 
 ### Undo a removal
 
-1. `oxidize backups --json` lists the backups, newest first, with `id`, `name`, `program`, `created`, `items` and `size_bytes`.
+1. `oxidize backups --json` lists the backups, newest first, with `id`, `name`, `program`, `created`, `items`, `size_bytes` and `restored`, which is set once a restore put back everything.
 2. `oxidize restore "<id>" --dry-run --json` checks that the saved copies are still in the backup.
 3. After the user confirms: `oxidize restore "<id>" -y --json`. Without `-y` nothing is restored. A file or folder fails with `already exists` if something is at its old path again; the dry run does not catch that. A failed item makes the exit code 4.
 4. The backup folder stays. Delete it only if the user asks: `oxidize backups --delete "<id>" -y --json`.
