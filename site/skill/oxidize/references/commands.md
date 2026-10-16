@@ -109,6 +109,24 @@ Puts back everything a backup holds, in reverse order of removal, after the ques
 - Registry values are written over what is there. Registry keys are merged with `reg import`. Tasks replace a task of the same name. PATH entries go back at their old position unless already present.
 - The backup folder is kept afterwards.
 
+## clean
+
+`oxidize clean [--temp] [--crash-dumps] [--recycle-bin] [--browser-cache] [--component-store] [--delivery-optimization] [--windows-old] [--orphans] [--recycle-bin-days DAYS] [--medium | --all | --level LEVEL]`
+
+Counts what each category holds, from the files themselves, and what stays and why. Reads only unless `--yes` is given; then it cleans and reports per category what was freed and what stayed. It never asks a question, so `--elevate` always brings the elevated run's output back.
+
+- Without a category flag the safe set is chosen: `--temp`, `--crash-dumps`, `--browser-cache`, and `--orphans` at high confidence. With flags, exactly those.
+- `--temp`: files neither written nor created for 7 days, in the user's temp folder and in Windows' own (`%SystemRoot%\Temp`, administrator only). A file another program holds open stays.
+- `--crash-dumps`: `.dmp` files in `%LOCALAPPDATA%\CrashDumps`, `%SystemRoot%\Minidump`, `%SystemRoot%\LiveKernelReports` and `MEMORY.DMP`, and the queued and archived error reports under `Microsoft\Windows\WER`. The machine-wide ones need administrator rights.
+- `--recycle-bin`: items in the user's Recycle Bin on every fixed drive deleted at least `--recycle-bin-days` ago (30 by default). Never chosen by itself.
+- `--browser-cache`: only the folders `Cache`, `Code Cache`, `GPUCache`, `DawnCache`, `DawnGraphiteCache`, `DawnWebGPUCache` and `Media Cache` of each Chromium profile (Chrome, Edge, Brave, Vivaldi, Chromium and their beta channels), the shared shader caches beside them, and `cache2`, `startupCache` and `jumpListCache` of Firefox profiles. A browser that is running is skipped.
+- `--component-store`: runs `dism /Online /English /Cleanup-Image /StartComponentCleanup`, never `/ResetBase`. Administrator only. The space freed is measured on the drive afterwards.
+- `--delivery-optimization`: runs `Delete-DeliveryOptimizationCache -Force`. Administrator only.
+- `--windows-old`: removes `Windows.old` through Disk Cleanup's previous-installations handler. Administrator only, never chosen by itself, and the previous Windows cannot come back afterwards.
+- `--orphans`: folders no installed program claims, under the roots `orphans` reads. A folder named like a program Oxidize or Windows Installer removed is High by the leftover rules, a looser match Medium, every other Low. They are moved into a backup like leftovers.
+- Folders and files listed in `%LOCALAPPDATA%\Oxidize\protected.txt` are never cleaned, with everything inside them; a folder that holds one is never removed as a whole.
+- `--no-backup` deletes the folders of removed programs for good. Nothing else the command cleans is backed up.
+
 ## Backup folder
 
 `%LOCALAPPDATA%\Oxidize\backups\<YYYY-MM-DD HHMMSS> <program>\`, in local time. A second backup in the same second gets ` (2)`, ` (3)` and so on.

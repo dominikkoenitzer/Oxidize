@@ -195,6 +195,25 @@ With `--uninstall`: the one-program `uninstall` object. No match is an error wit
 - The list: an array of Backup, newest first.
 - `--delete NAME` or `--clear`: `{ "deleted": [names], "cancelled": bool }`. In a dry run the key is `"would_delete"`. With `--json` and without `-y`: `"cancelled": true`, an empty list and exit code 5.
 
+## clean
+
+Without `--yes`, or with `--dry-run`:
+
+```
+{ "analysis": { "findings": [Finding], "elevated": bool, "recycle_bin_days": number, "protected": [string] },
+  "chosen": [category], "chosen_folders": [path], "chosen_bytes": number }
+```
+
+`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin" }`. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"failed"`.
+
+With `--yes`:
+
+```
+{ "cleaned": [ { "category", "freed", "removed", "kept": [Kept], "backup", "notes" } ], "freed": number }
+```
+
+`backup` is the backup the folders of removed programs went into, or null. A category with a `failed` entry in `kept` makes the exit code 4.
+
 ## restore
 
 ```
