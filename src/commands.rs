@@ -9,9 +9,10 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::backup;
+use crate::clean::{self, Analysis, Category, Choice, Cleaned, Finding, Kept};
 use crate::cli::{
-    BackupsArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs, SortKey,
-    TraceArgs, UninstallArgs,
+    BackupsArgs, CleanArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs,
+    SortKey, TraceArgs, UninstallArgs,
 };
 use crate::exit::{self, Failure};
 use crate::model::{
@@ -67,6 +68,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Commands::Trace(args) => cmd_trace(args, &g),
         Commands::Backups(args) => cmd_backups(args, &g),
         Commands::Restore(args) => cmd_restore(args, &g),
+        Commands::Clean(args) => cmd_clean(args, &g),
         Commands::Mcp => crate::mcp::serve(),
     }
 }
@@ -2006,6 +2008,262 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// clean
+// -----
+
+fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
+    let protected = clean::protect::load()?;
+    if !g.json {
+        term::info("Analysing...");
+    }
+    let (places, analysis) = clean::analyse_this_pc(&protected, args.recycle_bin_days);
+    let named = args.named();
+    let choice = if named.is_empty() {
+        analysis.default_choice()
+    } else {
+        analysis.choice(&named, args.levels.threshold())
+    };
+    let run = g.yes && !g.dry_run;
+
+    if g.json && !run {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&clean_plan_json(&analysis, &choice))?
+        );
+        return Ok(());
+    }
+    if !g.json {
+        print_clean_analysis(&analysis, &choice, &named);
+    }
+    if !run {
+        if !g.json {
+            print_clean_hints(&analysis, &choice, g.dry_run);
+        }
+        return Ok(());
+    }
+
+    if choice.categories.is_empty() {
+        if g.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "cleaned": [], "freed": 0 }))?
+            );
+        } else {
+            println!();
+            println!("Nothing chosen can be cleaned.");
+        }
+        return Ok(());
+    }
+    if !g.json {
+        println!();
+        term::info("Cleaning...");
+    }
+    let done = clean::clean_this_pc(&places, &analysis, &choice, &protected, !g.no_backup);
+    let freed: u64 = done.iter().map(|c| c.freed).sum();
+    if g.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({ "cleaned": done, "freed": freed }))?
+        );
+    } else {
+        print_cleaned(&done, freed);
+    }
+    let failed = done.iter().filter(|c| c.failed()).count();
+    if failed > 0 {
+        let message = format!("{failed} of {} categories did not clean fully", done.len());
+        return Err(Failure::incomplete(message, true).into());
+    }
+    Ok(())
+}
+
+/// The analysis as `--json` prints it without `--yes`.
+pub(crate) fn clean_plan_json(analysis: &Analysis, choice: &Choice) -> serde_json::Value {
+    json!({
+        "analysis": analysis,
+        "chosen": choice.categories,
+        "chosen_folders": choice.folders,
+        "chosen_bytes": analysis.chosen_bytes(choice),
+    })
+}
+
+fn print_clean_analysis(analysis: &Analysis, choice: &Choice, named: &[Category]) {
+    let (chosen, rest): (Vec<&Finding>, Vec<&Finding>) = analysis
+        .findings
+        .iter()
+        .partition(|f| choice.categories.contains(&f.category));
+    println!();
+    println!("{}", term::bold("Chosen"));
+    if chosen.is_empty() {
+        println!("  {}", term::dim("nothing"));
+    }
+    for f in &chosen {
+        print_finding(f, Some(choice));
+    }
+    println!();
+    println!("{}", term::bold("Not chosen"));
+    for f in &rest {
+        print_finding(f, None);
+        let why = if named.contains(&f.category) {
+            "nothing to clean here now".to_string()
+        } else {
+            format!("add --{}", f.category.id())
+        };
+        println!("{INDENT}{}", term::dim(&why));
+    }
+}
+
+/// Where the lines under a category start, below its title.
+const INDENT: &str = "             ";
+
+/// One category: what would go, then what stays and why.
+fn print_finding(f: &Finding, choice: Option<&Choice>) {
+    let bytes = match choice {
+        Some(c) if f.category == Category::Orphans => f
+            .folders
+            .iter()
+            .filter(|o| c.folders.contains(&o.path))
+            .map(|o| o.bytes)
+            .sum(),
+        _ => f.bytes,
+    };
+    let size = if !f.size_known && bytes == 0 {
+        "-".to_string()
+    } else {
+        util::human_size(bytes)
+    };
+    println!(
+        "  {size:>9}  {}  {}",
+        f.category.title(),
+        term::dim(&finding_detail(f, choice))
+    );
+    for note in &f.notes {
+        println!("{INDENT}{}", term::dim(note));
+    }
+    if let Some(stays) = stays_line(&f.kept) {
+        println!("{INDENT}{}", term::dim(&stays));
+    }
+    if let Some(c) = choice {
+        for o in f.folders.iter().filter(|o| c.folders.contains(&o.path)) {
+            println!(
+                "{INDENT}{}  {}  {}",
+                conf_tag(o.confidence),
+                o.path.display(),
+                term::dim(&format!("{}, {}", util::human_size(o.bytes), o.reason))
+            );
+        }
+    }
+}
+
+fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
+    let n = f.count;
+    let plural = |one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    match f.category {
+        Category::Temp | Category::CrashDumps | Category::BrowserCache => plural("file", "files"),
+        Category::DeliveryOptimization if f.actionable() => plural("file", "files"),
+        Category::RecycleBin => plural("item", "items"),
+        Category::Orphans => match choice {
+            Some(c) => format!("{} of {n} folders", c.folders.len()),
+            None => plural("folder", "folders"),
+        },
+        Category::WindowsOld if f.actionable() => "1 folder".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// "stays: 812 changed in the last 7 days (1.2 GB), 14 in use ..."
+fn stays_line(kept: &[Kept]) -> Option<String> {
+    if kept.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = kept
+        .iter()
+        .map(|k| {
+            let mut s = if k.count > 0 {
+                format!("{} {}", k.count, k.reason.text())
+            } else {
+                k.reason.text()
+            };
+            if k.bytes > 0 {
+                s.push_str(&format!(" ({})", util::human_size(k.bytes)));
+            }
+            s
+        })
+        .collect();
+    Some(format!("stays: {}", parts.join(", ")))
+}
+
+fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool) {
+    println!();
+    let bytes = util::human_size(analysis.chosen_bytes(choice));
+    let n = choice.categories.len();
+    let categories = if n == 1 { "category" } else { "categories" };
+    if dry_run {
+        println!(
+            "{}",
+            term::dim(&format!(
+                "dry run: {bytes} in {n} {categories} would be cleaned"
+            ))
+        );
+    } else if n > 0 {
+        println!(
+            "{}",
+            term::dim(&format!(
+                "{bytes} in {n} {categories}. Clean them: add --yes"
+            ))
+        );
+    }
+    if !analysis.elevated && analysis.findings.iter().any(|f| f.needs_admin) {
+        println!(
+            "{}",
+            term::dim("Some of it needs administrator rights. Add --elevate to include it.")
+        );
+    }
+    if let Ok(path) = clean::protect::file_path() {
+        let line = if analysis.protected.is_empty() {
+            format!("Folders listed in {} are never cleaned.", path.display())
+        } else {
+            format!(
+                "{} protected folders in {} are never cleaned.",
+                analysis.protected.len(),
+                path.display()
+            )
+        };
+        println!("{}", term::dim(&line));
+    }
+}
+
+fn print_cleaned(done: &[Cleaned], freed: u64) {
+    println!();
+    for c in done {
+        println!(
+            "  {:>9}  {}  {}",
+            util::human_size(c.freed),
+            c.category.title(),
+            term::dim(&format!("{} removed", c.removed))
+        );
+        for note in &c.notes {
+            println!("{INDENT}{}", term::dim(note));
+        }
+        if let Some(stays) = stays_line(&c.kept) {
+            println!("{INDENT}{}", term::dim(&stays));
+        }
+    }
+    println!();
+    println!("{} freed", util::human_size(freed));
+    for name in done.iter().filter_map(|c| c.backup.as_deref()) {
+        println!(
+            "{}",
+            term::dim(&format!("Undo: oxidize restore \"{name}\""))
+        );
+    }
 }
 
 // rendering

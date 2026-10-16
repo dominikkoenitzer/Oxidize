@@ -54,7 +54,7 @@ fn elevate(cli: &Cli) -> anyhow::Result<i32> {
     }
     let _ = std::io::stdout().flush();
 
-    let file = if cli::captures_elevated_output(cli.json, cli.yes) {
+    let file = if cli.never_asks() {
         Some(safety::new_result_file()?)
     } else {
         None
