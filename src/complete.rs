@@ -729,6 +729,98 @@ mod tests {
         assert_eq!(out.verdict.below_level, 1);
     }
 
+    const SHORTCUT: &str =
+        r"C:\Users\me\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Example Player.lnk";
+
+    /// A record of Windows' that the scan finds only once the file it names
+    /// is gone.
+    fn record(name: &str) -> Leftover {
+        Leftover::reg_value(
+            Hive::CurrentUser,
+            r"Software\Microsoft\Windows\CurrentVersion\UFH\SHC",
+            name,
+            Confidence::High,
+            "shortcut history of the program",
+        )
+    }
+
+    fn with_shortcut() -> Vec<Leftover> {
+        let mut items = per_user_footprint();
+        items.push(Leftover::fs(
+            LeftoverKind::File,
+            PathBuf::from(SHORTCUT),
+            Confidence::High,
+            "shortcut to the program",
+            None,
+            false,
+        ));
+        items
+    }
+
+    #[test]
+    fn what_shows_only_once_its_file_is_gone_goes_in_one_more_pass() {
+        let pc = FakePc::new(with_shortcut());
+        pc.shows_once_gone
+            .borrow_mut()
+            .push((SHORTCUT.to_string(), record("35")));
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert_eq!(
+            pc.calls(),
+            [
+                "scan true",
+                "close 100",
+                "remove 3",
+                "scan false",
+                "remove 1 more into backup 1",
+                "scan false"
+            ]
+        );
+        assert!(out.complete(), "{out:?}");
+        // One removal, one backup, counted together.
+        let removal = out.removal.as_ref().unwrap();
+        assert_eq!((removal.attempted, removal.deleted), (4, 4));
+        assert_eq!(removal.backup_name.as_deref(), Some("backup 1"));
+        assert_eq!(out.selected.len(), 4);
+        assert!(out.report.items.iter().any(|l| l.path == record("35").path));
+    }
+
+    #[test]
+    fn there_is_never_a_third_pass() {
+        let pc = FakePc::new(with_shortcut());
+        let (first, second) = (record("35"), record("36"));
+        pc.shows_once_gone.borrow_mut().extend([
+            (SHORTCUT.to_string(), first.clone()),
+            (first.path.clone(), second.clone()),
+        ]);
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        let more = pc.calls().iter().filter(|c| c.contains("more")).count();
+        assert_eq!(more, 1);
+        // What shows after the extra pass is named, not taken.
+        assert!(!out.complete());
+        let left: Vec<&str> = out
+            .verdict
+            .remaining
+            .iter()
+            .map(|l| l.path.as_str())
+            .collect();
+        assert_eq!(left, [second.path.as_str()]);
+    }
+
+    #[test]
+    fn nothing_more_goes_when_the_removal_took_nothing() {
+        let mut pc = FakePc::new(with_shortcut());
+        pc.stuck = with_shortcut().into_iter().map(|l| l.path).collect();
+        pc.shows_once_gone
+            .borrow_mut()
+            .push((SHORTCUT.to_string(), record("35")));
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(pc.calls().iter().all(|c| !c.contains("more")));
+        assert!(!out.complete());
+    }
+
     #[test]
     fn a_program_already_gone_goes_straight_to_its_leftovers() {
         let mut items = per_user_footprint();
