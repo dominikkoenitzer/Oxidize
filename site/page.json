@@ -35,7 +35,7 @@
       "name": "hero",
       "w": 2880,
       "h": 1800,
-      "alt": "Oxidize with Quillmark selected and the eight items that belong to it, grouped by kind, each with how sure Oxidize is and why"
+      "alt": "Oxidize with Quillmark selected and the seven items that belong to it, grouped by kind, each with how sure Oxidize is and why"
     }
   },
   "features": [
@@ -73,7 +73,7 @@
         "h": 1800,
         "pos": "100% 40%",
         "zoom": 1.3,
-        "alt": "The result: Nothing left, nine items removed, with an Undo button"
+        "alt": "The result: Nothing left, eight items removed, with an Undo button"
       },
       "detail": {
         "name": "c3",
@@ -94,7 +94,7 @@
         "w": 2880,
         "h": 1800,
         "pos": "100% 0",
-        "alt": "Seven leftovers of Corvid Notes after its own uninstaller ran, all ticked"
+        "alt": "Four leftovers of Corvid Notes after its own uninstaller ran, all ticked"
       },
       "detail": {
         "name": "c1",
@@ -114,13 +114,13 @@
         "w": 2880,
         "h": 1800,
         "pos": "0 100%",
-        "alt": "After Undo, Quillmark is back and the log lists every restored item"
+        "alt": "After Undo, Quillmark's seven items are back where they were"
       },
       "detail": {
         "name": "c4",
-        "w": 1180,
-        "h": 250,
-        "style": "width: 60%"
+        "w": 570,
+        "h": 400,
+        "style": "width: 34%"
       }
     },
     {
@@ -134,7 +134,7 @@
         "w": 2880,
         "h": 1800,
         "pos": "100% 0",
-        "alt": "A dry run: nine items would be removed and one running process closed"
+        "alt": "A dry run: eight items would be removed and one running process closed"
       },
       "detail": {
         "name": "c5",
