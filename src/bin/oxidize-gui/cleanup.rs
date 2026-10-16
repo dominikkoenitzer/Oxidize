@@ -8,7 +8,7 @@ use oxidize::clean::{self, protect, Analysis, Category, Choice, Cleaned, Finding
 use oxidize::model::Confidence;
 use oxidize::util;
 
-use super::{danger_button, primary_button, Action, Tint};
+use super::{cell_text, primary_button, size_cell, stat, Action, Tint};
 
 /// What the tab holds between frames.
 pub struct Cleanup {
@@ -164,18 +164,33 @@ pub fn confirm_text(analysis: &Analysis, choice: &Choice, make_backups: bool) ->
     text
 }
 
-/// The tab's main area.
-pub fn view(
+/// The strip above the tab, laid out like the program overview: what is
+/// ticked, what was found, what is protected, and Analyse.
+pub fn strip(
     ui: &mut egui::Ui,
     t: &Tint,
-    state: &mut Cleanup,
+    state: &Cleanup,
     busy: bool,
-    dry_run: bool,
     action: &mut Option<Action>,
 ) {
-    ui.add_space(14.0);
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Clean up").size(20.0).color(t.text));
+        match &state.analysis {
+            Some((_, a)) => {
+                let choice = state.choice_in(a);
+                stat(ui, t, &util::human_size(a.chosen_bytes(&choice)), "ticked");
+                ui.add_space(22.0);
+                let found: u64 = a.findings.iter().map(|f| f.bytes).sum();
+                stat(ui, t, &util::human_size(found), "found");
+            }
+            None => stat(ui, t, "-", "not analysed yet"),
+        }
+        ui.add_space(22.0);
+        stat(
+            ui,
+            t,
+            &state.protected.entries().len().to_string(),
+            "protected",
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = if state.analysis.is_some() {
                 "Analyse again"
@@ -185,58 +200,72 @@ pub fn view(
             if ui
                 .add_enabled(
                     !busy,
-                    primary_button(t, label).min_size(egui::vec2(120.0, 30.0)),
+                    egui::Button::new(label).min_size(egui::vec2(110.0, 30.0)),
                 )
+                .on_hover_text("Count what each category holds. Changes nothing.")
                 .clicked()
             {
                 *action = Some(Action::Analyse);
             }
         });
     });
-    ui.add(
-        egui::Label::new(
-            RichText::new(
-                "The analysis counts what each category holds and changes nothing. \
-                 Tick what you want gone, then clean.",
-            )
-            .color(t.weak),
-        )
-        .wrap(),
-    );
-    ui.add_space(10.0);
+}
 
+/// The tab's main area: the result of the last cleaning, each category in a
+/// row, and the button that cleans what is ticked.
+pub fn view(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    busy: bool,
+    dry_run: bool,
+    action: &mut Option<Action>,
+) {
     egui::ScrollArea::vertical()
         .id_salt("cleanup_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if let Some(results) = &state.results {
                 show_results(ui, t, results, busy, action);
-                ui.add_space(12.0);
+                ui.add_space(8.0);
+                ui.separator();
             }
             // Taken for the frame and put back, so the analysis is not copied.
             let Some((places, analysis)) = state.analysis.take() else {
-                if !busy {
-                    ui.add_space(24.0);
-                    ui.label(RichText::new("Nothing analysed yet.").color(t.weak));
+                if !busy && state.results.is_none() {
+                    ui.add_space(48.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new(
+                                "Analyse to see what each category holds. Nothing changes until you clean.",
+                            )
+                            .color(t.weak),
+                        );
+                    });
                 }
                 return;
             };
+            let biggest = analysis.findings.iter().map(|f| f.bytes).max().unwrap_or(0);
             for f in &analysis.findings {
-                category_row(ui, t, state, f);
-                ui.add_space(6.0);
+                category_row(ui, t, state, f, biggest);
             }
-            ui.add_space(8.0);
+            ui.add_space(12.0);
             let choice = state.choice_in(&analysis);
             let bytes = util::human_size(analysis.chosen_bytes(&choice));
             let n = choice.categories.len();
-            let label = if dry_run {
-                format!("Preview cleaning {n} categories, {bytes}")
+            let what = if n == 1 {
+                "1 category".to_string()
             } else {
-                format!("Clean {n} ticked categories, {bytes}")
+                format!("{n} categories")
             };
-            let full = egui::vec2(ui.available_width().min(420.0), 34.0);
+            let label = if dry_run {
+                format!("Preview cleaning {what}, {bytes}")
+            } else {
+                format!("Clean {what}, {bytes}")
+            };
+            let full = egui::vec2(ui.available_width().min(380.0), 34.0);
             if ui
-                .add_enabled(!busy && n > 0, danger_button(t, &label).min_size(full))
+                .add_enabled(!busy && n > 0, primary_button(t, &label).min_size(full))
                 .clicked()
             {
                 *action = Some(Action::Clean(choice));
@@ -255,53 +284,74 @@ pub fn view(
         });
 }
 
-/// One category: its tick, title and size, what it is, and what stays.
-fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
-    egui::Frame::new()
-        .fill(t.side)
-        .stroke(egui::Stroke::new(1.0, t.line))
-        .corner_radius(6)
-        .inner_margin(egui::Margin::symmetric(12, 10))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                let mut on = state.ticked.contains(&f.category) && f.actionable();
-                let response =
-                    ui.add_enabled(f.actionable(), egui::Checkbox::without_text(&mut on));
-                if response.changed() {
-                    state.set(f, on);
-                }
-                ui.label(RichText::new(f.category.title()).size(15.0).color(t.text));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let size = if !f.size_known && f.bytes == 0 {
-                        "size known afterwards".to_string()
-                    } else if !f.actionable() && f.bytes == 0 {
-                        "nothing found".to_string()
-                    } else {
-                        util::human_size(f.bytes)
-                    };
-                    ui.label(RichText::new(size).color(t.text));
-                });
-            });
-            let weak = |ui: &mut egui::Ui, text: &str, color| {
+/// Where the lines under a category start: past its tick.
+const ROW_INDENT: f32 = 28.0;
+
+/// One category, as a row like the program table's: its tick, its title,
+/// its size with a bar against the biggest category, and under it what it
+/// is and what stays.
+fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, biggest: u64) {
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        let mut on = state.ticked.contains(&f.category) && f.actionable();
+        let response = ui.add_enabled(f.actionable(), egui::Checkbox::without_text(&mut on));
+        if response.changed() {
+            state.set(f, on);
+        }
+        let color = if f.actionable() { t.text } else { t.weak };
+        ui.label(RichText::new(f.category.title()).color(color));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (cell, _) = ui.allocate_exact_size(egui::vec2(150.0, 20.0), egui::Sense::hover());
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            if !f.size_known && f.bytes == 0 {
+                cell_text(
+                    ui.painter(),
+                    cell,
+                    "measured afterwards",
+                    font,
+                    t.weak,
+                    egui::Align::Max,
+                );
+            } else if !f.actionable() && f.bytes == 0 {
+                cell_text(
+                    ui.painter(),
+                    cell,
+                    "nothing found",
+                    font,
+                    t.weak,
+                    egui::Align::Max,
+                );
+            } else {
+                size_cell(ui.painter(), t, cell, Some(f.bytes), biggest, &font);
+            }
+        });
+    });
+    ui.horizontal(|ui| {
+        ui.add_space(ROW_INDENT);
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let line = |ui: &mut egui::Ui, text: &str, color| {
                 ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
             };
-            weak(ui, f.category.about(), t.weak);
+            line(ui, f.category.about(), t.weak);
             for note in &f.notes {
                 let color = if f.category == Category::WindowsOld {
                     t.amber
                 } else {
                     t.weak
                 };
-                weak(ui, note, color);
+                line(ui, note, color);
             }
             if let Some(stays) = clean::stays_text(&f.kept) {
-                weak(ui, &stays, if f.needs_admin { t.amber } else { t.weak });
+                line(ui, &stays, if f.needs_admin { t.amber } else { t.weak });
             }
             if f.category == Category::Orphans && !f.folders.is_empty() {
                 folder_list(ui, t, state, f);
             }
         });
+    });
+    ui.add_space(8.0);
+    ui.separator();
 }
 
 /// The folders of removed programs, each with its own tick.

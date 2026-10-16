@@ -1081,12 +1081,22 @@ impl OxidizeApp {
             )
             .show(ui, |ui| cleanup::protected_panel(ui, t, &mut self.cleanup));
         let (busy, dry_run) = (self.busy, self.dry_run);
-        egui::CentralPanel::default()
+        // The same frame as the program overview, so the two views line up.
+        egui::Panel::top("cleanup_overview")
+            .show_separator_line(false)
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
                 left: 16,
                 right: 16,
+                top: 14,
+                bottom: 10,
+            }))
+            .show(ui, |ui| cleanup::strip(ui, t, &self.cleanup, busy, action));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
+                left: 16,
+                right: 12,
                 top: 0,
-                bottom: 8,
+                bottom: 0,
             }))
             .show(ui, |ui| {
                 cleanup::view(ui, t, &mut self.cleanup, busy, dry_run, action)
