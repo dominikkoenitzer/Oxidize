@@ -14,6 +14,21 @@
       "source": "/download/zip",
       "destination": "https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-windows-x64.zip",
       "permanent": false
+    },
+    {
+      "source": "/download/windows.sha256",
+      "destination": "https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-gui.exe.sha256",
+      "permanent": false
+    },
+    {
+      "source": "/download/cli.sha256",
+      "destination": "https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize.exe.sha256",
+      "permanent": false
+    },
+    {
+      "source": "/download/zip.sha256",
+      "destination": "https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-windows-x64.zip.sha256",
+      "permanent": false
     }
   ]
 }
