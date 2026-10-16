@@ -75,7 +75,12 @@ pub(super) fn scan_windows_records(
     for sub in registry::enum_subkeys(hive, NOTIFY_ICONS) {
         let key = format!(r"{NOTIFY_ICONS}\{sub}");
         if registry::read_string(hive, &key, "ExecutablePath").is_some_and(|p| gone.covers(&p)) {
-            out.push(Leftover::reg_key(hive, key, Confidence::High, "tray icon settings of the program"));
+            out.push(Leftover::reg_key(
+                hive,
+                key,
+                Confidence::High,
+                "tray icon settings of the program",
+            ));
         }
     }
 
@@ -100,7 +105,13 @@ pub(super) fn scan_windows_records(
     let mut by_name = |base: String, reason: &str, strip: fn(&str) -> &str| {
         for name in registry::enum_value_names(hive, &base) {
             if gone.covers(strip(&name)) {
-                out.push(Leftover::reg_value(hive, base.clone(), name, Confidence::High, reason));
+                out.push(Leftover::reg_value(
+                    hive,
+                    base.clone(),
+                    name,
+                    Confidence::High,
+                    reason,
+                ));
             }
         }
     };
@@ -111,9 +122,21 @@ pub(super) fn scan_windows_records(
             |n| n,
         );
     }
-    by_name(COMPAT_STORE.to_string(), "compatibility record of the program", |n| n);
-    by_name(COMPAT_LAYERS.to_string(), "compatibility settings of the program", |n| n);
-    by_name(NAME_CACHE.to_string(), "the program's name as Windows cached it", cached_name_file);
+    by_name(
+        COMPAT_STORE.to_string(),
+        "compatibility record of the program",
+        |n| n,
+    );
+    by_name(
+        COMPAT_LAYERS.to_string(),
+        "compatibility settings of the program",
+        |n| n,
+    );
+    by_name(
+        NAME_CACHE.to_string(),
+        "the program's name as Windows cached it",
+        cached_name_file,
+    );
 
     // The cached name also keeps each file's company. A file of the vendor's
     // that is gone, typically an installer that was run once, still has its
@@ -145,7 +168,11 @@ pub(super) fn scan_windows_records(
 
     // A shortcut and the file it opened, kept as a list.
     for (name, entries) in registry::enum_multi_values(hive, SHORTCUT_HISTORY) {
-        let entries: Vec<&str> = entries.iter().map(String::as_str).filter(|e| !e.is_empty()).collect();
+        let entries: Vec<&str> = entries
+            .iter()
+            .map(String::as_str)
+            .filter(|e| !e.is_empty())
+            .collect();
         if !entries.is_empty() && entries.iter().all(|e| gone.covers(e)) {
             out.push(Leftover::reg_value(
                 hive,
@@ -177,7 +204,11 @@ fn vendor_files(publisher: &str) -> Vec<Leftover> {
             continue;
         }
         if path.exists() {
-            if downloads.as_deref().is_some_and(|d| system::path_under(path, d)) && path.is_file() {
+            if downloads
+                .as_deref()
+                .is_some_and(|d| system::path_under(path, d))
+                && path.is_file()
+            {
                 out.push(Leftover::fs(
                     LeftoverKind::File,
                     path.to_path_buf(),
@@ -232,7 +263,9 @@ fn sound_device_file(value: &str) -> Option<&str> {
 fn cached_name_file(name: &str) -> &str {
     match name.rsplit_once('.') {
         Some((file, field))
-            if !field.is_empty() && field.chars().all(|c| c.is_ascii_alphabetic()) && file.contains('\\') =>
+            if !field.is_empty()
+                && field.chars().all(|c| c.is_ascii_alphabetic())
+                && file.contains('\\') =>
         {
             file
         }
@@ -334,14 +367,23 @@ mod tests {
             cached_name_file(r"C:\Apps\Quillmark\app.exe.FriendlyAppName"),
             r"C:\Apps\Quillmark\app.exe"
         );
-        assert_eq!(cached_name_file(r"@%SystemRoot%\system32\shell32.dll,-1"), r"@%SystemRoot%\system32\shell32.dll,-1");
+        assert_eq!(
+            cached_name_file(r"@%SystemRoot%\system32\shell32.dll,-1"),
+            r"@%SystemRoot%\system32\shell32.dll,-1"
+        );
     }
 
     #[test]
     fn only_full_paths_and_known_folders_resolve() {
-        assert_eq!(resolve(r"C:\Apps\app.exe"), Some(PathBuf::from(r"C:\Apps\app.exe")));
+        assert_eq!(
+            resolve(r"C:\Apps\app.exe"),
+            Some(PathBuf::from(r"C:\Apps\app.exe"))
+        );
         assert_eq!(resolve("Microsoft.WindowsTerminal_8wekyb3d8bbwe!App"), None);
-        assert_eq!(resolve(r"{00000000-0000-0000-0000-000000000000}\x.exe"), None);
+        assert_eq!(
+            resolve(r"{00000000-0000-0000-0000-000000000000}\x.exe"),
+            None
+        );
         if let Some(local) = super::super::env_dir("LOCALAPPDATA") {
             assert_eq!(
                 resolve(r"{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}\Quillmark\app.exe"),
