@@ -54,7 +54,8 @@ Removes each program completely: closes what runs from its folders, runs its own
 - `--keep`: run the uninstaller, then show the leftovers and remove nothing. Nothing is closed, and the uninstaller always runs.
 - Questions: "Remove it completely? Running copies are closed first." (with `--keep`: "Run the uninstaller?"; with several names: "Run N uninstallers?"), then "Remove N items? Backups are kept for restore." For a Store app: "Remove the Store app?", which defaults to no.
 - After an uninstaller, leftovers are removed only once the program has left the list.
-- The second scan ends the run with `Nothing left.` or a list of what is still there and why. Items below the chosen level are counted as kept.
+- Some of Windows' records of a removed file, such as the history of a shortcut, only show once the file is gone. New high-confidence items in the second scan go without another question in one more pass, into the same backup, and a last scan follows. There is never a third pass.
+- The last scan ends the run with `Nothing left.` or a list of what is still there and why. Items below the chosen level are counted as kept.
 - `--dry-run`: lists every process it would close and every item it would remove, and says whether the uninstaller would run. Nothing is closed, started or removed.
 - A Store app guarded as `protected` in `list` is refused. Removing a Store app cannot be backed up; its leftovers found afterwards are. Nothing is closed before a Store app is removed.
 
