@@ -34,8 +34,6 @@ const COMPLETE_LEVEL: Confidence = Confidence::High;
 const LARGE_BYTES: u64 = 1024 * 1024 * 1024;
 /// A program installed at most this many days ago counts as recent.
 const RECENT_DAYS: i64 = 30;
-/// How many of the biggest programs the overview bar shows on their own.
-const BAR_PROGRAMS: usize = 8;
 /// The height of one row in the program table.
 const ROW_HEIGHT: f32 = 30.0;
 
@@ -1042,21 +1040,11 @@ impl OxidizeApp {
             .show(ui, |ui| self.details(ui, &t, action));
 
         let overview = overview(&self.programs, today);
-        egui::Panel::top("overview")
-            .show_separator_line(false)
-            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
-                left: 16,
-                right: 16,
-                top: 14,
-                bottom: 10,
-            }))
-            .show(ui, |ui| self.overview_strip(ui, &t, &overview, today));
-
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
                 left: 16,
                 right: 12,
-                top: 0,
+                top: 10,
                 bottom: 0,
             }))
             .show(ui, |ui| {
@@ -1307,123 +1295,8 @@ impl OxidizeApp {
             });
     }
 
-    /// The overview above the table: how many programs, how much they take,
-    /// and a bar of the biggest. Clicking one in the bar selects it.
-    fn overview_strip(&mut self, ui: &mut egui::Ui, t: &Tint, ov: &Overview, today: NaiveDate) {
-        let mut clicked = None;
-        ui.horizontal(|ui| {
-            let noun = if ov.programs == 1 {
-                "program"
-            } else {
-                "programs"
-            };
-            stat(ui, t, &ov.programs.to_string(), noun);
-            ui.add_space(22.0);
-            stat(ui, t, &util::human_size(ov.total_bytes), "in total");
-            ui.add_space(22.0);
-            let (rect, _) = ui
-                .allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::hover());
-            clicked = self.size_bar(ui, t, rect, ov);
-        });
-        if let Some(i) = clicked {
-            let terms = search_terms(&self.filter);
-            if !shows(&self.programs[i], &terms, self.quick, today) {
-                // Hidden by the search or a filter: show everything again.
-                self.filter.clear();
-                self.quick = QuickFilter::All;
-            }
-            let id = self.programs[i].id().to_string();
-            self.select(&id);
-            self.reveal = true;
-        }
-    }
-
-    /// The bar in `rect`: each of the biggest programs as its share of the
-    /// total, copper and verdigris in turn, the rest left as the track.
-    /// Returns the program clicked.
-    fn size_bar(
-        &self,
-        ui: &mut egui::Ui,
-        t: &Tint,
-        rect: egui::Rect,
-        ov: &Overview,
-    ) -> Option<usize> {
-        let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(rect.width(), 28.0));
-        let painter = ui.painter().clone();
-        painter.rect_filled(bar, 6.0, t.track);
-        if ov.total_bytes == 0 {
-            return None;
-        }
-        let font = egui::FontId::proportional(12.0);
-        let mut x = bar.left();
-        let mut clicked = None;
-        for (n, &i) in ov.biggest.iter().enumerate() {
-            let program = &self.programs[i];
-            let bytes = program.size_bytes().unwrap_or(0);
-            let width = bar.width() * bytes as f32 / ov.total_bytes as f32;
-            let part = egui::Rect::from_min_max(
-                egui::pos2(x, bar.top()),
-                egui::pos2((x + width - 2.0).max(x + 1.0), bar.bottom()),
-            );
-            x += width;
-            let size = util::human_size(bytes);
-            let response = ui.interact(part, ui.id().with(("bar", i)), egui::Sense::click());
-            response.widget_info(|| {
-                egui::WidgetInfo::labeled(
-                    egui::WidgetType::Button,
-                    true,
-                    format!("{}, {size}", program.display_name),
-                )
-            });
-            let fill = part_color(t, n);
-            painter.rect_filled(part, 4.0, fill);
-            if response.hovered() {
-                painter.rect_stroke(
-                    part,
-                    4.0,
-                    egui::Stroke::new(1.5, t.text),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            if part.width() >= 64.0 {
-                let inner = part.shrink2(egui::vec2(8.0, 0.0));
-                cell_text(
-                    &painter,
-                    inner,
-                    &program.display_name,
-                    font.clone(),
-                    text_on(fill),
-                    egui::Align::Min,
-                );
-            }
-            let share = 100.0 * bytes as f64 / ov.total_bytes as f64;
-            let response = response.on_hover_ui(|ui| {
-                ui.label(RichText::new(&program.display_name).color(t.text));
-                ui.label(RichText::new(format!("{size}, {share:.0}% of the total")).color(t.weak));
-            });
-            if response.clicked() {
-                clicked = Some(i);
-            }
-        }
-        let rest = egui::Rect::from_min_max(egui::pos2(x, bar.top()), bar.right_bottom());
-        let others = ov.programs - ov.biggest.len();
-        if rest.width() >= 2.0 && others > 0 {
-            let rest_bytes = ov.total_bytes - ov.biggest_bytes(&self.programs);
-            ui.interact(rest, ui.id().with("bar_rest"), egui::Sense::hover())
-                .on_hover_ui(|ui| {
-                    let noun = if others == 1 {
-                        "other program"
-                    } else {
-                        "other programs"
-                    };
-                    ui.label(RichText::new(format!("{others} {noun}")).color(t.text));
-                    ui.label(RichText::new(util::human_size(rest_bytes)).color(t.weak));
-                });
-        }
-        clicked
-    }
-
-    /// The search field, the quick filters and how many programs show.
+    /// The search field, the quick filters, and how many programs show and
+    /// how much all of them take.
     fn filter_row(&mut self, ui: &mut egui::Ui, t: &Tint, ov: &Overview, today: NaiveDate) {
         let narrow = ui.available_width() < 640.0;
         let chips = |app: &mut OxidizeApp, ui: &mut egui::Ui| {
@@ -1439,7 +1312,7 @@ impl OxidizeApp {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let width = if narrow {
-                (ui.available_width() - 110.0).max(120.0)
+                (ui.available_width() - 140.0).max(120.0)
             } else {
                 260.0
             };
@@ -1464,12 +1337,25 @@ impl OxidizeApp {
                 .filter(|p| shows(p, &terms, self.quick, today))
                 .count();
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let text = if shown == ov.programs {
-                    format!("{shown} shown")
-                } else {
-                    format!("{shown} of {}", ov.programs)
-                };
-                ui.label(RichText::new(text).color(t.weak));
+                // The longest wording that fits beside the filters.
+                let lines = count_lines(shown, ov.programs, ov.total_bytes);
+                let galleys = lines.each_ref().map(|line| {
+                    egui::WidgetText::from(RichText::new(line).color(t.weak)).into_galley(
+                        ui,
+                        Some(egui::TextWrapMode::Extend),
+                        f32::INFINITY,
+                        egui::TextStyle::Body,
+                    )
+                });
+                let room = ui.available_width();
+                let pick = galleys
+                    .iter()
+                    .position(|g| g.size().x <= room)
+                    .unwrap_or(galleys.len() - 1);
+                let label = ui.label(galleys[pick].clone());
+                if pick > 0 {
+                    label.on_hover_text(&lines[0]);
+                }
             });
         });
         if narrow {
@@ -2399,28 +2285,6 @@ fn danger_button(t: &Tint, text: &str) -> egui::Button<'static> {
         .stroke(egui::Stroke::new(1.0, t.red.gamma_multiply(0.5)))
 }
 
-/// The colour of the `n`th part of the overview bar: copper and verdigris
-/// take turns, each pair a little paler than the one before.
-fn part_color(t: &Tint, n: usize) -> Color32 {
-    let metal = if n.is_multiple_of(2) {
-        t.copper
-    } else {
-        t.verdigris
-    };
-    metal.lerp_to_gamma(t.base, (n / 2) as f32 * 0.16)
-}
-
-/// Text that reads on `fill`: dark on a light fill, white on a dark one.
-fn text_on(fill: Color32) -> Color32 {
-    let [r, g, b, _] = fill.to_array();
-    let luma = 0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32;
-    if luma > 150.0 {
-        Color32::from_rgb(0x1b, 0x12, 0x0c)
-    } else {
-        Color32::WHITE
-    }
-}
-
 // The program list: filtering, sorting, the overview and the table's
 // geometry. Nothing here draws, so all of it is tested.
 // ------------------------------------------------------------------------
@@ -2638,8 +2502,6 @@ fn is_recent(date: NaiveDate, today: NaiveDate) -> bool {
 struct Overview {
     programs: usize,
     total_bytes: u64,
-    /// The biggest programs, biggest first, as positions in the list.
-    biggest: Vec<usize>,
     large: usize,
     recent: usize,
     per_user: usize,
@@ -2655,26 +2517,9 @@ impl Overview {
             QuickFilter::PerUser => self.per_user,
         }
     }
-
-    /// What the biggest programs take together.
-    fn biggest_bytes(&self, programs: &[Program]) -> u64 {
-        self.biggest
-            .iter()
-            .filter_map(|&i| programs[i].size_bytes())
-            .sum()
-    }
 }
 
 fn overview(programs: &[Program], today: NaiveDate) -> Overview {
-    let mut biggest: Vec<usize> = (0..programs.len())
-        .filter(|&i| programs[i].size_bytes().unwrap_or(0) > 0)
-        .collect();
-    let by_size = Sort {
-        column: Column::Size,
-        descending: true,
-    };
-    sort_indices(programs, &mut biggest, by_size);
-    biggest.truncate(BAR_PROGRAMS);
     let count = |quick: QuickFilter| {
         programs
             .iter()
@@ -2684,11 +2529,31 @@ fn overview(programs: &[Program], today: NaiveDate) -> Overview {
     Overview {
         programs: programs.len(),
         total_bytes: programs.iter().filter_map(Program::size_bytes).sum(),
-        biggest,
         large: count(QuickFilter::Large),
         recent: count(QuickFilter::Recent),
         per_user: count(QuickFilter::PerUser),
     }
+}
+
+/// How many programs show out of how many, and what all of them take: the
+/// full wording, a shorter one and the count alone, for less and less room.
+fn count_lines(shown: usize, programs: usize, total_bytes: u64) -> [String; 3] {
+    let noun = if programs == 1 { "program" } else { "programs" };
+    let count = if shown == programs {
+        format!("{programs} {noun}")
+    } else {
+        format!("{shown} of {programs}")
+    };
+    if total_bytes == 0 {
+        return [count.clone(), count.clone(), count];
+    }
+    let size = util::human_size(total_bytes);
+    let full = if shown == programs {
+        format!("{count} · {size} in total")
+    } else {
+        format!("{count} {noun} · {size} in total")
+    };
+    [full, format!("{count} · {size}"), count]
 }
 
 /// The groups a scan's findings are listed in.
@@ -4037,7 +3902,7 @@ mod tests {
     }
 
     #[test]
-    fn the_overview_counts_and_finds_the_biggest() {
+    fn the_overview_counts_the_programs_and_their_size() {
         let mut programs = list();
         for n in 0..10u32 {
             programs.push(listed(
@@ -4052,23 +3917,34 @@ mod tests {
         let mb = 1024 * 1024;
         assert_eq!(ov.programs, 15);
         assert_eq!(ov.total_bytes, 4293 * mb);
-        assert_eq!(
-            names(&programs, &ov.biggest),
-            [
-                "brightway Studio",
-                "Delta Sync",
-                "Cobalt",
-                "Quillmark",
-                "Tool 9",
-                "Tool 8",
-                "Tool 7",
-                "Tool 6"
-            ]
-        );
-        assert_eq!(ov.biggest_bytes(&programs), 4218 * mb);
         let counts = QuickFilter::ALL.map(|q| ov.count(q));
         assert_eq!(counts, [15, 2, 3, 2]);
         assert_eq!(overview(&[], day("2026-10-11")), Overview::default());
+    }
+
+    #[test]
+    fn the_count_line_gets_shorter_with_less_room() {
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            count_lines(15, 15, 19 * gb),
+            [
+                "15 programs · 19.0 GB in total",
+                "15 programs · 19.0 GB",
+                "15 programs"
+            ]
+        );
+        assert_eq!(
+            count_lines(3, 15, 19 * gb),
+            [
+                "3 of 15 programs · 19.0 GB in total",
+                "3 of 15 · 19.0 GB",
+                "3 of 15"
+            ]
+        );
+        assert_eq!(
+            count_lines(1, 1, 0),
+            ["1 program", "1 program", "1 program"]
+        );
     }
 
     #[test]
