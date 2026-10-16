@@ -2243,6 +2243,10 @@ fn print_outcome(outcome: &DeletionOutcome) {
         );
     }
     println!();
+    if outcome.dry_run {
+        println!("{} would be removed", outcome.attempted);
+        return;
+    }
     let emptied = outcome.emptied_parents.len() + outcome.emptied_keys.len();
     let mut parts = vec![format!("{} removed", outcome.deleted + emptied)];
     if outcome.skipped > 0 {
@@ -3531,6 +3535,10 @@ mod tests {
             assert_eq!(item["path"], leftover.path.as_str());
             assert_eq!(item["status"], "would_remove");
         }
+        // Nothing was gone before: a dry run counts every item as attempted only.
+        assert_eq!(json["attempted"], selected.len());
+        assert_eq!(json["already_gone"], 0);
+        assert_eq!(json["removed"], 0);
     }
 
     #[test]
