@@ -56,6 +56,9 @@ pub enum Commands {
     Backups(BackupsArgs),
     /// Put back everything a backup holds.
     Restore(RestoreArgs),
+    /// Clean temporary files, crash dumps, caches and folders of removed
+    /// programs. Shows what it would clean; --yes cleans it.
+    Clean(CleanArgs),
     /// Serve Oxidize to an AI assistant over MCP on stdin and stdout.
     Mcp,
 }
@@ -76,6 +79,7 @@ impl Cli {
             Commands::Trace(args) => !args.uninstall || self.dry_run,
             Commands::Backups(args) => (args.delete.is_none() && !args.clear) || self.dry_run,
             Commands::Restore(_) => self.dry_run,
+            Commands::Clean(_) => !self.yes || self.dry_run,
             Commands::Mcp => false,
         }
     }
@@ -190,6 +194,77 @@ pub struct RestoreArgs {
     pub name: String,
 }
 
+/// Without a category flag the safe set is chosen: temporary files, crash
+/// dumps, browser caches, and folders of removed programs at high
+/// confidence.
+#[derive(Args, Debug)]
+pub struct CleanArgs {
+    /// Temporary files not changed for 7 days, yours and Windows' own.
+    #[arg(long)]
+    pub temp: bool,
+
+    /// Crash dumps and queued error reports.
+    #[arg(long)]
+    pub crash_dumps: bool,
+
+    /// Recycle Bin items deleted at least --recycle-bin-days ago.
+    #[arg(long)]
+    pub recycle_bin: bool,
+
+    /// Caches of the browsers that are not running. Never cookies, history,
+    /// sessions or logins.
+    #[arg(long)]
+    pub browser_cache: bool,
+
+    /// Superseded Windows components, through DISM. Needs administrator
+    /// rights and can take several minutes.
+    #[arg(long)]
+    pub component_store: bool,
+
+    /// The Delivery Optimization cache, through Windows' own cmdlet. Needs
+    /// administrator rights.
+    #[arg(long)]
+    pub delivery_optimization: bool,
+
+    /// The previous Windows installation (Windows.old), through Disk
+    /// Cleanup. Afterwards there is no going back to that Windows.
+    #[arg(long)]
+    pub windows_old: bool,
+
+    /// Folders of removed programs, moved into a backup. High confidence
+    /// only, unless --medium or --all.
+    #[arg(long)]
+    pub orphans: bool,
+
+    /// How many days ago a Recycle Bin item has to have been deleted.
+    #[arg(long, value_name = "DAYS", default_value_t = crate::clean::RECYCLE_DAYS)]
+    pub recycle_bin_days: u64,
+
+    #[command(flatten)]
+    pub levels: LevelOpts,
+}
+
+impl CleanArgs {
+    /// The categories named on the command line.
+    pub fn named(&self) -> Vec<crate::clean::Category> {
+        use crate::clean::Category;
+        [
+            (self.temp, Category::Temp),
+            (self.crash_dumps, Category::CrashDumps),
+            (self.recycle_bin, Category::RecycleBin),
+            (self.browser_cache, Category::BrowserCache),
+            (self.component_store, Category::ComponentStore),
+            (self.delivery_optimization, Category::DeliveryOptimization),
+            (self.windows_old, Category::WindowsOld),
+            (self.orphans, Category::Orphans),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, c)| c)
+        .collect()
+    }
+}
+
 /// Which confidence levels a removal acts on. High is always included.
 #[derive(Args, Debug, Clone, Copy, Default)]
 pub struct LevelOpts {
@@ -250,6 +325,14 @@ pub enum SortKey {
 /// its own window, where its questions can be answered.
 pub fn captures_elevated_output(json: bool, yes: bool) -> bool {
     json || yes
+}
+
+impl Cli {
+    /// Whether this command line never asks a question, so an elevated run
+    /// of it has nothing to wait for in its own window.
+    pub fn never_asks(&self) -> bool {
+        captures_elevated_output(self.json, self.yes) || matches!(self.command, Commands::Clean(_))
+    }
 }
 
 /// What `oxidize` does when it is started without arguments.
@@ -366,6 +449,9 @@ mod tests {
             "uninstall Thing --dry-run",
             "scan Thing --remove --dry-run",
             "restore name --dry-run",
+            "clean",
+            "clean --json --recycle-bin --windows-old",
+            "clean --yes --dry-run",
         ] {
             assert!(parse(args).changes_nothing(), "{args}");
         }
@@ -379,6 +465,8 @@ mod tests {
             "backups --clear",
             "restore name",
             "list --elevate",
+            "clean --yes",
+            "clean --orphans --all -y --json",
             "mcp",
         ] {
             assert!(!parse(args).changes_nothing(), "{args}");
@@ -454,6 +542,26 @@ mod tests {
         assert!(captures_elevated_output(true, false));
         assert!(captures_elevated_output(false, true));
         assert!(!captures_elevated_output(false, false));
+    }
+
+    #[test]
+    fn clean_takes_its_categories_and_never_asks() {
+        use crate::clean::Category;
+        let Commands::Clean(a) = parse("clean").command else {
+            panic!("not clean");
+        };
+        assert!(a.named().is_empty());
+        assert_eq!(a.recycle_bin_days, 30);
+        assert_eq!(a.levels.threshold(), Confidence::High);
+        let cli = parse("clean --recycle-bin --recycle-bin-days 90 --orphans --medium");
+        assert!(cli.never_asks());
+        let Commands::Clean(a) = cli.command else {
+            panic!("not clean");
+        };
+        assert_eq!(a.named(), [Category::RecycleBin, Category::Orphans]);
+        assert_eq!(a.recycle_bin_days, 90);
+        assert_eq!(a.levels.threshold(), Confidence::Medium);
+        assert!(!parse("orphans").never_asks());
     }
 
     #[test]
