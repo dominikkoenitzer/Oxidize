@@ -7,8 +7,7 @@ You cannot drive the window from a terminal. Tell the user what to click, one st
 ## Layout
 
 - Top bar: "Administrator", or "Not elevated" with a Restart as administrator button. Then the checkboxes Dry run, Backups (on at start), Silent uninstall and System components, and Refresh. In a narrow window the checkboxes get a row of their own.
-- Overview: how many programs are installed, their total size, and a bar of the eight biggest. Hovering a part shows the program and its size; clicking it selects the program.
-- Below it a Search box that filters by name or publisher, and the quick filters All, Large (1 GB or more), Recent (installed in the last 30 days) and Per user.
+- Below it a Search box that filters by name or publisher, the quick filters All, Large (1 GB or more), Recent (installed in the last 30 days) and Per user, and at the right how many programs show and the total size of all installed programs.
 - The table of installed programs: name, publisher, size, install date and source. Clicking a header sorts by it, clicking it again reverses the order. The arrow keys and Page Up/Down move the selection, also while the cursor is in Search.
 - Right: the selected program's name, version and publisher, the buttons Remove completely, Run uninstaller and Scan for leftovers, its size, install date, scope, registry location and install folder, and below them the result.
 - Bottom: a status line, and a Log button that opens the log of what was closed, removed, already gone or failed.
