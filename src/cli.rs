@@ -60,6 +60,8 @@ pub enum Commands {
     /// programs.
     ///
     /// Shows what it would clean and changes nothing; --yes cleans it.
+    /// --traces clears the lists of recently used files and programs
+    /// instead.
     Clean(CleanArgs),
     /// Serve Oxidize to an AI assistant over MCP on stdin and stdout.
     Mcp,
@@ -237,6 +239,16 @@ pub struct CleanArgs {
     /// only, unless --medium or --all.
     #[arg(long)]
     pub orphans: bool,
+
+    /// Clear usage traces instead, and nothing else: recent items, jump
+    /// lists, Run, search and Open and Save history, program launch counts,
+    /// the thumbnail cache and the clipboard history. The files they point
+    /// to stay; so do pinned items.
+    #[arg(long, conflicts_with_all = [
+        "temp", "crash_dumps", "recycle_bin", "browser_cache", "component_store",
+        "delivery_optimization", "windows_old", "orphans",
+    ])]
+    pub traces: bool,
 
     /// How many days ago a Recycle Bin item has to have been deleted.
     #[arg(long, value_name = "DAYS", default_value_t = crate::clean::RECYCLE_DAYS)]
@@ -564,6 +576,21 @@ mod tests {
         assert_eq!(a.recycle_bin_days, 90);
         assert_eq!(a.levels.threshold(), Confidence::Medium);
         assert!(!parse("orphans").never_asks());
+    }
+
+    #[test]
+    fn clean_traces_stands_alone() {
+        let Commands::Clean(a) = parse("clean --traces").command else {
+            panic!("not clean");
+        };
+        assert!(a.traces);
+        assert!(a.named().is_empty());
+        assert!(parse("clean --traces").changes_nothing());
+        assert!(!parse("clean --traces --yes").changes_nothing());
+        for other in ["--temp", "--orphans", "--browser-cache", "--recycle-bin"] {
+            let args = ["oxidize", "clean", "--traces", other];
+            assert!(Cli::try_parse_from(args).is_err(), "{other}");
+        }
     }
 
     #[test]

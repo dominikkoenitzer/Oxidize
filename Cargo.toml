@@ -54,12 +54,15 @@ eframe = { version = "0.36", default-features = false, features = [
 version = "0.62"
 features = [
     "ApplicationModel",
+    "ApplicationModel_DataTransfer",
     "Management_Deployment",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Com",
     "Win32_System_Threading",
     "Win32_System_Console",
     "Win32_System_Registry",
+    "Win32_UI_LegacyWindowsEnvironmentFeatures",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
