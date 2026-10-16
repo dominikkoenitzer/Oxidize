@@ -52,6 +52,8 @@ pub struct DeletionOutcome {
     pub emptied_parents: Vec<PathBuf>,
     /// Vendor registry keys that were left empty and removed too.
     pub emptied_keys: Vec<String>,
+    /// Nothing was touched: every item only says it would be removed.
+    pub dry_run: bool,
 }
 
 // Elevation
@@ -344,8 +346,8 @@ pub fn remove_leftovers(
     }
 
     if ctx.dry_run {
+        outcome.dry_run = true;
         outcome.attempted = items.len();
-        outcome.skipped = items.len();
         outcome.items = items
             .iter()
             .map(|l| ItemOutcome {
