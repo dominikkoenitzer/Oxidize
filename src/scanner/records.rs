@@ -422,6 +422,59 @@ fn drive_devices() -> &'static [(String, String)] {
 mod tests {
     use super::*;
 
+    /// A name no real file has, so that "missing" holds on any machine.
+    fn unique(name: &str) -> String {
+        use std::hash::{BuildHasher, Hasher};
+        let n = std::collections::hash_map::RandomState::new()
+            .build_hasher()
+            .finish();
+        format!("{name} {n:016x}")
+    }
+
+    #[test]
+    fn a_file_that_goes_by_itself_counts_as_gone() {
+        let target = super::super::name_target("Quillmark", Some("Quill Labs"));
+        let menu = format!(
+            r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\{}",
+            unique("Writer")
+        );
+        let shortcut = format!(r"{menu}\Writer.lnk");
+        let app = format!(r"C:\{}\writer.exe", unique("Apps"));
+        let other = format!(r"C:\{}", unique("Other Tool"));
+        let theirs = format!(r"{other}\tool.lnk");
+        let files = [PathBuf::from(&shortcut), PathBuf::from(&theirs)];
+        let others = [PathBuf::from(&other)];
+        let gone = Gone {
+            dirs: &[],
+            files: &files,
+            others: &others,
+            target: &target,
+        };
+        // The listed file, however it is written, and nothing beside it.
+        assert!(gone.covers(&shortcut));
+        assert!(gone.covers(&shortcut.to_uppercase().replace('\\', "/")));
+        assert!(!gone.covers(&format!(r"{menu}\Reader.lnk")));
+        assert!(!gone.covers(&menu));
+        // Neither a file in a folder that stays.
+        assert!(!gone.covers(&app));
+        // Nor one inside another program's install folder.
+        assert!(!gone.covers(&theirs));
+
+        // A shortcut history entry, the shortcut and the file it opened, is
+        // all gone once both are: the folder goes and so does the shortcut.
+        let dirs = [Path::new(&app).parent().unwrap().to_path_buf()];
+        let gone = Gone {
+            dirs: &dirs,
+            ..gone
+        };
+        assert!([shortcut.as_str(), app.as_str()]
+            .iter()
+            .all(|e| gone.covers(e)));
+        // Without the shortcut on the list, it is not.
+        let gone = Gone { files: &[], ..gone };
+        assert!(!gone.covers(&shortcut));
+    }
+
     #[test]
     fn a_sound_device_choice_names_its_file() {
         let v = r"{2}.\\?\usb#vid_05ac&pid_110a&mi_00#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\msft_topo/00010000|\Device\HarddiskVolume3\Users\jdoe\AppData\Local\Quillmark\app.exe%b{00000000-0000-0000-0000-000000000000}";
