@@ -1267,6 +1267,35 @@ impl complete::Pc for CliPc<'_> {
         remove_items(items, label, self.g)
     }
 
+    fn remove_more(
+        &self,
+        items: &[Leftover],
+        label: &str,
+        earlier: &DeletionOutcome,
+    ) -> Result<DeletionOutcome> {
+        // The removal was agreed to already; these are Windows' records of
+        // what it took, which only show once it is gone.
+        if !self.g.json {
+            println!();
+            println!("{}", term::dim("found once the files were gone"));
+            render_report(&ScanReport {
+                program_name: label.to_string(),
+                installed: false,
+                items: items.to_vec(),
+            });
+        }
+        let outcome = safety::remove_leftovers_into(
+            items,
+            label,
+            &self.g.safety(),
+            earlier.backup_dir.as_deref(),
+        )?;
+        if !self.g.json {
+            print_outcome(&outcome);
+        }
+        Ok(outcome)
+    }
+
     fn machine_dirs(&self) -> Vec<PathBuf> {
         complete::machine_dirs()
     }

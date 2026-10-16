@@ -232,6 +232,14 @@ pub trait Pc {
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove the items, with a backup unless told otherwise.
     fn remove(&self, items: &[Leftover], label: &str) -> anyhow::Result<DeletionOutcome>;
+    /// Remove items found only after `earlier`, into its backup when it
+    /// made one.
+    fn remove_more(
+        &self,
+        items: &[Leftover],
+        label: &str,
+        earlier: &DeletionOutcome,
+    ) -> anyhow::Result<DeletionOutcome>;
     fn machine_dirs(&self) -> Vec<PathBuf>;
     /// Told whether the vendor's uninstaller runs, before anything changes.
     fn decided(&self, _vendor: &VendorStep) {}
@@ -383,10 +391,40 @@ pub fn remove_completely(
     if installed {
         installed = pc.still_installed(program);
     }
-    let rescan = pc.scan(target, installed);
+    let mut rescan = pc.scan(target, installed);
+    // Windows' records of a file the removal took, such as the history of a
+    // shortcut that went, can only be told apart once the file is gone. They
+    // go in one more pass, into the same backup; there is never a third.
+    let removed_some = out.removal.as_ref().is_some_and(|o| o.deleted > 0);
+    if !installed && removed_some && out.error.is_none() {
+        let late = appeared(&out.report, &rescan);
+        if let Some(first) = out.removal.as_mut().filter(|_| !late.is_empty()) {
+            match pc.remove_more(&late, &program.display_name, first) {
+                Ok(o) => first.absorb(o),
+                Err(e) => out.error = Some(format!("{e:#}")),
+            }
+            out.report.items.extend(late.iter().cloned());
+            out.selected.extend(late);
+            rescan = pc.scan(target, installed);
+        }
+    }
     out.verdict = verdict(installed, &rescan, opts.level);
     out.seconds = start.elapsed().as_secs_f64();
     out
+}
+
+/// The High items of `rescan` that the scan the removal worked from did not
+/// list.
+fn appeared(report: &ScanReport, rescan: &ScanReport) -> Vec<Leftover> {
+    let same =
+        |a: &Leftover, b: &Leftover| a.kind == b.kind && a.path.eq_ignore_ascii_case(&b.path);
+    rescan
+        .items
+        .iter()
+        .filter(|l| l.confidence == Confidence::High)
+        .filter(|l| !report.items.iter().any(|r| same(r, l)))
+        .cloned()
+        .collect()
 }
 
 /// The footprint plus the program's own uninstall entry, which a scan of an
@@ -468,6 +506,20 @@ impl Pc for ThisPc {
         crate::safety::remove_leftovers(items, label, &self.safety)
     }
 
+    fn remove_more(
+        &self,
+        items: &[Leftover],
+        label: &str,
+        earlier: &DeletionOutcome,
+    ) -> anyhow::Result<DeletionOutcome> {
+        crate::safety::remove_leftovers_into(
+            items,
+            label,
+            &self.safety,
+            earlier.backup_dir.as_deref(),
+        )
+    }
+
     fn machine_dirs(&self) -> Vec<PathBuf> {
         machine_dirs()
     }
@@ -487,6 +539,10 @@ mod tests {
         stuck: Vec<String>,
         /// What the vendor's uninstaller takes with it.
         vendor_takes: Vec<String>,
+        /// Items a scan finds only once the item at the path is gone.
+        shows_once_gone: RefCell<Vec<(String, Leftover)>>,
+        /// Backups made so far.
+        backups: RefCell<usize>,
         calls: RefCell<Vec<String>>,
     }
 
@@ -497,12 +553,42 @@ mod tests {
                 installed: RefCell::new(true),
                 stuck: Vec::new(),
                 vendor_takes: Vec::new(),
+                shows_once_gone: RefCell::new(Vec::new()),
+                backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
             }
         }
 
         fn calls(&self) -> Vec<String> {
             self.calls.borrow().clone()
+        }
+
+        /// Take the items off the PC, all but the stuck ones, and let what
+        /// only shows once they are gone appear.
+        fn take(&self, items: &[Leftover]) -> DeletionOutcome {
+            let mut o = DeletionOutcome {
+                attempted: items.len(),
+                ..DeletionOutcome::default()
+            };
+            for l in items {
+                if self.stuck.contains(&l.path) {
+                    o.failed += 1;
+                } else {
+                    o.deleted += 1;
+                    self.items.borrow_mut().retain(|i| i.path != l.path);
+                    if l.path.ends_with(r"Uninstall\example-player") {
+                        *self.installed.borrow_mut() = false;
+                    }
+                    let shown: Vec<Leftover> = self
+                        .shows_once_gone
+                        .borrow_mut()
+                        .extract_if(.., |(after, _)| *after == l.path)
+                        .map(|(_, item)| item)
+                        .collect();
+                    self.items.borrow_mut().extend(shown);
+                }
+            }
+            o
         }
     }
 
@@ -571,22 +657,28 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("remove {}", items.len()));
-            let mut o = DeletionOutcome {
-                attempted: items.len(),
-                ..DeletionOutcome::default()
-            };
-            for l in items {
-                if self.stuck.contains(&l.path) {
-                    o.failed += 1;
-                } else {
-                    o.deleted += 1;
-                    self.items.borrow_mut().retain(|i| i.path != l.path);
-                    if l.path.ends_with(r"Uninstall\example-player") {
-                        *self.installed.borrow_mut() = false;
-                    }
-                }
-            }
-            Ok(o)
+            let n = self.backups.replace_with(|n| *n + 1) + 1;
+            Ok(DeletionOutcome {
+                backup_name: Some(format!("backup {n}")),
+                ..self.take(items)
+            })
+        }
+
+        fn remove_more(
+            &self,
+            items: &[Leftover],
+            _label: &str,
+            earlier: &DeletionOutcome,
+        ) -> anyhow::Result<DeletionOutcome> {
+            self.calls.borrow_mut().push(format!(
+                "remove {} more into {}",
+                items.len(),
+                earlier.backup_name.as_deref().unwrap_or("nothing")
+            ));
+            Ok(DeletionOutcome {
+                backup_name: earlier.backup_name.clone(),
+                ..self.take(items)
+            })
         }
 
         fn machine_dirs(&self) -> Vec<PathBuf> {
