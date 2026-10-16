@@ -1,6 +1,7 @@
 //! The Oxidize engine, shared by the `oxidize` command line and `oxidize-gui`.
 
 pub mod backup;
+pub mod clean;
 pub mod cli;
 pub mod commands;
 pub mod complete;
