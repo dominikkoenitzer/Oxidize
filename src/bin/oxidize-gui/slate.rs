@@ -61,40 +61,48 @@ pub fn section(
     action: &mut Option<Action>,
 ) {
     ui.add_space(14.0);
-    ui.label(RichText::new("Clean slate").size(16.0).color(t.text));
-    ui.add(
-        egui::Label::new(
-            RichText::new(
-                "Recent files, jump lists and histories Windows keeps. The files themselves stay.",
-            )
-            .small()
-            .color(t.weak),
-        )
-        .wrap(),
-    );
-    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            ui.label(RichText::new("Clean slate").size(16.0).color(t.text));
+            ui.label(
+                RichText::new(
+                    "Recent files, jump lists and histories Windows keeps. The files themselves stay.",
+                )
+                .small()
+                .color(t.weak),
+            );
+        });
+        let Some(found) = slate.found.as_ref().filter(|_| slate.results.is_none()) else {
+            return;
+        };
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let (count, _) = traces::total(found);
+            let any = found.iter().any(TraceFinding::actionable);
+            let label = if dry_run {
+                format!("Preview clearing {}", items(count))
+            } else {
+                format!("Clear all traces, {}", items(count))
+            };
+            if ui
+                .add_enabled(
+                    !busy && any,
+                    primary_button(t, &label).min_size(egui::vec2(240.0, 34.0)),
+                )
+                .clicked()
+            {
+                *action = Some(Action::ClearTraces);
+            }
+        });
+    });
+    ui.add_space(6.0);
     if let Some(results) = &slate.results {
         show_results(ui, t, results);
     } else if let Some(found) = &slate.found {
         for f in found {
             row(ui, t, f);
         }
-        ui.add_space(12.0);
-        let (count, _) = traces::total(found);
-        let any = found.iter().any(TraceFinding::actionable);
-        let label = if dry_run {
-            format!("Preview clearing {}", items(count))
-        } else {
-            format!("Clear all traces, {}", items(count))
-        };
-        let full = egui::vec2(ui.available_width().min(380.0), 34.0);
-        if ui
-            .add_enabled(!busy && any, primary_button(t, &label).min_size(full))
-            .clicked()
-        {
-            *action = Some(Action::ClearTraces);
-        }
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         ui.label(
             RichText::new(
                 "A File Explorer window that is open may show old entries until it is closed.",
@@ -107,38 +115,55 @@ pub fn section(
     ui.separator();
 }
 
-/// One trace: its title and what it holds, and under it what it is.
+/// Where what a trace is starts, past its title.
+const TITLE: f32 = 200.0;
+/// The room for the count and size at the right.
+const AMOUNT: f32 = 220.0;
+
+/// One trace on one line: its title, what it is, and what it holds. Notes
+/// and what stays go on a line below.
 fn row(ui: &mut egui::Ui, t: &Tint, f: &TraceFinding) {
-    ui.add_space(6.0);
     let active = f.actionable();
+    let strong = if active { t.text } else { t.weak };
     ui.horizontal(|ui| {
-        let color = if active { t.text } else { t.weak };
-        ui.label(RichText::new(f.trace.title()).color(color));
+        let line = egui::Layout::left_to_right(egui::Align::Center);
+        let about = (ui.available_width() - TITLE - AMOUNT - 16.0).max(0.0);
+        ui.allocate_ui_with_layout(egui::vec2(TITLE, 24.0), line, |ui| {
+            ui.set_min_width(TITLE);
+            ui.add(egui::Label::new(RichText::new(f.trace.title()).color(strong)).truncate());
+        });
+        ui.allocate_ui_with_layout(egui::vec2(about, 24.0), line, |ui| {
+            ui.set_min_width(about);
+            ui.add(
+                egui::Label::new(RichText::new(f.trace.about()).small().color(t.weak)).truncate(),
+            );
+        });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (cell, _) = ui.allocate_exact_size(egui::vec2(220.0, 20.0), egui::Sense::hover());
+            let (cell, _) = ui.allocate_exact_size(egui::vec2(AMOUNT, 20.0), egui::Sense::hover());
             let font = egui::TextStyle::Body.resolve(ui.style());
             let text = if active {
                 amount(f)
             } else {
                 "nothing found".to_string()
             };
-            let color = if active { t.text } else { t.weak };
-            cell_text(ui.painter(), cell, &text, font, color, egui::Align::Max);
+            cell_text(ui.painter(), cell, &text, font, strong, egui::Align::Max);
         });
     });
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        let line = |ui: &mut egui::Ui, text: &str, color| {
-            ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
-        };
-        line(ui, f.trace.about(), t.weak);
-        if !f.notes.is_empty() {
-            line(ui, &f.notes.join("  \u{b7}  "), t.weak);
-        }
-        if let Some(stays) = clean::stays_text(&f.kept) {
-            line(ui, &stays, t.weak);
-        }
-    });
+    let mut extra: Vec<String> = f.notes.clone();
+    extra.extend(clean::stays_text(&f.kept));
+    if !extra.is_empty() {
+        ui.horizontal(|ui| {
+            ui.add_space(TITLE + ui.spacing().item_spacing.x);
+            ui.add(
+                egui::Label::new(
+                    RichText::new(extra.join("  \u{b7}  "))
+                        .small()
+                        .color(t.weak),
+                )
+                .wrap(),
+            );
+        });
+    }
 }
 
 /// "12 shortcuts, 3.4 KB", or the size alone where a count says nothing.
