@@ -20,7 +20,12 @@ use oxidize::complete::{self, CloseHow, Outcome, VendorStep};
 use oxidize::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport};
 use oxidize::restore::RestoreItem;
 use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
-use oxidize::{backup, registry, restore, scanner, uninstall, util};
+use oxidize::{backup, clean, registry, restore, scanner, uninstall, util};
+
+// The tab lives beside this file, not in src/bin, where Cargo would take it
+// for a program of its own.
+#[path = "oxidize-gui/cleanup.rs"]
+mod cleanup;
 
 /// The lowest confidence "Remove completely" removes.
 const COMPLETE_LEVEL: Confidence = Confidence::High;
@@ -89,7 +94,18 @@ enum Msg {
         w: u32,
         h: u32,
     },
+    /// An analysis for the Clean up tab ended.
+    Analysed(Box<(clean::Places, clean::Analysis)>),
+    /// A cleaning ended.
+    Cleaned(Vec<clean::Cleaned>),
     Error(String),
+}
+
+/// The window's two views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Programs,
+    Cleanup,
 }
 
 /// A pending destructive action awaiting confirmation.
@@ -98,6 +114,8 @@ enum Confirm {
     Uninstall(Program, bool),
     Remove(Vec<Leftover>, String, SafetyContext),
     Complete(Program, SafetyContext),
+    /// What to clean, and the question that asks about it.
+    Clean(clean::Choice, String),
 }
 
 /// The last complete removal, shown for its program until the user moves on.
@@ -119,6 +137,10 @@ enum Action {
     /// Restore the named backup.
     Undo(String),
     RestartAdmin,
+    /// Analyse what the Clean up tab can clean.
+    Analyse,
+    /// Clean what was ticked.
+    Clean(clean::Choice),
 }
 
 struct OxidizeApp {
@@ -134,8 +156,10 @@ struct OxidizeApp {
     /// list it can only be reached through this, for its leftovers.
     uninstalled: Option<Program>,
     complete: Option<Completed>,
+    cleanup: cleanup::Cleanup,
 
     // UI state.
+    tab: Tab,
     filter: String,
     quick: QuickFilter,
     selected: Option<String>, // selected program's registry-key id
@@ -178,6 +202,8 @@ impl OxidizeApp {
             checked: Vec::new(),
             uninstalled: None,
             complete: None,
+            cleanup: cleanup::Cleanup::new(),
+            tab: Tab::Programs,
             filter: String::new(),
             quick: QuickFilter::All,
             selected: None,
@@ -387,6 +413,64 @@ impl OxidizeApp {
         });
     }
 
+    fn start_analyse(&mut self, ctx: &egui::Context) {
+        self.busy = true;
+        self.status = "Analysing what can be cleaned...".to_string();
+        let protected = self.cleanup.protected.clone();
+        self.spawn(ctx, move || {
+            let (places, analysis) = clean::analyse_this_pc(&protected, clean::RECYCLE_DAYS);
+            Msg::Analysed(Box::new((places, analysis)))
+        });
+    }
+
+    fn start_clean(&mut self, ctx: &egui::Context, choice: clean::Choice) {
+        let Some((places, analysis)) = self.cleanup.analysis.take() else {
+            return;
+        };
+        self.busy = true;
+        self.status = "Cleaning...".to_string();
+        self.log
+            .push(format!("Cleaning {} categories", choice.categories.len()));
+        let protected = self.cleanup.protected.clone();
+        let make_backups = self.make_backups;
+        self.spawn(ctx, move || {
+            Msg::Cleaned(clean::clean_this_pc(
+                &places,
+                &analysis,
+                &choice,
+                &protected,
+                make_backups,
+            ))
+        });
+    }
+
+    /// Take in a finished cleaning.
+    fn on_cleaned(&mut self, results: Vec<clean::Cleaned>) {
+        self.busy = false;
+        for c in &results {
+            self.log.push(format!(
+                "{}: {} freed, {} removed",
+                c.category.title(),
+                util::human_size(c.freed),
+                c.removed
+            ));
+            if let Some(stays) = clean::stays_text(&c.kept) {
+                self.log.push(format!("  {stays}"));
+            }
+            if let Some(name) = &c.backup {
+                self.log.push(format!(
+                    "Undo from the command line: oxidize restore \"{name}\""
+                ));
+            }
+        }
+        let freed: u64 = results.iter().map(|c| c.freed).sum();
+        self.status = format!(
+            "{} freed. Analyse again to see what is left.",
+            util::human_size(freed)
+        );
+        self.cleanup.results = Some(results);
+    }
+
     /// Take in a finished complete removal. True when the program list
     /// should be read again because something changed.
     fn on_completed(&mut self, program: Program, outcome: Outcome, dry_run: bool) -> bool {
@@ -590,6 +674,13 @@ impl OxidizeApp {
                         ctx.load_texture(format!("ico-{id}"), image, egui::TextureOptions::LINEAR);
                     self.icons.insert(id, tex);
                 }
+                Msg::Analysed(found) => {
+                    let (places, analysis) = *found;
+                    self.status = analysed_status(&analysis);
+                    self.cleanup.take_analysis(places, analysis);
+                    self.busy = false;
+                }
+                Msg::Cleaned(results) => self.on_cleaned(results),
                 Msg::Error(e) => {
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
@@ -635,7 +726,7 @@ impl OxidizeApp {
     /// Move the selection with the arrow and page keys. The search field
     /// keeps its own keys; up and down are the table's even while typing.
     fn keyboard(&mut self, ctx: &egui::Context, display: &[usize]) {
-        if self.confirm.is_some() || display.is_empty() {
+        if self.confirm.is_some() || display.is_empty() || self.tab != Tab::Programs {
             return;
         }
         let page = ((self.table_view.1 / ROW_HEIGHT).floor() as isize).max(1);
@@ -681,6 +772,7 @@ impl OxidizeApp {
                 }
             }
             Confirm::Complete(p, ctx) => complete_confirm_text(&p.display_name, ctx),
+            Confirm::Clean(_, text) => text.clone(),
         };
 
         let mut decision: Option<bool> = None;
@@ -712,6 +804,7 @@ impl OxidizeApp {
                     self.start_remove(ctx, items, label, safety)
                 }
                 Confirm::Complete(p, safety) => self.start_remove_completely(ctx, p, safety),
+                Confirm::Clean(choice, _) => self.start_clean(ctx, choice),
             },
             Some(false) => self.confirm = None,
             None => {}
@@ -911,6 +1004,29 @@ impl eframe::App for OxidizeApp {
                 .show(ui, |ui| self.log_view(ui, &t));
         }
 
+        if self.tab == Tab::Cleanup {
+            self.cleanup_tab(ui, &t, &mut action);
+        } else {
+            self.programs_tab(ui, &t, today, &mut action);
+        }
+
+        // ---- Execute the requested action (outside the panel borrows) ----
+        if let Some(action) = action {
+            self.act(ctx, action);
+        }
+    }
+}
+
+impl OxidizeApp {
+    /// The program overview, table and details panel.
+    fn programs_tab(
+        &mut self,
+        ui: &mut egui::Ui,
+        t: &Tint,
+        today: NaiveDate,
+        action: &mut Option<Action>,
+    ) {
+        let t = *t;
         // At most two fifths of the window, so a small window keeps a usable
         // table.
         let widest = (ui.available_width() * 0.4).clamp(300.0, 560.0);
@@ -923,7 +1039,7 @@ impl eframe::App for OxidizeApp {
                     .fill(t.side)
                     .inner_margin(egui::Margin::same(16)),
             )
-            .show(ui, |ui| self.details(ui, &t, &mut action));
+            .show(ui, |ui| self.details(ui, &t, action));
 
         let overview = overview(&self.programs, today);
         egui::Panel::top("overview")
@@ -949,9 +1065,37 @@ impl eframe::App for OxidizeApp {
                 let display = self.display_indices(today);
                 self.table(ui, &t, &display);
             });
+    }
 
-        // ---- Execute the requested action (outside the panel borrows) ----
-        if let Some(action) = action {
+    /// The Clean up tab, with the protected folders beside it.
+    fn cleanup_tab(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
+        let widest = (ui.available_width() * 0.4).clamp(300.0, 480.0);
+        egui::Panel::right("protected")
+            .resizable(true)
+            .default_size(340.0)
+            .size_range(260.0..=widest)
+            .frame(
+                egui::Frame::new()
+                    .fill(t.side)
+                    .inner_margin(egui::Margin::same(16)),
+            )
+            .show(ui, |ui| cleanup::protected_panel(ui, t, &mut self.cleanup));
+        let (busy, dry_run) = (self.busy, self.dry_run);
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
+                left: 16,
+                right: 16,
+                top: 0,
+                bottom: 8,
+            }))
+            .show(ui, |ui| {
+                cleanup::view(ui, t, &mut self.cleanup, busy, dry_run, action)
+            });
+    }
+
+    /// Carry out what a click asked for, after the panels are drawn.
+    fn act(&mut self, ctx: &egui::Context, action: Action) {
+        {
             match action {
                 Action::Refresh => self.load_programs(ctx),
                 Action::Scan(p) => {
@@ -991,9 +1135,37 @@ impl eframe::App for OxidizeApp {
                     Ok(()) => std::process::exit(0),
                     Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
                 },
+                Action::Analyse => self.start_analyse(ctx),
+                Action::Clean(choice) if self.confirm.is_none() => {
+                    let Some((_, analysis)) = &self.cleanup.analysis else {
+                        return;
+                    };
+                    if self.dry_run {
+                        let line = format!(
+                            "dry run: {} in {} categories would be cleaned",
+                            util::human_size(analysis.chosen_bytes(&choice)),
+                            choice.categories.len()
+                        );
+                        self.log.push(line.clone());
+                        self.status = line;
+                    } else {
+                        let text = cleanup::confirm_text(analysis, &choice, self.make_backups);
+                        self.confirm = Some(Confirm::Clean(choice, text));
+                    }
+                }
+                Action::Clean(_) => {}
             }
         }
     }
+}
+
+/// The status line after an analysis.
+fn analysed_status(analysis: &clean::Analysis) -> String {
+    let chosen = analysis.default_choice();
+    format!(
+        "Analysed. The ticked categories hold {}.",
+        util::human_size(analysis.chosen_bytes(&chosen))
+    )
 }
 
 // The window's parts, top to bottom.
@@ -1007,6 +1179,12 @@ impl OxidizeApp {
         let wide = ui.available_width() >= 900.0;
         ui.horizontal(|ui| {
             ui.label(RichText::new("Oxidize").size(17.0).color(t.text));
+            ui.add_space(10.0);
+            for (tab, label) in [(Tab::Programs, "Programs"), (Tab::Cleanup, "Clean up")] {
+                if ui.selectable_label(self.tab == tab, label).clicked() {
+                    self.tab = tab;
+                }
+            }
             ui.add_space(6.0);
             if self.elevated {
                 badge(ui, "Administrator", t.verdigris);
