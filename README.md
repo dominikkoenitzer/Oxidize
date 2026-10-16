@@ -35,6 +35,7 @@ oxidize trace <exe or process>   which program does this belong to
 oxidize backups                  what earlier removals backed up
 oxidize restore <backup>         put a backup back
 oxidize clean                    temp files, crash dumps, caches, folders of removed programs
+oxidize clean --traces           recent items, jump lists, histories: a clean slate
 oxidize mcp                      let an AI assistant use Oxidize
 ```
 
@@ -58,6 +59,23 @@ the run ends with what was freed per category and what stayed.
 oxidize clean                         what would go, nothing changes
 oxidize clean --yes                   clean the safe set
 oxidize clean --recycle-bin --yes     only Recycle Bin items deleted 30 or more days ago
+```
+
+`oxidize clean --traces` is a clean slate for what Windows remembers of your
+use: recent items, the jump lists of every app on the taskbar, recent
+documents, the Open and Save history, Run history, typed paths and searches
+in File Explorer, program launch counts, the thumbnail cache and the
+clipboard history. Only these lists go; the files they point to stay, and so
+do pinned items. Windows clears the recent items and jump lists itself first,
+so Explorer hears of it without a restart, and its own Disk Cleanup handler
+empties the thumbnail cache. `--traces` never touches temporary folders,
+browser data, mail or the data of programs. It shows what it would clear;
+`--yes` clears it. In the window it is Clean slate on the Clean up tab: one
+list, one button.
+
+```
+oxidize clean --traces                what would be cleared, nothing changes
+oxidize clean --traces --yes          clear every trace
 ```
 
 Naming categories cleans exactly those: `--temp`, `--crash-dumps`,
@@ -315,7 +333,11 @@ has a `kind`, `program` or `store`.
 `unreadable`, `needs_admin`, `running`, `failed`), the `reason` in words, a
 `count` and `bytes`. With `--yes` it prints `cleaned`, one entry per category
 with `freed`, `removed`, `kept`, `backup` and `notes`, and the total `freed`;
-a category that did not clean fully exits with 4.
+a category that did not clean fully exits with 4. `oxidize clean --traces
+--json` prints `traces`, one entry per trace with `trace`, `count`, `bytes`,
+`count_known`, `kept` and `notes`, and the totals `count` and `bytes`; with
+`--yes` the entries are in `cleared`. A jump list kept for its pinned items
+has the code `pinned`.
 
 ### What gets checked
 

@@ -11,8 +11,10 @@
 
 pub mod browsers;
 pub mod files;
+pub mod jumplist;
 pub mod protect;
 pub mod recycle;
+pub mod traces;
 pub mod windows;
 
 use std::path::{Path, PathBuf};
@@ -136,6 +138,8 @@ pub enum KeptReason {
     NeedsAdmin,
     /// The browser of that name is running.
     Running(String),
+    /// A jump list with pinned items; only its other items go.
+    Pinned,
     Failed(String),
 }
 
@@ -151,6 +155,7 @@ impl KeptReason {
             KeptReason::Unreadable => "unreadable",
             KeptReason::NeedsAdmin => "needs_admin",
             KeptReason::Running(_) => "running",
+            KeptReason::Pinned => "pinned",
             KeptReason::Failed(_) => "failed",
         }
     }
@@ -165,6 +170,7 @@ impl KeptReason {
             KeptReason::Unreadable => "folder could not be read".to_string(),
             KeptReason::NeedsAdmin => "needs administrator rights".to_string(),
             KeptReason::Running(name) => format!("{name} is running"),
+            KeptReason::Pinned => "with pinned items".to_string(),
             KeptReason::Failed(e) => e.clone(),
         }
     }

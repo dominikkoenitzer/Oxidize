@@ -26,6 +26,8 @@ use oxidize::{backup, clean, registry, restore, scanner, uninstall, util};
 // for a program of its own.
 #[path = "oxidize-gui/cleanup.rs"]
 mod cleanup;
+#[path = "oxidize-gui/slate.rs"]
+mod slate;
 
 /// The lowest confidence "Remove completely" removes.
 const COMPLETE_LEVEL: Confidence = Confidence::High;
@@ -98,6 +100,10 @@ enum Msg {
     Analysed(Box<(clean::Places, clean::Analysis)>),
     /// A cleaning ended.
     Cleaned(Vec<clean::Cleaned>),
+    /// The usage traces were read.
+    TracesFound(Vec<clean::traces::TraceFinding>),
+    /// The usage traces were cleared.
+    TracesCleared(Vec<clean::traces::TraceFinding>),
     Error(String),
 }
 
@@ -116,6 +122,8 @@ enum Confirm {
     Complete(Program, SafetyContext),
     /// What to clean, and the question that asks about it.
     Clean(clean::Choice, String),
+    /// Clear the usage traces; the question that asks about it.
+    Traces(String),
 }
 
 /// The last complete removal, shown for its program until the user moves on.
@@ -141,6 +149,8 @@ enum Action {
     Analyse,
     /// Clean what was ticked.
     Clean(clean::Choice),
+    /// Clear every usage trace.
+    ClearTraces,
 }
 
 struct OxidizeApp {
@@ -421,6 +431,44 @@ impl OxidizeApp {
             let (places, analysis) = clean::analyse_this_pc(&protected, clean::RECYCLE_DAYS);
             Msg::Analysed(Box::new((places, analysis)))
         });
+        let protected = self.cleanup.protected.clone();
+        self.spawn(ctx, move || {
+            let places = clean::traces::TracePlaces::this_pc();
+            let shell = clean::traces::shell_for(&places);
+            Msg::TracesFound(clean::traces::analyse(&places, &protected, shell.as_ref()))
+        });
+    }
+
+    fn start_clear_traces(&mut self, ctx: &egui::Context) {
+        self.busy = true;
+        self.status = "Clearing usage traces...".to_string();
+        self.log.push("Clearing usage traces".to_string());
+        let protected = self.cleanup.protected.clone();
+        self.spawn(ctx, move || {
+            let places = clean::traces::TracePlaces::this_pc();
+            let shell = clean::traces::shell_for(&places);
+            Msg::TracesCleared(clean::traces::clear(&places, &protected, shell.as_ref()))
+        });
+    }
+
+    /// Take in a finished clearing of the usage traces.
+    fn on_traces_cleared(&mut self, results: Vec<clean::traces::TraceFinding>) {
+        self.busy = false;
+        for f in &results {
+            let what = if f.count_known {
+                f.detail()
+            } else {
+                util::human_size(f.bytes)
+            };
+            self.log
+                .push(format!("{}: {what} cleared", f.trace.title()));
+            if let Some(stays) = clean::stays_text(&f.kept) {
+                self.log.push(format!("  {stays}"));
+            }
+        }
+        let (count, _) = clean::traces::total(&results);
+        self.status = format!("{count} usage traces cleared.");
+        self.cleanup.slate.take_results(results);
     }
 
     fn start_clean(&mut self, ctx: &egui::Context, choice: clean::Choice) {
@@ -681,6 +729,8 @@ impl OxidizeApp {
                     self.busy = false;
                 }
                 Msg::Cleaned(results) => self.on_cleaned(results),
+                Msg::TracesFound(found) => self.cleanup.slate.take_found(found),
+                Msg::TracesCleared(results) => self.on_traces_cleared(results),
                 Msg::Error(e) => {
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
@@ -773,6 +823,7 @@ impl OxidizeApp {
             }
             Confirm::Complete(p, ctx) => complete_confirm_text(&p.display_name, ctx),
             Confirm::Clean(_, text) => text.clone(),
+            Confirm::Traces(text) => text.clone(),
         };
 
         let mut decision: Option<bool> = None;
@@ -805,6 +856,7 @@ impl OxidizeApp {
                 }
                 Confirm::Complete(p, safety) => self.start_remove_completely(ctx, p, safety),
                 Confirm::Clean(choice, _) => self.start_clean(ctx, choice),
+                Confirm::Traces(_) => self.start_clear_traces(ctx),
             },
             Some(false) => self.confirm = None,
             None => {}
@@ -1164,6 +1216,20 @@ impl OxidizeApp {
                     }
                 }
                 Action::Clean(_) => {}
+                Action::ClearTraces if self.confirm.is_none() => {
+                    let Some(found) = &self.cleanup.slate.found else {
+                        return;
+                    };
+                    if self.dry_run {
+                        let (count, _) = clean::traces::total(found);
+                        let line = format!("dry run: {count} usage traces would be cleared");
+                        self.log.push(line.clone());
+                        self.status = line;
+                    } else {
+                        self.confirm = Some(Confirm::Traces(slate::confirm_text(found)));
+                    }
+                }
+                Action::ClearTraces => {}
             }
         }
     }

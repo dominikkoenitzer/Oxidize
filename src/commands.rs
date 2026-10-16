@@ -9,6 +9,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::backup;
+use crate::clean::traces::{self, TraceFinding};
 use crate::clean::{self, Analysis, Category, Choice, Cleaned, Finding};
 use crate::cli::{
     BackupsArgs, CleanArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs,
@@ -2061,6 +2062,9 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
 // -----
 
 fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
+    if args.traces {
+        return cmd_clean_traces(g);
+    }
     let protected = clean::protect::load()?;
     if !g.json {
         term::info("Analysing...");
@@ -2123,6 +2127,97 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
         return Err(Failure::incomplete(message, true).into());
     }
     Ok(())
+}
+
+/// `oxidize clean --traces`: show the usage traces, or clear them with
+/// `--yes`.
+fn cmd_clean_traces(g: &Global) -> Result<()> {
+    let protected = clean::protect::load()?;
+    let places = traces::TracePlaces::this_pc();
+    let shell = traces::shell_for(&places);
+    let run = g.yes && !g.dry_run;
+    if !run {
+        let found = traces::analyse(&places, &protected, shell.as_ref());
+        let (count, bytes) = traces::total(&found);
+        if g.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(
+                    &json!({ "traces": found, "count": count, "bytes": bytes })
+                )?
+            );
+            return Ok(());
+        }
+        println!();
+        for f in &found {
+            print_trace(f);
+        }
+        println!();
+        let line = if g.dry_run {
+            format!("dry run: {count} items would be cleared")
+        } else if found.iter().any(TraceFinding::actionable) {
+            format!("{count} items. Clear them: add --yes")
+        } else {
+            "Nothing to clear.".to_string()
+        };
+        println!("{}", term::dim(&line));
+        println!(
+            "{}",
+            term::dim("The files they point to stay, and so do pinned items.")
+        );
+        return Ok(());
+    }
+    if !g.json {
+        term::info("Clearing...");
+    }
+    let done = traces::clear(&places, &protected, shell.as_ref());
+    let (count, bytes) = traces::total(&done);
+    if g.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(
+                &json!({ "cleared": done, "count": count, "bytes": bytes })
+            )?
+        );
+    } else {
+        println!();
+        for f in &done {
+            print_trace(f);
+        }
+        println!();
+        println!("{count} items cleared, {} freed", util::human_size(bytes));
+    }
+    let failed = done.iter().filter(|f| f.failed()).count();
+    if failed > 0 {
+        let message = format!("{failed} of {} lists did not clear fully", done.len());
+        return Err(Failure::incomplete(message, true).into());
+    }
+    Ok(())
+}
+
+/// One trace: its size, title and count, then what stays and why.
+fn print_trace(f: &TraceFinding) {
+    let size = if f.bytes == 0 {
+        "-".to_string()
+    } else {
+        util::human_size(f.bytes)
+    };
+    let detail = if f.actionable() {
+        f.detail()
+    } else {
+        "nothing found".to_string()
+    };
+    if detail.is_empty() {
+        println!("  {size:>9}  {}", f.trace.title());
+    } else {
+        println!("  {size:>9}  {}  {}", f.trace.title(), term::dim(&detail));
+    }
+    for note in &f.notes {
+        println!("{INDENT}{}", term::dim(note));
+    }
+    if let Some(stays) = clean::stays_text(&f.kept) {
+        println!("{INDENT}{}", term::dim(&stays));
+    }
 }
 
 /// The analysis as `--json` prints it without `--yes`.
