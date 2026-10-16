@@ -12,6 +12,7 @@ You cannot drive the window from a terminal. Tell the user what to click, one st
 - The table of installed programs: name, publisher, size, install date and source. Clicking a header sorts by it, clicking it again reverses the order. The arrow keys and Page Up/Down move the selection, also while the cursor is in Search.
 - Right: the selected program's name, version and publisher, the buttons Remove completely, Run uninstaller and Scan for leftovers, its size, install date, scope, registry location and install folder, and below them the result.
 - Bottom: a status line, and a Log button that opens the log of what was closed, removed, already gone or failed.
+- Beside the name in the top bar, Programs and Clean up switch between the program list and the cleanup.
 
 ## Remove a program completely
 
@@ -36,11 +37,21 @@ Remove completely always takes high-confidence items only and ignores the Silent
 
 With Dry run ticked, Run uninstaller only logs the command it would run, and the remove button reads Preview removal of N item(s), asks nothing and changes nothing.
 
+## Clean up
+
+1. The user clicks Clean up in the top bar, then Analyse. The analysis changes nothing and can take a minute. With Restart as administrator first, Windows' own temp folder and dumps, the component store and the Delivery Optimization cache count too.
+2. Each category shows its size, what it is, and what stays and why. The safe set is ticked: temporary files, crash dumps, browser caches, and folders of removed programs at high confidence. The folders of removed programs open into a list with a tick, a confidence tag and a reason for each.
+3. Go through the ticks with the user. The Recycle Bin, the component store, the Delivery Optimization cache and the previous Windows installation are never ticked by themselves. Before the user ticks the previous Windows installation, say that it cannot come back afterwards.
+4. The user clicks Clean N ticked categories and confirms with Yes. With Dry run ticked, the button only logs what would be cleaned.
+5. The result shows what was freed per category and what stayed. Folders of removed programs went into a backup, and Undo beside them puts them back. Nothing else comes back.
+
+The panel on the right is the list of protected folders: a folder or file typed into the field and added with Add is never cleaned, with everything inside it. Remove takes one off the list.
+
 ## What the window app does not do
 
 - It lists programs from the Windows uninstall list only. Store apps are not shown.
 - It cannot scan a program that is no longer installed, except the one it just removed while that one stays selected.
-- It has no orphans or trace view.
+- It has no trace view, and it shows the dangling references of `orphans` nowhere. The Clean up tab lists the folders no program claims.
 - It cannot list backups. It restores only through Undo, right after Remove completely.
 
 For any of these the user needs `oxidize.exe`, the command line, which is published with every release next to the window app. To undo an earlier removal, the user runs `oxidize restore "<name>"` with the name from the log, as described in [../SKILL.md](../SKILL.md).

@@ -1,6 +1,6 @@
 ---
 name: oxidize
-description: Uninstalls Windows programs with Oxidize and removes the registry keys, folders, services, scheduled tasks, firewall rules and PATH entries they leave behind, keeping a backup that can be restored. Use when the user wants to uninstall a Windows program completely, clean up after a program that is already gone, find which program an .exe or process belongs to, or restore something Oxidize removed.
+description: Uninstalls Windows programs with Oxidize and removes the registry keys, folders, services, scheduled tasks, firewall rules and PATH entries they leave behind, keeping a backup that can be restored. Use when the user wants to uninstall a Windows program completely, clean up after a program that is already gone, find which program an .exe or process belongs to, restore something Oxidize removed, or free disk space by cleaning temporary files, crash dumps, browser caches, the Recycle Bin and folders of removed programs.
 ---
 
 # Oxidize
@@ -24,7 +24,7 @@ Always pass a command. Without one, `oxidize.exe` prints its help. Double-clicke
 
 Follow these on every run.
 
-1. Look before you change anything. `list`, `scan`, `orphans`, `trace` and `backups` only read, as long as you leave out `--remove`, `--uninstall`, `--delete` and `--clear`. For anything that changes the PC, `restore` included, run the same command with `--dry-run` first.
+1. Look before you change anything. `list`, `scan`, `orphans`, `trace`, `backups` and `clean` only read, as long as you leave out `--remove`, `--uninstall`, `--delete`, `--clear` and, for `clean`, `--yes`. For anything that changes the PC, `restore` included, run the same command with `--dry-run` first.
 2. Show the user exactly what will change: the uninstaller from `command` and whether it runs (`uninstaller_step`), the processes that will be closed, and every item that will go, with its `path`, `kind` and `confidence`.
 3. Run a changing command only after the user has confirmed that list. Then run the same command without `--dry-run`, with `-y` and only the flags the user agreed to.
 4. Remove high-confidence items only, which is the default. Add `--medium` or `--all` only when the user has seen those items and asked for them.
@@ -109,6 +109,16 @@ Store apps: `oxidize list --store --json` lists them with `"kind": "store"`. An 
 2. Show the user the `dangling` items.
 3. Preview: `oxidize orphans --remove --dry-run --json`.
 4. After the user confirms: `oxidize orphans --remove -y --json`. Only the `dangling` items are removed. This command never removes folders.
+
+### Free disk space
+
+1. `oxidize clean --json` changes nothing. `analysis.findings` has one entry per category with `bytes` and `count` (what would go, counted from the files), `kept` (what stays, each with a `code`, a `reason`, a `count` and `bytes`), `notes`, `needs_admin` and `preselected`. `chosen` is the safe set: `temp`, `crash-dumps`, `browser-cache`, and `orphans` when a folder of a removed program matches at high confidence.
+2. Show the user each category with its size, what stays and why, and which ones are chosen. The Recycle Bin, `component-store`, `delivery-optimization` and `windows-old` are never chosen by themselves. For `windows-old`, say plainly that the previous Windows cannot be brought back afterwards.
+3. After the user confirms: `oxidize clean --yes --json` for the safe set, or with exactly the category flags the user agreed to, for example `oxidize clean --temp --recycle-bin --yes --json`. `--recycle-bin-days N` changes the Recycle Bin's age (30 by default). `--orphans` takes high-confidence folders; add `--medium` or `--all` only when the user has seen those folders.
+4. Report `cleaned`: per category `freed`, `removed` and `kept`. Folders of removed programs go into a backup; give the user `backup` and `oxidize restore "<backup>"`. Everything else that was cleaned does not come back.
+5. The component store and the Delivery Optimization cache need administrator rights, and so do Windows' own temp folder and dumps. Use `--elevate` with `--yes --json` as described above. A DISM cleanup can take several minutes.
+
+Folders and files listed in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line, are never cleaned. Add a folder there when the user wants one kept.
 
 ### Undo a removal
 
