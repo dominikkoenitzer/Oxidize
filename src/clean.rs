@@ -189,6 +189,29 @@ impl Serialize for Kept {
     }
 }
 
+/// What stays and why, as one line: "stays: 812 changed in the last 7 days
+/// (1.2 GB), 14 in use by a running program (2.1 MB)".
+pub fn stays_text(kept: &[Kept]) -> Option<String> {
+    if kept.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = kept
+        .iter()
+        .map(|k| {
+            let mut s = if k.count > 0 {
+                format!("{} {}", k.count, k.reason.text())
+            } else {
+                k.reason.text()
+            };
+            if k.bytes > 0 {
+                s.push_str(&format!(" ({})", util::human_size(k.bytes)));
+            }
+            s
+        })
+        .collect();
+    Some(format!("stays: {}", parts.join(", ")))
+}
+
 /// A folder no installed program claims.
 #[derive(Debug, Clone, Serialize)]
 pub struct OrphanItem {
