@@ -286,7 +286,14 @@ pub fn remove_completely(
     opts: &Options,
 ) -> Outcome {
     let start = std::time::Instant::now();
-    let footprint = pc.scan(target, true);
+    // A dry run changes nothing between its two looks, so one scan of the
+    // program as gone serves both: the footprint is the same without the
+    // program's own uninstall entry.
+    let full = opts.dry_run.then(|| pc.scan(target, false));
+    let footprint = match &full {
+        Some(report) => scanner::as_footprint(report, target),
+        None => pc.scan(target, true),
+    };
     let registered = opts.dry_run || pc.still_installed(program);
     let vendor = if !registered {
         VendorStep::Skip {
@@ -323,7 +330,7 @@ pub fn remove_completely(
     if opts.dry_run {
         // Everything the removal would take: the footprint as leftovers.
         out.would_close = picked;
-        out.report = pc.scan(target, false);
+        out.report = full.unwrap_or_default();
         out.selected = at_level(&out.report, opts.level);
         out.removal = pc.remove(&out.selected, &program.display_name).ok();
         out.seconds = start.elapsed().as_secs_f64();
@@ -718,10 +725,23 @@ mod tests {
         assert_eq!(out.selected.len(), 3);
         // The fake's remove is the dry-run path of the real one; nothing
         // was closed and no uninstaller ran.
-        assert_eq!(pc.calls(), ["scan true", "scan false", "remove 3"]);
+        assert_eq!(pc.calls(), ["scan false", "remove 3"]);
         let pids: Vec<u32> = out.would_close.iter().map(|p| p.pid).collect();
         assert_eq!(pids, [100]);
         assert!(!out.complete());
+    }
+
+    #[test]
+    fn a_footprint_is_the_scan_without_the_own_uninstall_entry() {
+        let report = ScanReport {
+            program_name: "Example Player".into(),
+            installed: false,
+            items: per_user_footprint(),
+        };
+        let f = scanner::as_footprint(&report, &target());
+        assert!(f.installed);
+        assert_eq!(f.items.len(), 2);
+        assert!(f.items.iter().all(|l| !l.path.ends_with("example-player")));
     }
 
     fn program(hive: Hive) -> Program {
