@@ -18,6 +18,7 @@ use crate::system;
 use crate::util::{self, normalize, significant_tokens};
 
 mod links;
+mod records;
 
 /// Top-level folder names that are never reported (OS and shared).
 const FS_DENY: &[&str] = &[
@@ -2134,11 +2135,16 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         .map(|l| PathBuf::from(&l.path))
         .chain(owned_folders(target).into_iter().map(Path::to_path_buf))
         .collect();
+    let others = other_program_install_dirs(target.registry.as_ref(), snap.programs());
     if !removed.is_empty() {
-        let others = other_program_install_dirs(target.registry.as_ref(), snap.programs());
         handlers.append(&mut shortcuts);
         items.extend(links::into_removed(handlers, &removed, &others));
     }
+    // Windows' own records of a file in those folders, of a missing file that
+    // names the product, or of the vendor's files when nothing else of theirs
+    // is installed.
+    let alone = vendor_alone(target, snap.programs());
+    items.extend(records::scan_windows_records(target, &removed, &others, alone));
     dedupe_by_path(&mut items);
     // A link type that goes takes its permission to open without asking with
     // it, and one that is already gone leaves only that permission behind.
