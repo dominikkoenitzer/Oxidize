@@ -57,7 +57,9 @@ pub enum Commands {
     /// Put back everything a backup holds.
     Restore(RestoreArgs),
     /// Clean temporary files, crash dumps, caches and folders of removed
-    /// programs. Shows what it would clean; --yes cleans it.
+    /// programs.
+    ///
+    /// Shows what it would clean and changes nothing; --yes cleans it.
     Clean(CleanArgs),
     /// Serve Oxidize to an AI assistant over MCP on stdin and stdout.
     Mcp,
