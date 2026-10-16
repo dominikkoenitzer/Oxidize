@@ -147,22 +147,24 @@ pub(super) fn scan_windows_records(
         }
     }
 
-    // Start keeps one key per part of the path under `W~<drive>`, so the
+    // Start keeps one key per part of the path under `W~<root>`, so the
     // records of everything in a folder sit in that folder's subtree:
     // `W~C:\Apps\Quillmark\app.exe` lies inside `W~C:\Apps\Quillmark`.
+    let folders = known_folder_dirs();
     for dir in outermost(removed) {
         if other_installs.iter().any(|o| system::path_under(o, dir)) {
             continue;
         }
-        let path = dir.to_string_lossy();
-        let key = format!(r"{START_TILES}\W~{}", path.trim_end_matches('\\'));
-        if registry::key_exists(hive, &key) {
-            out.push(Leftover::reg_key(
-                hive,
-                key,
-                Confidence::High,
-                "Start menu records of the program",
-            ));
+        for root in tile_roots(dir, &folders) {
+            let key = format!(r"{START_TILES}\{root}");
+            if registry::key_exists(hive, &key) {
+                out.push(Leftover::reg_key(
+                    hive,
+                    key,
+                    Confidence::High,
+                    "Start menu records of the program",
+                ));
+            }
         }
     }
 
@@ -326,17 +328,52 @@ fn resolve(path: &str) -> Option<PathBuf> {
     p.is_absolute().then(|| p.to_path_buf())
 }
 
-/// The known folders that records use in place of a drive path.
+/// The known folders that records use in place of a drive path, each with
+/// the variable that holds its location.
+const KNOWN_FOLDERS: [(&str, &str); 5] = [
+    ("6D809377-6AF0-444B-8957-A3773F02200E", "ProgramW6432"),
+    ("7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E", "ProgramFiles(x86)"),
+    ("F1B32785-6FBA-4FCF-9D55-7B8E7F157091", "LOCALAPPDATA"),
+    ("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D", "APPDATA"),
+    ("62AB5D82-FDC1-4DC3-A9DD-070D1D495D97", "ProgramData"),
+];
+
 fn known_folder(id: &str) -> Option<PathBuf> {
-    let var = match id.to_ascii_uppercase().as_str() {
-        "6D809377-6AF0-444B-8957-A3773F02200E" => "ProgramW6432",
-        "7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E" => "ProgramFiles(x86)",
-        "F1B32785-6FBA-4FCF-9D55-7B8E7F157091" => "LOCALAPPDATA",
-        "3EB685DB-65F9-4CF6-A03A-E3EF65729F3D" => "APPDATA",
-        "62AB5D82-FDC1-4DC3-A9DD-070D1D495D97" => "ProgramData",
-        _ => return None,
-    };
+    let (_, var) = KNOWN_FOLDERS
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(id))?;
     super::env_dir(var)
+}
+
+/// Each known folder's id with where it is on this machine.
+fn known_folder_dirs() -> Vec<(&'static str, PathBuf)> {
+    KNOWN_FOLDERS
+        .iter()
+        .filter_map(|(id, var)| Some((*id, super::env_dir(var)?)))
+        .collect()
+}
+
+/// The keys Start may file a folder's records under: `W~` and the drive
+/// path, and for a folder inside a known folder also `W~{id}` and the rest
+/// of the path, the way machine-wide programs are recorded
+/// (`W~{6D809377-...}\Quillmark\quillmark.exe`).
+fn tile_roots(dir: &Path, folders: &[(&str, PathBuf)]) -> Vec<String> {
+    let path = dir.to_string_lossy();
+    let path = path.trim_end_matches('\\');
+    let mut out = vec![format!("W~{path}")];
+    for (id, base) in folders {
+        let base = base.to_string_lossy();
+        let base = base.trim_end_matches('\\');
+        let rest = path
+            .get(..base.len())
+            .filter(|head| !base.is_empty() && head.eq_ignore_ascii_case(base))
+            .and_then(|_| path[base.len()..].strip_prefix('\\'))
+            .filter(|rest| !rest.is_empty());
+        if let Some(rest) = rest {
+            out.push(format!(r"W~{{{id}}}\{rest}"));
+        }
+    }
+    out
 }
 
 /// `\Device\HarddiskVolume3\Users\x` as `C:\Users\x`.
@@ -469,6 +506,78 @@ mod tests {
                 resolve(r"{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}\Quillmark\app.exe"),
                 Some(local.join(r"Quillmark\app.exe"))
             );
+        }
+    }
+
+    const PROGRAMS: &str = "6D809377-6AF0-444B-8957-A3773F02200E";
+    const PROGRAMS_X86: &str = "7C5A40EF-A0FB-4BFC-874A-C0F2E0B9FA8E";
+    const LOCAL: &str = "F1B32785-6FBA-4FCF-9D55-7B8E7F157091";
+
+    fn folders() -> Vec<(&'static str, PathBuf)> {
+        vec![
+            (PROGRAMS, PathBuf::from(r"C:\Program Files")),
+            (PROGRAMS_X86, PathBuf::from(r"C:\Program Files (x86)\")),
+            (LOCAL, PathBuf::from(r"C:\Users\jdoe\AppData\Local")),
+        ]
+    }
+
+    #[test]
+    fn a_folder_in_program_files_has_its_tiles_under_the_known_folder_too() {
+        assert_eq!(
+            tile_roots(Path::new(r"C:\Program Files\Quillmark"), &folders()),
+            vec![
+                r"W~C:\Program Files\Quillmark".to_string(),
+                format!(r"W~{{{PROGRAMS}}}\Quillmark"),
+            ]
+        );
+        assert_eq!(
+            tile_roots(
+                Path::new(r"c:\program files (x86)\Quill Labs\Quillmark\"),
+                &folders()
+            ),
+            vec![
+                r"W~c:\program files (x86)\Quill Labs\Quillmark".to_string(),
+                format!(r"W~{{{PROGRAMS_X86}}}\Quill Labs\Quillmark"),
+            ]
+        );
+        assert_eq!(
+            tile_roots(
+                Path::new(r"C:\Users\jdoe\AppData\Local\Quillmark"),
+                &folders()
+            ),
+            vec![
+                r"W~C:\Users\jdoe\AppData\Local\Quillmark".to_string(),
+                format!(r"W~{{{LOCAL}}}\Quillmark"),
+            ]
+        );
+    }
+
+    #[test]
+    fn only_folders_inside_a_known_folder_get_its_id() {
+        // The known folder itself, a name that only starts like it and a
+        // folder elsewhere keep the drive path alone.
+        for dir in [
+            r"C:\Program Files",
+            r"C:\Program Files\",
+            r"C:\Program Files Extra\Quillmark",
+            r"D:\Apps\Quillmark",
+        ] {
+            assert_eq!(
+                tile_roots(Path::new(dir), &folders()),
+                vec![format!("W~{}", dir.trim_end_matches('\\'))],
+                "{dir}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_known_folder_tile_resolves_back_to_its_folder() {
+        for (id, base) in known_folder_dirs() {
+            let dir = base.join("Quillmark");
+            let wanted = format!(r"W~{{{id}}}\Quillmark");
+            let roots = tile_roots(&dir, &known_folder_dirs());
+            assert!(roots.contains(&wanted), "{roots:?}");
+            assert_eq!(resolve(&wanted["W~".len()..]), Some(dir));
         }
     }
 
