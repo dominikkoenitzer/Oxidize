@@ -2233,12 +2233,22 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         handlers.append(&mut shortcuts);
         items.extend(links::into_removed(handlers, &removed, &others));
     }
-    // Windows' own records of a file in those folders, of a missing file that
-    // names the product, or of the vendor's files when nothing else of theirs
-    // is installed.
+    // Windows' own records of a file in those folders or of a single file
+    // that goes, such as a shortcut, of a missing file that names the
+    // product, or of the vendor's files when nothing else of theirs is
+    // installed.
+    let removed_files: Vec<PathBuf> = items
+        .iter()
+        .filter(|l| l.kind == LeftoverKind::File && l.confidence == Confidence::High)
+        .map(|l| PathBuf::from(&l.path))
+        .collect();
     let alone = vendor_alone(target, snap.programs());
     items.extend(records::scan_windows_records(
-        target, &removed, &others, alone,
+        target,
+        &removed,
+        &removed_files,
+        &others,
+        alone,
     ));
     dedupe_by_path(&mut items);
     drop_files_inside_removed_folders(&mut items);

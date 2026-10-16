@@ -33,10 +33,12 @@ const NAME_CACHE: &str =
 const NAME_FIELD: &str = ".FriendlyAppName";
 const COMPANY_FIELD: &str = ".ApplicationCompany";
 
-/// Which files go: those inside a removed folder but not inside another
-/// program's install folder, and missing ones whose path names the product.
+/// Which files go: those inside a removed folder or removed themselves, but
+/// not inside another program's install folder, and missing ones whose path
+/// names the product.
 struct Gone<'a> {
     dirs: &'a [PathBuf],
+    files: &'a [PathBuf],
     others: &'a [PathBuf],
     target: &'a ScanTarget,
 }
@@ -50,21 +52,26 @@ impl Gone<'_> {
         if inside(self.others) {
             return false;
         }
-        inside(self.dirs) || (exe_missing(&p) && path_names_product(&p, self.target))
+        inside(self.dirs)
+            || inside(self.files)
+            || (exe_missing(&p) && path_names_product(&p, self.target))
     }
 }
 
 /// Every record of the current user that names a file `gone` covers.
+/// `removed` are the folders that go, `removed_files` the single files.
 /// `vendor_alone`: nothing else of the publisher's is installed, so files
 /// Windows remembers as theirs are this program's.
 pub(super) fn scan_windows_records(
     target: &ScanTarget,
     removed: &[PathBuf],
+    removed_files: &[PathBuf],
     other_installs: &[PathBuf],
     vendor_alone: bool,
 ) -> Vec<Leftover> {
     let gone = Gone {
         dirs: removed,
+        files: removed_files,
         others: other_installs,
         target,
     };
