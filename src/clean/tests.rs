@@ -625,3 +625,20 @@ fn the_json_of_an_analysis_names_categories_and_reasons() {
         assert_eq!(f["category"], ids[i]);
     }
 }
+
+#[test]
+fn what_could_not_be_read_is_counted_in_items() {
+    let kept = |count| Kept {
+        reason: KeptReason::Unreadable,
+        count,
+        bytes: 0,
+    };
+    assert_eq!(
+        stays_text(&[kept(1)]).as_deref(),
+        Some("stays: 1 item could not be read")
+    );
+    assert_eq!(
+        stays_text(&[kept(33)]).as_deref(),
+        Some("stays: 33 items could not be read")
+    );
+}
