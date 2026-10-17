@@ -167,7 +167,7 @@ impl KeptReason {
             KeptReason::InUse => "in use by a running program".to_string(),
             KeptReason::Protected => "protected".to_string(),
             KeptReason::AccessDenied => "access denied".to_string(),
-            KeptReason::Unreadable => "folder could not be read".to_string(),
+            KeptReason::Unreadable => "could not be read".to_string(),
             KeptReason::NeedsAdmin => "needs administrator rights".to_string(),
             KeptReason::Running(name) => format!("{name} is running"),
             KeptReason::Pinned => "with pinned items".to_string(),
@@ -204,7 +204,11 @@ pub fn stays_text(kept: &[Kept]) -> Option<String> {
     let parts: Vec<String> = kept
         .iter()
         .map(|k| {
-            let mut s = if k.count > 0 {
+            let mut s = if k.reason == KeptReason::Unreadable && k.count > 0 {
+                // Folders and files both: say how many, not which kind.
+                let noun = if k.count == 1 { "item" } else { "items" };
+                format!("{} {noun} {}", k.count, k.reason.text())
+            } else if k.count > 0 {
                 format!("{} {}", k.count, k.reason.text())
             } else {
                 k.reason.text()
