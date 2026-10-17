@@ -832,24 +832,49 @@ impl OxidizeApp {
             Confirm::Clean(_, text) => text.clone(),
             Confirm::Traces(text) => text.clone(),
         };
+        // The button says what happens, and is red when it cannot be undone.
+        let (verb, for_good) = match self.confirm.as_ref().unwrap() {
+            Confirm::Uninstall(..) => ("Run uninstaller".to_string(), false),
+            Confirm::Remove(items, _, ctx) => (
+                format!("Remove {}", count(items.len(), "item", "items")),
+                !ctx.make_backups,
+            ),
+            Confirm::Complete(_, ctx) => ("Remove completely".to_string(), !ctx.make_backups),
+            Confirm::Clean(choice, _) => (
+                match &self.cleanup.analysis {
+                    Some((_, a)) => format!("Clean {}", util::human_size(a.chosen_bytes(choice))),
+                    None => "Clean".to_string(),
+                },
+                choice.categories.iter().any(|c| !c.backed_up()),
+            ),
+            Confirm::Traces(_) => ("Clear".to_string(), true),
+        };
 
         let mut decision: Option<bool> = None;
-        let modal = egui::Modal::new(egui::Id::new("confirm")).show(ctx, |ui| {
-            let t = Tint::for_ui(ui);
-            ui.set_width(380.0);
-            ui.label(RichText::new("Confirm").strong().size(16.0).color(t.text));
-            ui.add_space(6.0);
-            ui.label(message);
-            ui.add_space(14.0);
-            ui.horizontal(|ui| {
-                if ui.add(primary_button(&t, "Yes")).clicked() {
-                    decision = Some(true);
-                }
-                if ui.button("Cancel").clicked() {
-                    decision = Some(false);
-                }
+        let frame =
+            egui::Frame::popup(&ctx.style_of(ctx.theme())).inner_margin(egui::Margin::same(20));
+        let modal = egui::Modal::new(egui::Id::new("confirm"))
+            .frame(frame)
+            .show(ctx, |ui| {
+                let t = Tint::for_ui(ui);
+                ui.set_width(420.0);
+                ui.add(egui::Label::new(RichText::new(message).size(15.0).color(t.text)).wrap());
+                ui.add_space(18.0);
+                ui.horizontal(|ui| {
+                    let size = egui::vec2(0.0, 32.0);
+                    let button = if for_good {
+                        danger_button(&t, &verb)
+                    } else {
+                        primary_button(&t, &verb)
+                    };
+                    if ui.add(button.min_size(size)).clicked() {
+                        decision = Some(true);
+                    }
+                    if ui.add(egui::Button::new("Cancel").min_size(size)).clicked() {
+                        decision = Some(false);
+                    }
+                });
             });
-        });
         // Escape and a click beside the question are a cancel.
         if decision.is_none() && modal.should_close() {
             decision = Some(false);
