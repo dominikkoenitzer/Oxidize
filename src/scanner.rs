@@ -1381,6 +1381,15 @@ fn is_protected_path_in(p: &Path, roots: &[PathBuf]) -> bool {
             return true;
         }
     }
+    // Oxidize's own folder holds the backups every undo depends on and the
+    // protected list; no product's name, however close, may reach into it.
+    if let Some(own) = env_dir("LOCALAPPDATA").map(|p| p.join("Oxidize")) {
+        let o = own.to_string_lossy().to_lowercase();
+        let o = o.trim_end_matches('\\');
+        if s == o || s.starts_with(&format!("{o}\\")) {
+            return true;
+        }
+    }
     for root in roots {
         if s == root.to_string_lossy().to_lowercase().trim_end_matches('\\') {
             return true;
@@ -3030,7 +3039,19 @@ mod tests {
     fn protected_paths_are_never_deletable() {
         assert!(is_protected_path(Path::new("C:\\")));
         if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            assert!(is_protected_path(&Path::new(&local).join("Packages")));
+            let local = Path::new(&local);
+            assert!(is_protected_path(&local.join("Packages")));
+            // Oxidize's own folder and everything in it, the backups first.
+            assert!(is_protected_path(&local.join("Oxidize")));
+            assert!(is_protected_path(&local.join("OXIDIZE")));
+            assert!(is_protected_path(
+                &local
+                    .join("Oxidize")
+                    .join("backups")
+                    .join("2026-10-17 Example")
+            ));
+            // A folder that only starts with the name is not it.
+            assert!(!is_protected_path(&local.join("Oxidize Tools")));
         }
         assert!(is_protected_path(Path::new("D:\\")));
         if let Some(windir) = env_dir("windir") {
