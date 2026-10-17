@@ -51,8 +51,39 @@ fn items(n: usize) -> String {
     }
 }
 
-/// The section: the traces, then the button, or what the last clearing did.
-pub fn section(
+/// The two lines at the top of the tab for this view.
+pub fn headline(slate: &Slate) -> (String, String) {
+    if let Some(results) = &slate.results {
+        let (count, bytes) = traces::total(results);
+        return (
+            format!("{} cleared", items(count)),
+            format!(
+                "{} freed. The files themselves stay.",
+                util::human_size(bytes)
+            ),
+        );
+    }
+    match &slate.found {
+        Some(found) if found.iter().any(TraceFinding::actionable) => {
+            let (count, _) = traces::total(found);
+            (
+                items(count),
+                "in the lists Windows keeps of what you opened. The files themselves stay.".into(),
+            )
+        }
+        Some(_) => (
+            "Nothing to clear".into(),
+            "Windows keeps no recent lists right now.".into(),
+        ),
+        None => (
+            "Analysing...".into(),
+            "Reading the lists Windows keeps.".into(),
+        ),
+    }
+}
+
+/// The action of this view: clear every trace.
+pub fn button(
     ui: &mut egui::Ui,
     t: &Tint,
     slate: &Slate,
@@ -60,41 +91,29 @@ pub fn section(
     dry_run: bool,
     action: &mut Option<Action>,
 ) {
-    ui.add_space(14.0);
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(RichText::new("Clean slate").size(16.0).color(t.text));
-            ui.label(
-                RichText::new(
-                    "Recent files, jump lists and histories Windows keeps. The files themselves stay.",
-                )
-                .small()
-                .color(t.weak),
-            );
-        });
-        let Some(found) = slate.found.as_ref().filter(|_| slate.results.is_none()) else {
-            return;
-        };
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (count, _) = traces::total(found);
-            let any = found.iter().any(TraceFinding::actionable);
-            let label = if dry_run {
-                format!("Preview clearing {}", items(count))
-            } else {
-                format!("Clear all traces, {}", items(count))
-            };
-            if ui
-                .add_enabled(
-                    !busy && any,
-                    primary_button(t, &label).min_size(egui::vec2(240.0, 34.0)),
-                )
-                .clicked()
-            {
-                *action = Some(Action::ClearTraces);
-            }
-        });
-    });
+    let Some(found) = slate.found.as_ref().filter(|_| slate.results.is_none()) else {
+        return;
+    };
+    let (count, _) = traces::total(found);
+    let any = found.iter().any(TraceFinding::actionable);
+    let label = if dry_run {
+        format!("Preview clearing {}", items(count))
+    } else {
+        format!("Clear {}", items(count))
+    };
+    if ui
+        .add_enabled(
+            !busy && any,
+            primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
+        )
+        .clicked()
+    {
+        *action = Some(Action::ClearTraces);
+    }
+}
+
+/// The view: each trace with what it holds, or what the last clearing did.
+pub fn body(ui: &mut egui::Ui, t: &Tint, slate: &Slate) {
     ui.add_space(6.0);
     if let Some(results) = &slate.results {
         show_results(ui, t, results);
@@ -102,17 +121,15 @@ pub fn section(
         for f in found {
             row(ui, t, f);
         }
-        ui.add_space(6.0);
+        ui.add_space(10.0);
         ui.label(
             RichText::new(
                 "A File Explorer window that is open may show old entries until it is closed.",
             )
-            .small()
             .color(t.weak),
         );
     }
-    ui.add_space(8.0);
-    ui.separator();
+    ui.add_space(16.0);
 }
 
 /// Where what a trace is starts, past its title.
@@ -134,9 +151,7 @@ fn row(ui: &mut egui::Ui, t: &Tint, f: &TraceFinding) {
         });
         ui.allocate_ui_with_layout(egui::vec2(about, 24.0), line, |ui| {
             ui.set_min_width(about);
-            ui.add(
-                egui::Label::new(RichText::new(f.trace.about()).small().color(t.weak)).truncate(),
-            );
+            ui.add(egui::Label::new(RichText::new(f.trace.about()).color(t.weak)).truncate());
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let (cell, _) = ui.allocate_exact_size(egui::vec2(AMOUNT, 20.0), egui::Sense::hover());
