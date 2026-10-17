@@ -1,11 +1,17 @@
 //! Administrator detection, self-elevation, and the one function every
-//! destructive action goes through.
+//! leftover is deleted through.
 //!
-//! Leftovers are only ever deleted through [`remove_leftovers`]; the one other
-//! destructive call is the guarded Store-app removal in `packages.rs`. A dry
-//! run changes nothing, registry keys are exported before deletion, files are
-//! quarantined rather than destroyed, and everything removed is written to a
-//! manifest that `oxidize restore` can replay.
+//! Leftovers are only ever deleted through [`remove_leftovers`], the folders
+//! of removed programs that `oxidize clean` finds included. A dry run changes
+//! nothing, registry keys are exported before deletion, files are quarantined
+//! rather than destroyed, and everything removed is written to a manifest that
+//! `oxidize restore` can replay.
+//!
+//! Two other paths delete. The guarded Store-app removal in `packages.rs` is
+//! carried out by Windows. The rest of `clean` deletes temporary files, crash
+//! dumps, browser caches and Recycle Bin items directly, each checked again
+//! right before it goes, and `clean --traces` clears Windows' lists of recent
+//! use; none of these can be put back.
 
 use std::path::{Path, PathBuf};
 

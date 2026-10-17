@@ -408,10 +408,14 @@ cargo fmt --check
 
 The engine is a library (`src/lib.rs`); `src/main.rs` and
 `src/bin/oxidize-gui.rs` are the two front-ends. Leftovers are only ever
-deleted through `safety::remove_leftovers`; the one other destructive call is
-the Store-app removal in `packages.rs`, which Windows carries out and which
-runs only after the guard allows it. The MCP server in `src/mcp.rs` reads
-through one trait and removes through another, `Remove`, implemented in
+deleted through `safety::remove_leftovers`, the folders of removed programs
+that `oxidize clean` finds included. Two other paths delete: the Store-app
+removal in `packages.rs`, which Windows carries out and which runs only after
+the guard allows it, and the rest of `src/clean`, which deletes temporary
+files, crash dumps, browser caches and Recycle Bin items directly, each
+checked again right before it goes, and clears Windows' lists of recent use
+for `--traces`. None of those can be put back. The MCP server in `src/mcp.rs`
+reads through one trait and removes through another, `Remove`, implemented in
 `src/mcp/machine.rs`, which only `apply_removal_plan` holds.
 
 ## Contributing
