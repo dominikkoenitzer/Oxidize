@@ -1128,42 +1128,37 @@ impl OxidizeApp {
 
     /// The Clean up tab, with the protected folders beside it.
     fn cleanup_tab(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
-        // The protected folders when asked for, or when reading them failed.
-        if self.cleanup.show_protected || self.cleanup.protect_error.is_some() {
-            let widest = (ui.available_width() * 0.4).clamp(300.0, 480.0);
-            egui::Panel::right("protected")
-                .resizable(true)
-                .default_size(360.0)
-                .size_range(280.0..=widest)
-                .frame(
-                    egui::Frame::new()
-                        .fill(t.side)
-                        .inner_margin(egui::Margin::same(20)),
-                )
-                .show(ui, |ui| cleanup::protected_panel(ui, t, &mut self.cleanup));
-        }
         let (busy, dry_run) = (self.busy, self.dry_run);
-        // The same margins as the program view, so the two line up.
-        egui::Panel::top("cleanup_overview")
-            .show_separator_line(true)
-            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
-                left: 20,
-                right: 20,
-                top: 18,
-                bottom: 0,
-            }))
-            .show(ui, |ui| {
-                cleanup::strip(ui, t, &mut self.cleanup, busy, dry_run, action)
-            });
+        // The same layout as the program view: the list, and beside it (or
+        // under it on a portrait screen) the panel for what is in focus.
+        let frame = egui::Frame::new()
+            .fill(t.side)
+            .inner_margin(egui::Margin::same(20));
+        if is_tall(ui.available_size()) {
+            let tallest = (ui.available_height() * 0.6).max(260.0);
+            egui::Panel::bottom("cleanup_side_below")
+                .resizable(true)
+                .default_size((ui.available_height() * 0.38).max(240.0))
+                .size_range(200.0..=tallest)
+                .frame(frame)
+                .show(ui, |ui| cleanup::side(ui, t, &mut self.cleanup));
+        } else {
+            egui::Panel::right("cleanup_side")
+                .resizable(false)
+                .exact_size(details_width(ui.available_width()))
+                .frame(frame)
+                .show(ui, |ui| cleanup::side(ui, t, &mut self.cleanup));
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
                 left: 20,
                 right: 20,
-                top: 4,
+                top: 16,
                 bottom: 0,
             }))
             .show(ui, |ui| {
-                cleanup::view(ui, t, &mut self.cleanup, busy, action)
+                cleanup::strip(ui, t, &mut self.cleanup, busy, dry_run, action);
+                cleanup::view(ui, t, &mut self.cleanup, busy, action);
             });
     }
 
