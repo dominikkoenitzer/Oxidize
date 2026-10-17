@@ -112,7 +112,7 @@ pub struct UninstallArgs {
     /// Program or Store app name, a unique part of it, or its id (registry
     /// id or package family name). Several run one after another, and only
     /// once every name matches exactly one program or app.
-    #[arg(value_name = "PROGRAM", required = true, num_args = 1..)]
+    #[arg(value_name = "PROGRAM", required = true, num_args = 1.., value_parser = named)]
     pub targets: Vec<String>,
 
     /// Use the program's unattended uninstall switches where it has them.
@@ -136,11 +136,11 @@ pub struct UninstallArgs {
 pub struct ScanArgs {
     /// Program name, a unique part of it, or its registry id. A program that
     /// is no longer installed is scanned by name.
-    #[arg(value_name = "PROGRAM")]
+    #[arg(value_name = "PROGRAM", value_parser = named)]
     pub target: String,
 
     /// Publisher, to tell vendor folders apart when scanning by name.
-    #[arg(long)]
+    #[arg(long, value_parser = named)]
     pub publisher: Option<String>,
 
     /// Remove what was found, after confirmation.
@@ -162,7 +162,7 @@ pub struct OrphansArgs {
 #[derive(Args, Debug)]
 pub struct TraceArgs {
     /// Path to an .exe or folder, or the name of a running process.
-    #[arg(value_name = "EXE_OR_PROCESS")]
+    #[arg(value_name = "EXE_OR_PROCESS", value_parser = named)]
     pub query: String,
 
     /// Uninstall the program found, then remove its leftovers.
@@ -195,7 +195,18 @@ pub struct BackupsArgs {
 #[derive(Args, Debug)]
 pub struct RestoreArgs {
     /// Backup name as shown by `oxidize backups`.
+    #[arg(value_parser = named)]
     pub name: String,
+}
+
+/// A name to look something up by. An empty one is refused: as a part of a
+/// name it would match every program.
+fn named(s: &str) -> Result<String, String> {
+    if s.trim().is_empty() {
+        Err("give a name; an empty one would match everything".to_string())
+    } else {
+        Ok(s.to_string())
+    }
 }
 
 /// Without a category flag the safe set is chosen: temporary files, crash
@@ -428,6 +439,23 @@ fn console_process_count() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_name_is_refused() {
+        use clap::Parser;
+        for args in [
+            &["oxidize", "scan", ""][..],
+            &["oxidize", "scan", "  "],
+            &["oxidize", "uninstall", "Example", ""],
+            &["oxidize", "trace", ""],
+            &["oxidize", "restore", ""],
+            &["oxidize", "scan", "Example", "--publisher", ""],
+        ] {
+            let err = Cli::try_parse_from(args).unwrap_err();
+            assert!(err.to_string().contains("empty one"), "{args:?}: {err}");
+        }
+        assert!(Cli::try_parse_from(["oxidize", "scan", "Example"]).is_ok());
+    }
 
     #[test]
     fn own_console_opens_the_window_app_when_it_is_there() {

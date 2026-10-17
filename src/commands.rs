@@ -2721,6 +2721,12 @@ pub(crate) fn resolve_any<'a>(
     packages: &'a [Package],
     target: &str,
 ) -> std::result::Result<Resolved<'a>, Resolve> {
+    // Every name contains the empty one, so it would answer to everything.
+    if target.trim().is_empty() {
+        return Err(Resolve::Ambiguous(
+            "give a name; an empty one would match everything".to_string(),
+        ));
+    }
     let program_id = programs
         .iter()
         .find(|p| p.id().eq_ignore_ascii_case(target));
@@ -3170,6 +3176,13 @@ mod tests {
     fn a_name_both_kinds_answer_to_lists_both_with_their_ids() {
         let programs = installed();
         let apps = store_apps();
+        // A blank name never answers to anything, not even by name alone.
+        for blank in ["", "  "] {
+            let Err(Resolve::Ambiguous(msg)) = resolve_any(&programs, &apps, blank) else {
+                panic!("{blank:?} must be refused");
+            };
+            assert!(msg.contains("empty one"), "{msg}");
+        }
         let Err(Resolve::Ambiguous(msg)) = resolve_any(&programs, &apps, "brave") else {
             panic!("brave is both a program and a Store app");
         };
