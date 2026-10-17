@@ -232,6 +232,9 @@ fn find_orphans(m: &dyn Inspect) -> Result<Value> {
 }
 
 fn trace(m: &dyn Inspect, p: TraceParams) -> Result<Value> {
+    if p.query.trim().is_empty() {
+        anyhow::bail!("give a path or a process name; an empty one would match everything");
+    }
     let programs = m.programs(true);
     let matches = m.trace(&p.query, &programs);
     Ok(json!({ "matches": commands::trace_json(&matches) }))
