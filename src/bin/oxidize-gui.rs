@@ -1100,13 +1100,12 @@ impl OxidizeApp {
                 .frame(frame)
                 .show(ui, |ui| self.details(ui, &t, action));
         } else {
-            // At most two fifths of the window, so a small window keeps a
-            // usable table.
-            let widest = (ui.available_width() * 0.4).clamp(300.0, 560.0);
+            // The table takes what it reads best at and the details the
+            // rest, so a wide window has no empty stretch beside the table.
+            let width = details_width(ui.available_width());
             egui::Panel::right("details")
-                .resizable(true)
-                .default_size(380.0)
-                .size_range(300.0..=widest)
+                .resizable(false)
+                .exact_size(width)
                 .frame(frame)
                 .show(ui, |ui| self.details(ui, &t, action));
         }
@@ -1129,37 +1128,42 @@ impl OxidizeApp {
 
     /// The Clean up tab, with the protected folders beside it.
     fn cleanup_tab(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
-        let widest = (ui.available_width() * 0.4).clamp(300.0, 480.0);
-        egui::Panel::right("protected")
-            .resizable(true)
-            .default_size(340.0)
-            .size_range(260.0..=widest)
-            .frame(
-                egui::Frame::new()
-                    .fill(t.side)
-                    .inner_margin(egui::Margin::same(16)),
-            )
-            .show(ui, |ui| cleanup::protected_panel(ui, t, &mut self.cleanup));
+        // The protected folders when asked for, or when reading them failed.
+        if self.cleanup.show_protected || self.cleanup.protect_error.is_some() {
+            let widest = (ui.available_width() * 0.4).clamp(300.0, 480.0);
+            egui::Panel::right("protected")
+                .resizable(true)
+                .default_size(360.0)
+                .size_range(280.0..=widest)
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.side)
+                        .inner_margin(egui::Margin::same(20)),
+                )
+                .show(ui, |ui| cleanup::protected_panel(ui, t, &mut self.cleanup));
+        }
         let (busy, dry_run) = (self.busy, self.dry_run);
-        // The same frame as the program overview, so the two views line up.
+        // The same margins as the program view, so the two line up.
         egui::Panel::top("cleanup_overview")
-            .show_separator_line(false)
+            .show_separator_line(true)
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
-                left: 16,
-                right: 16,
-                top: 14,
-                bottom: 10,
-            }))
-            .show(ui, |ui| cleanup::strip(ui, t, &self.cleanup, busy, action));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
-                left: 16,
-                right: 12,
-                top: 0,
+                left: 20,
+                right: 20,
+                top: 18,
                 bottom: 0,
             }))
             .show(ui, |ui| {
-                cleanup::view(ui, t, &mut self.cleanup, busy, dry_run, action)
+                cleanup::strip(ui, t, &mut self.cleanup, busy, dry_run, action)
+            });
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
+                left: 20,
+                right: 20,
+                top: 4,
+                bottom: 0,
+            }))
+            .show(ui, |ui| {
+                cleanup::view(ui, t, &mut self.cleanup, busy, action)
             });
     }
 
@@ -1287,7 +1291,10 @@ impl OxidizeApp {
                     ui.label(RichText::new("Administrator").color(t.weak))
                         .on_hover_text("Running with administrator rights");
                 } else if ui
-                    .button("Restart as administrator")
+                    .add(
+                        egui::Button::new(RichText::new("Restart as administrator").color(t.weak))
+                            .frame(false),
+                    )
                     .on_hover_text(
                         "Programs installed for all users and Windows' own stores \
                          need administrator rights",
@@ -2046,15 +2053,6 @@ fn leftover_row(ui: &mut egui::Ui, t: &Tint, item: &Leftover, checked: Option<&m
         });
     });
     ui.add_space(4.0);
-}
-
-/// A number with what it counts under it, for the overview.
-fn stat(ui: &mut egui::Ui, t: &Tint, value: &str, label: &str) {
-    ui.vertical(|ui| {
-        ui.spacing_mut().item_spacing.y = 0.0;
-        ui.label(RichText::new(value).size(22.0).color(t.text));
-        ui.label(RichText::new(label).small().color(t.weak));
-    });
 }
 
 /// A window clearly taller than it is wide, such as one on a portrait
@@ -2848,9 +2846,16 @@ impl Placed {
     }
 }
 
-/// The widest the name and publisher columns get.
-const MAX_NAME: f32 = 440.0;
-const MAX_PUBLISHER: f32 = 300.0;
+/// The table width that reads best: wide enough for long names and
+/// publishers, narrow enough that a size stays within reach of its name.
+const TABLE_IDEAL: f32 = 1180.0;
+
+/// The details panel's width beside a table in a window `available` wide:
+/// whatever the table does not need, between a usable and a readable width.
+fn details_width(available: f32) -> f32 {
+    // The table's own margins and the panel's separator.
+    (available - TABLE_IDEAL - 41.0).clamp(340.0, 720.0)
+}
 
 /// The columns a table `width` wide has room for, laid out. Name and size
 /// always show; the date, the publisher and the source join as it widens.
@@ -2876,11 +2881,9 @@ fn columns(width: f32) -> Vec<Placed> {
     shown
         .into_iter()
         .map(|column| {
-            // On a wide screen the text columns stop growing, so a size
-            // stays within reach of its name; the rest of the row is empty.
             let width = column.fixed_width().unwrap_or(match column {
-                Column::Publisher => (flexible * 0.4).min(MAX_PUBLISHER),
-                _ if publisher => (flexible * 0.6).min(MAX_NAME),
+                Column::Publisher => flexible * 0.4,
+                _ if publisher => flexible * 0.6,
                 _ => flexible,
             });
             let placed = Placed { column, x, width };
@@ -4313,10 +4316,19 @@ mod tests {
             let last = cols.last().unwrap();
             assert!(last.x + last.width <= width - ROW_PAD + 0.01, "{width}");
         }
-        // A wide table keeps the size close to the name.
-        let wide = columns(2400.0);
-        assert!(wide[0].width <= MAX_NAME && wide[1].width <= MAX_PUBLISHER);
-        assert!(wide[2].x < 900.0, "{:?}", wide[2]);
+    }
+
+    #[test]
+    fn a_wide_window_gives_its_room_to_the_details_not_to_a_gap() {
+        // A small window: the details keep a usable width.
+        assert_eq!(details_width(1180.0), 340.0);
+        // Maximised at 1080p: the table gets its ideal width, the details
+        // the rest.
+        let w = details_width(1920.0);
+        assert!(w > 600.0 && w <= 720.0, "{w}");
+        assert!((1920.0 - w - 41.0 - TABLE_IDEAL).abs() < 1.0);
+        // Very wide: the details stop at a readable width.
+        assert_eq!(details_width(2560.0), 720.0);
     }
 
     #[test]

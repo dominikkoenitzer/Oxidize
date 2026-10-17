@@ -9,7 +9,7 @@ use oxidize::model::Confidence;
 use oxidize::util;
 
 use super::slate::{self, Slate};
-use super::{cell_text, primary_button, size_cell, stat, Action, Tint};
+use super::{cell_text, count, primary_button, size_cell, tab_label, Action, Tint};
 
 /// What the tab holds between frames.
 pub struct Cleanup {
@@ -28,6 +28,18 @@ pub struct Cleanup {
     pub protect_error: Option<String>,
     /// The usage traces, cleared apart from the categories.
     pub slate: Slate,
+    /// Which of the two shows: the files or the traces.
+    pub view: View,
+    /// The protected folders beside the tab.
+    pub show_protected: bool,
+}
+
+/// The two views of the tab, each with its own one action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    #[default]
+    Files,
+    Slate,
 }
 
 impl Cleanup {
@@ -45,6 +57,8 @@ impl Cleanup {
             new_protected: String::new(),
             protect_error,
             slate: Slate::default(),
+            view: View::Files,
+            show_protected: false,
         }
     }
 
@@ -169,60 +183,9 @@ pub fn confirm_text(analysis: &Analysis, choice: &Choice, make_backups: bool) ->
     text
 }
 
-/// The strip above the tab, laid out like the program overview: what is
-/// ticked, in how many categories, what is protected, and Analyse.
+/// The head of the tab: what the open view would clean, its one action,
+/// and below it the switch between the files and the traces.
 pub fn strip(
-    ui: &mut egui::Ui,
-    t: &Tint,
-    state: &Cleanup,
-    busy: bool,
-    action: &mut Option<Action>,
-) {
-    ui.horizontal(|ui| {
-        match &state.analysis {
-            Some((_, a)) => {
-                let choice = state.choice_in(a);
-                stat(ui, t, &util::human_size(a.chosen_bytes(&choice)), "ticked");
-                ui.add_space(22.0);
-                stat(
-                    ui,
-                    t,
-                    &format!("{} of {}", choice.categories.len(), a.findings.len()),
-                    "categories",
-                );
-            }
-            None => stat(ui, t, "-", "not analysed yet"),
-        }
-        ui.add_space(22.0);
-        stat(
-            ui,
-            t,
-            &state.protected.entries().len().to_string(),
-            "protected",
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let label = if state.analysis.is_some() {
-                "Analyse again"
-            } else {
-                "Analyse"
-            };
-            if ui
-                .add_enabled(
-                    !busy,
-                    egui::Button::new(label).min_size(egui::vec2(110.0, 30.0)),
-                )
-                .on_hover_text("Count what each category holds. Changes nothing.")
-                .clicked()
-            {
-                *action = Some(Action::Analyse);
-            }
-        });
-    });
-}
-
-/// The tab's main area: the result of the last cleaning, each category in a
-/// row, and the button that cleans what is ticked.
-pub fn view(
     ui: &mut egui::Ui,
     t: &Tint,
     state: &mut Cleanup,
@@ -230,69 +193,241 @@ pub fn view(
     dry_run: bool,
     action: &mut Option<Action>,
 ) {
+    // As wide as the rows below, so the action sits above the sizes.
+    let size = egui::vec2(ui.available_width().min(READABLE), ui.available_height());
+    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+        head(ui, t, state, busy, dry_run, action)
+    });
+}
+
+fn head(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    busy: bool,
+    dry_run: bool,
+    action: &mut Option<Action>,
+) {
+    let analysed = state.analysis.is_some() || !state.slate.is_empty();
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            let (big, small) = headline(state, busy);
+            ui.label(RichText::new(big).size(24.0).color(t.text));
+            ui.label(RichText::new(small).color(t.weak));
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let tall = egui::vec2(0.0, 34.0);
+            if !analysed {
+                if ui
+                    .add_enabled(!busy, primary_button(t, "Analyse this PC").min_size(tall))
+                    .on_hover_text("Count what each category holds. Changes nothing.")
+                    .clicked()
+                {
+                    *action = Some(Action::Analyse);
+                }
+            } else {
+                match state.view {
+                    View::Files => files_button(ui, t, state, busy, dry_run, action),
+                    View::Slate => slate::button(ui, t, &state.slate, busy, dry_run, action),
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Analyse again").min_size(tall))
+                    .on_hover_text("Count again. Changes nothing.")
+                    .clicked()
+                {
+                    *action = Some(Action::Analyse);
+                }
+            }
+            let protected = state.protected.entries().len();
+            let label = format!("Protected folders  {protected}");
+            if ui
+                .add(
+                    egui::Button::new(RichText::new(label).color(t.weak))
+                        .frame(false)
+                        .selected(state.show_protected),
+                )
+                .on_hover_text("Folders and files Clean up never touches")
+                .clicked()
+            {
+                state.show_protected = !state.show_protected;
+            }
+        });
+    });
+    if analysed {
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            for (view, label) in [(View::Files, "Files"), (View::Slate, "Clean slate")] {
+                if tab_label(ui, t, state.view == view, label).clicked() {
+                    state.view = view;
+                }
+                ui.add_space(8.0);
+            }
+        });
+    } else {
+        ui.add_space(16.0);
+    }
+}
+
+/// The two lines at the top left: a figure, and what it is.
+fn headline(state: &Cleanup, busy: bool) -> (String, String) {
+    match (state.view, &state.analysis) {
+        _ if state.analysis.is_none() && state.slate.is_empty() => {
+            if busy {
+                (
+                    "Analysing...".into(),
+                    "Counting what each category holds.".into(),
+                )
+            } else {
+                (
+                    "Clean up this PC".into(),
+                    "Counts what temporary files, caches and Windows' own stores hold. \
+                     Nothing is deleted until you choose."
+                        .into(),
+                )
+            }
+        }
+        (View::Slate, _) => slate::headline(&state.slate),
+        (View::Files, None) => (
+            "Analysing...".into(),
+            "Counting what each category holds.".into(),
+        ),
+        (View::Files, Some((_, a))) => {
+            let choice = state.choice_in(a);
+            let n = choice.categories.len();
+            if n == 0 {
+                (
+                    "Nothing selected".into(),
+                    "Tick a category to clean it.".into(),
+                )
+            } else {
+                (
+                    util::human_size(a.chosen_bytes(&choice)),
+                    format!(
+                        "selected in {} of {}",
+                        n,
+                        count(a.findings.len(), "category", "categories")
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/// The action of the files view: clean what is ticked.
+fn files_button(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &Cleanup,
+    busy: bool,
+    dry_run: bool,
+    action: &mut Option<Action>,
+) {
+    let Some((_, analysis)) = &state.analysis else {
+        return;
+    };
+    let choice = state.choice_in(analysis);
+    let bytes = util::human_size(analysis.chosen_bytes(&choice));
+    let n = choice.categories.len();
+    let label = match (n, dry_run) {
+        (0, _) => "Clean".to_string(),
+        (_, true) => format!("Preview cleaning {bytes}"),
+        (_, false) => format!("Clean {bytes}"),
+    };
+    if ui
+        .add_enabled(
+            !busy && n > 0,
+            primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
+        )
+        .clicked()
+    {
+        *action = Some(Action::Clean(choice));
+    }
+}
+
+/// The widest the rows get, so a line can be read without a long jump from
+/// a title to its size.
+const READABLE: f32 = 920.0;
+
+/// The tab's main area: the open view, at a readable width.
+pub fn view(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    busy: bool,
+    action: &mut Option<Action>,
+) {
     egui::ScrollArea::vertical()
         .id_salt("cleanup_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            ui.set_max_width(ui.available_width().min(READABLE));
+            if state.analysis.is_none() && state.slate.is_empty() {
+                if !busy {
+                    what_it_counts(ui, t);
+                }
+                return;
+            }
+            if state.view == View::Slate {
+                slate::body(ui, t, &state.slate);
+                return;
+            }
             if let Some(results) = &state.results {
                 show_results(ui, t, results, busy, action);
-                ui.add_space(8.0);
+                ui.add_space(12.0);
                 ui.separator();
-            }
-            if !state.slate.is_empty() {
-                slate::section(ui, t, &state.slate, busy, dry_run, action);
             }
             // Taken for the frame and put back, so the analysis is not copied.
             let Some((places, analysis)) = state.analysis.take() else {
-                if !busy && state.results.is_none() && state.slate.is_empty() {
-                    ui.add_space(48.0);
-                    ui.vertical_centered(|ui| {
-                        ui.label(
-                            RichText::new(
-                                "Analyse to see what each category holds. Nothing changes until you clean.",
-                            )
-                            .color(t.weak),
-                        );
-                    });
-                }
                 return;
             };
             for f in &analysis.findings {
                 category_row(ui, t, state, f);
             }
-            ui.add_space(12.0);
-            let choice = state.choice_in(&analysis);
-            let bytes = util::human_size(analysis.chosen_bytes(&choice));
-            let n = choice.categories.len();
-            let what = if n == 1 {
-                "1 category".to_string()
-            } else {
-                format!("{n} categories")
-            };
-            let label = if dry_run {
-                format!("Preview cleaning {what}, {bytes}")
-            } else {
-                format!("Clean {what}, {bytes}")
-            };
-            let full = egui::vec2(ui.available_width().min(380.0), 34.0);
-            if ui
-                .add_enabled(!busy && n > 0, primary_button(t, &label).min_size(full))
-                .clicked()
-            {
-                *action = Some(Action::Clean(choice));
-            }
             if !analysis.elevated && analysis.findings.iter().any(|f| f.needs_admin) {
-                ui.add_space(4.0);
+                ui.add_space(8.0);
                 ui.label(
                     RichText::new(
                         "Some of it needs administrator rights: Restart as administrator, then analyse again.",
                     )
-                    .small()
                     .color(t.weak),
                 );
             }
+            ui.add_space(16.0);
             state.analysis = Some((places, analysis));
         });
+}
+
+/// Before the first analysis: what will be counted, in the order the rows
+/// will show.
+fn what_it_counts(ui: &mut egui::Ui, t: &Tint) {
+    ui.add_space(8.0);
+    ui.label(RichText::new("What it looks at").color(t.text));
+    ui.add_space(4.0);
+    let slate = (
+        "Clean slate",
+        "recent files, jump lists and histories Windows keeps; the files stay",
+    );
+    egui::Grid::new("what_it_counts")
+        .num_columns(2)
+        .min_col_width(240.0)
+        .spacing(egui::vec2(24.0, 8.0))
+        .show(ui, |ui| {
+            let rows = Category::ALL
+                .iter()
+                .map(|c| (c.title(), c.about()))
+                .chain(std::iter::once(slate));
+            for (title, about) in rows {
+                ui.label(RichText::new(title).color(t.text));
+                ui.add(egui::Label::new(RichText::new(about).color(t.weak)).wrap());
+                ui.end_row();
+            }
+        });
+    ui.add_space(10.0);
+    ui.label(
+        RichText::new("Protected folders and anything changed in the last 7 days are left alone.")
+            .color(t.weak),
+    );
 }
 
 /// The size a category row shows: what cleaning it would free. For the
@@ -369,7 +504,7 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let line = |ui: &mut egui::Ui, text: &str, color| {
-                ui.add(egui::Label::new(RichText::new(text).small().color(color)).wrap());
+                ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
             };
             line(ui, f.category.about(), t.weak);
             if f.category == Category::Orphans && !f.folders.is_empty() {
@@ -649,7 +784,25 @@ mod tests {
             new_protected: String::new(),
             protect_error: None,
             slate: Slate::default(),
+            view: View::Files,
+            show_protected: false,
         }
+    }
+
+    #[test]
+    fn the_head_says_what_the_open_view_would_clean() {
+        let mut c = tab();
+        assert_eq!(headline(&c, false).0, "Clean up this PC");
+        assert_eq!(headline(&c, true).0, "Analysing...");
+        c.take_analysis(Places::default(), analysis());
+        let (_, small) = headline(&c, false);
+        assert!(small.starts_with("selected in 1 of "), "{small}");
+        c.ticked.clear();
+        c.folders.clear();
+        assert_eq!(headline(&c, false).0, "Nothing selected");
+        // The traces are still being read.
+        c.view = View::Slate;
+        assert_eq!(headline(&c, false).0, "Analysing...");
     }
 
     #[test]
