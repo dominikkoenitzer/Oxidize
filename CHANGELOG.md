@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.7, 2026-10-17
+
+- Oxidize's own folder, which holds its backups, is never taken for a leftover
+  or for a folder no program claims, so a clean-up can no longer move the
+  backups.
+- A calmer window: plain tabs, the settings in one Options menu, a dry run
+  shown in the top bar, no size bars, and a quiet selected row.
+- Clean up shows what it would free and its one action at the top. Files and
+  Clean slate are two views, and beside the list each category says what it
+  would free, what cleans it and whether it can be undone. The protected
+  folders open when you ask for them.
+- On a screen taller than it is wide, the details sit under the list.
+- Ctrl+F searches the program list, and a search that finds nothing says what
+  it looked for.
+- A confirmation's button says what it does, and is red when it cannot be
+  undone.
+- An empty name is refused instead of matching every program, and what could
+  not be read is counted in items.
+
 ## 0.2.6, 2026-10-17
 
 - A Clean up tab and `oxidize clean` clear temporary files, crash dumps, the
