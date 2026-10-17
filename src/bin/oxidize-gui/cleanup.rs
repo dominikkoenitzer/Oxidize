@@ -9,7 +9,7 @@ use oxidize::model::Confidence;
 use oxidize::util;
 
 use super::slate::{self, Slate};
-use super::{cell_text, count, primary_button, size_cell, tab_label, Action, Tint};
+use super::{cell_text, count, fact, primary_button, size_cell, tab_label, Action, Tint};
 
 /// What the tab holds between frames.
 pub struct Cleanup {
@@ -30,8 +30,10 @@ pub struct Cleanup {
     pub slate: Slate,
     /// Which of the two shows: the files or the traces.
     pub view: View,
-    /// The protected folders beside the tab.
+    /// The protected folders in the panel beside the list.
     pub show_protected: bool,
+    /// The category the panel beside the list shows.
+    pub focus: Option<Category>,
 }
 
 /// The two views of the tab, each with its own one action.
@@ -59,6 +61,7 @@ impl Cleanup {
             slate: Slate::default(),
             view: View::Files,
             show_protected: false,
+            focus: None,
         }
     }
 
@@ -68,6 +71,13 @@ impl Cleanup {
         self.ticked = choice.categories;
         self.folders = choice.folders;
         self.results = None;
+        // The panel opens on the first category that holds something.
+        self.focus = analysis
+            .findings
+            .iter()
+            .find(|f| f.bytes > 0 || !f.folders.is_empty())
+            .or(analysis.findings.first())
+            .map(|f| f.category);
         self.analysis = Some((places, analysis));
     }
 
@@ -193,11 +203,7 @@ pub fn strip(
     dry_run: bool,
     action: &mut Option<Action>,
 ) {
-    // As wide as the rows below, so the action sits above the sizes.
-    let size = egui::vec2(ui.available_width().min(READABLE), ui.available_height());
-    ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
-        head(ui, t, state, busy, dry_run, action)
-    });
+    head(ui, t, state, busy, dry_run, action);
 }
 
 fn head(
@@ -209,13 +215,9 @@ fn head(
     action: &mut Option<Action>,
 ) {
     let analysed = state.analysis.is_some() || !state.slate.is_empty();
+    let (big, small) = headline(state, busy);
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let (big, small) = headline(state, busy);
-            ui.label(RichText::new(big).size(24.0).color(t.text));
-            ui.label(RichText::new(small).color(t.weak));
-        });
+        ui.label(RichText::new(big).size(24.0).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let tall = egui::vec2(0.0, 34.0);
             if !analysed {
@@ -254,6 +256,7 @@ fn head(
             }
         });
     });
+    ui.add(egui::Label::new(RichText::new(small).color(t.weak)).wrap());
     if analysed {
         ui.add_space(14.0);
         ui.horizontal(|ui| {
@@ -267,6 +270,8 @@ fn head(
     } else {
         ui.add_space(16.0);
     }
+    ui.add_space(4.0);
+    ui.separator();
 }
 
 /// The two lines at the top left: a figure, and what it is.
@@ -345,11 +350,7 @@ fn files_button(
     }
 }
 
-/// The widest the rows get, so a line can be read without a long jump from
-/// a title to its size.
-const READABLE: f32 = 920.0;
-
-/// The tab's main area: the open view, at a readable width.
+/// The tab's main area: the open view.
 pub fn view(
     ui: &mut egui::Ui,
     t: &Tint,
@@ -361,7 +362,6 @@ pub fn view(
         .id_salt("cleanup_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            ui.set_max_width(ui.available_width().min(READABLE));
             if state.analysis.is_none() && state.slate.is_empty() {
                 if !busy {
                     what_it_counts(ui, t);
@@ -381,19 +381,47 @@ pub fn view(
             let Some((places, analysis)) = state.analysis.take() else {
                 return;
             };
-            for f in &analysis.findings {
-                category_row(ui, t, state, f);
-            }
-            if !analysis.elevated && analysis.findings.iter().any(|f| f.needs_admin) {
-                ui.add_space(8.0);
-                ui.label(
-                    RichText::new(
-                        "Some of it needs administrator rights: Restart as administrator, then analyse again.",
-                    )
-                    .color(t.weak),
-                );
-            }
+            ui.add_space(4.0);
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                for f in &analysis.findings {
+                    category_row(ui, t, state, f);
+                }
+            });
             ui.add_space(16.0);
+            state.analysis = Some((places, analysis));
+        });
+}
+
+/// The panel beside the list: the category in focus, what Clean slate
+/// clears, or the protected folders when asked for or before an analysis.
+pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
+    let analysed = state.analysis.is_some() || !state.slate.is_empty();
+    if state.show_protected || !analysed {
+        protected_panel(ui, t, state);
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("cleanup_side")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            if state.view == View::Slate {
+                slate::about(ui, t);
+                return;
+            }
+            let Some((places, analysis)) = state.analysis.take() else {
+                ui.label(RichText::new("Analysing...").color(t.weak));
+                return;
+            };
+            let found = state
+                .focus
+                .and_then(|c| analysis.findings.iter().find(|f| f.category == c));
+            match found {
+                Some(f) => category_detail(ui, t, state, f, analysis.elevated),
+                None => {
+                    ui.label(RichText::new("Pick a category to see what it holds.").color(t.weak));
+                }
+            }
             state.analysis = Some((places, analysis));
         });
 }
@@ -457,86 +485,174 @@ fn notes_line(f: &Finding) -> Option<String> {
     (!notes.is_empty()).then(|| notes.join("  \u{b7}  "))
 }
 
-/// Where the lines under a category start: past its tick.
-const ROW_INDENT: f32 = 28.0;
+/// `text` with a capital first letter, for a line that stands alone.
+fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
 
-/// One category, as a row like the program table's: its tick, its title,
-/// its size, and under it what it is and what stays.
+/// The height of a category's row.
+const ROW_HEIGHT: f32 = 34.0;
+
+/// One category on one line, like a program in the table: its tick, its
+/// title and its size. A click shows it in the panel beside the list.
 fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        let mut on = state.ticked.contains(&f.category) && f.actionable();
-        let response = ui.add_enabled(f.actionable(), egui::Checkbox::without_text(&mut on));
-        if response.changed() {
-            state.set(f, on);
+    let focused = state.focus == Some(f.category);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), ROW_HEIGHT),
+        egui::Sense::click(),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::SelectableLabel,
+            true,
+            focused,
+            f.category.title(),
+        )
+    });
+    if response.clicked() {
+        state.focus = Some(f.category);
+    }
+    if !ui.is_rect_visible(rect) {
+        return;
+    }
+    let painter = ui.painter_at(rect);
+    if focused {
+        painter.rect_filled(rect, 4.0, t.selected);
+        let mark = egui::Rect::from_min_size(rect.left_top(), egui::vec2(3.0, rect.height()))
+            .shrink2(egui::vec2(0.0, 7.0));
+        painter.rect_filled(mark, 1.5, t.copper);
+    } else if response.hovered() {
+        painter.rect_filled(rect, 4.0, t.hover);
+    }
+    let tick = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 22.0, rect.center().y),
+        egui::vec2(20.0, 20.0),
+    );
+    let mut on = state.ticked.contains(&f.category) && f.actionable();
+    let mut cell = ui.new_child(egui::UiBuilder::new().max_rect(tick));
+    if !f.actionable() {
+        cell.disable();
+    }
+    if cell.add(egui::Checkbox::without_text(&mut on)).changed() {
+        state.set(f, on);
+    }
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = if f.actionable() { t.text } else { t.weak };
+    let size = egui::Rect::from_min_max(
+        egui::pos2(rect.right() - 160.0, rect.top()),
+        egui::pos2(rect.right() - 12.0, rect.bottom()),
+    );
+    let title = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 44.0, rect.top()),
+        egui::pos2(size.left() - 16.0, rect.bottom()),
+    );
+    cell_text(
+        &painter,
+        title,
+        f.category.title(),
+        font.clone(),
+        color,
+        egui::Align::Min,
+    );
+    let bytes = shown_bytes(state, f);
+    if !f.size_known && bytes == 0 {
+        cell_text(
+            &painter,
+            size,
+            "measured afterwards",
+            font,
+            t.weak,
+            egui::Align::Max,
+        );
+    } else if !f.actionable() && bytes == 0 {
+        cell_text(
+            &painter,
+            size,
+            "nothing found",
+            font,
+            t.weak,
+            egui::Align::Max,
+        );
+    } else {
+        size_cell(&painter, t, size, Some(bytes), &font);
+    }
+}
+
+/// The panel for one category: what it is, what it would free, what stays
+/// and why, and for the folders of removed programs each folder.
+fn category_detail(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, elevated: bool) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.label(RichText::new(f.category.title()).size(18.0).color(t.text));
+    ui.add(egui::Label::new(RichText::new(f.category.about()).color(t.weak)).wrap());
+    ui.add_space(10.0);
+    let bytes = shown_bytes(state, f);
+    let size = if !f.size_known && bytes == 0 {
+        "measured afterwards".to_string()
+    } else {
+        util::human_size(bytes)
+    };
+    fact(ui, t, "Would free", &size);
+    if f.category == Category::Orphans && !f.folders.is_empty() {
+        let all: u64 = f.folders.iter().map(|o| o.bytes).sum();
+        fact(
+            ui,
+            t,
+            "Found",
+            &format!(
+                "{}, {} in all",
+                count(f.folders.len(), "folder", "folders"),
+                util::human_size(all)
+            ),
+        );
+    }
+    let cleaned_by = match f.category {
+        Category::ComponentStore | Category::DeliveryOptimization | Category::WindowsOld => {
+            "Windows' own tools"
         }
-        let color = if f.actionable() { t.text } else { t.weak };
-        ui.label(RichText::new(f.category.title()).color(color));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let (cell, _) = ui.allocate_exact_size(egui::vec2(150.0, 20.0), egui::Sense::hover());
-            let font = egui::TextStyle::Body.resolve(ui.style());
-            let bytes = shown_bytes(state, f);
-            if !f.size_known && bytes == 0 {
-                cell_text(
-                    ui.painter(),
-                    cell,
-                    "measured afterwards",
-                    font,
-                    t.weak,
-                    egui::Align::Max,
-                );
-            } else if !f.actionable() && bytes == 0 {
-                cell_text(
-                    ui.painter(),
-                    cell,
-                    "nothing found",
-                    font,
-                    t.weak,
-                    egui::Align::Max,
-                );
-            } else {
-                size_cell(ui.painter(), t, cell, Some(bytes), &font);
-            }
-        });
-    });
-    ui.horizontal(|ui| {
-        ui.add_space(ROW_INDENT);
-        ui.vertical(|ui| {
-            ui.spacing_mut().item_spacing.y = 2.0;
-            let line = |ui: &mut egui::Ui, text: &str, color| {
-                ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
-            };
-            line(ui, f.category.about(), t.weak);
-            if f.category == Category::Orphans && !f.folders.is_empty() {
-                let all: u64 = f.folders.iter().map(|o| o.bytes).sum();
-                line(
-                    ui,
-                    &format!(
-                        "{} folders, {} in all",
-                        f.folders.len(),
-                        util::human_size(all)
-                    ),
-                    t.weak,
-                );
-            }
-            if let Some(notes) = notes_line(f) {
-                let color = if f.category == Category::WindowsOld {
-                    t.amber
-                } else {
-                    t.weak
-                };
-                line(ui, &notes, color);
-            }
-            if let Some(stays) = clean::stays_text(&f.kept) {
-                line(ui, &stays, if f.needs_admin { t.amber } else { t.weak });
-            }
-            if f.category == Category::Orphans && !f.folders.is_empty() {
-                folder_list(ui, t, state, f);
-            }
-        });
-    });
-    ui.add_space(8.0);
-    ui.separator();
+        Category::Orphans => "Oxidize, into a backup first",
+        _ => "Oxidize, each file checked again right before it goes",
+    };
+    fact(ui, t, "Cleaned by", cleaned_by);
+    let undo = if f.category.backed_up() {
+        "Yes, from the backup"
+    } else {
+        "No, it is deleted for good"
+    };
+    fact(ui, t, "Can be undone", undo);
+    ui.add_space(10.0);
+    let line = |ui: &mut egui::Ui, text: &str, color| {
+        ui.add(egui::Label::new(RichText::new(text).color(color)).wrap());
+    };
+    if let Some(notes) = notes_line(f) {
+        let color = if f.category == Category::WindowsOld {
+            t.amber
+        } else {
+            t.weak
+        };
+        line(ui, &notes, color);
+    }
+    if let Some(stays) = clean::stays_text(&f.kept) {
+        line(
+            ui,
+            &sentence(&stays),
+            if f.needs_admin { t.amber } else { t.weak },
+        );
+    }
+    if f.needs_admin && !elevated {
+        line(
+            ui,
+            "Needs administrator rights: Restart as administrator, then analyse again.",
+            t.amber,
+        );
+    }
+    if f.category == Category::Orphans && !f.folders.is_empty() {
+        ui.add_space(6.0);
+        folder_list(ui, t, state, f);
+    }
 }
 
 /// The folders of removed programs, each with its own tick.
@@ -786,7 +902,14 @@ mod tests {
             slate: Slate::default(),
             view: View::Files,
             show_protected: false,
+            focus: None,
         }
+    }
+
+    #[test]
+    fn a_line_that_stands_alone_starts_with_a_capital() {
+        assert_eq!(sentence("stays: 2 changed"), "Stays: 2 changed");
+        assert_eq!(sentence(""), "");
     }
 
     #[test]

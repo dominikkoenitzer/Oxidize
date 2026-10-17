@@ -112,6 +112,22 @@ pub fn button(
     }
 }
 
+/// The panel beside the list: what clearing does and does not touch.
+pub fn about(ui: &mut egui::Ui, t: &Tint) {
+    ui.spacing_mut().item_spacing.y = 8.0;
+    ui.label(RichText::new("Clean slate").size(18.0).color(t.text));
+    for text in [
+        "The lists Windows keeps of what you opened: recent items, jump lists, \
+         histories and launch counts.",
+        "Only these lists go. The files they point to stay, and so do pinned items.",
+        "Windows clears the recent items and jump lists itself first, so File Explorer \
+         hears of it without a restart.",
+        "Temporary folders, browser data, mail and the data of programs are never touched.",
+    ] {
+        ui.add(egui::Label::new(RichText::new(text).color(t.weak)).wrap());
+    }
+}
+
 /// The view: each trace with what it holds, or what the last clearing did.
 pub fn body(ui: &mut egui::Ui, t: &Tint, slate: &Slate) {
     ui.add_space(6.0);
