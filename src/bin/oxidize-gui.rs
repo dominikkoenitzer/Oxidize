@@ -353,7 +353,7 @@ impl OxidizeApp {
         safety_ctx: SafetyContext,
     ) {
         self.busy = true;
-        self.status = format!("Removing {} item(s)...", items.len());
+        self.status = format!("Removing {}...", count(items.len(), "item", "items"));
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
                 Ok(outcome) => Msg::Removed(outcome),
@@ -604,7 +604,10 @@ impl OxidizeApp {
                         .is_some_and(|id| self.programs.iter().any(|p| p.id() == id));
                     self.programs = programs;
                     self.busy = false;
-                    self.status = format!("{} program(s) installed.", self.programs.len());
+                    self.status = format!(
+                        "{} installed.",
+                        count(self.programs.len(), "program", "programs")
+                    );
                     // Drop a stale selection, unless it is the program just
                     // uninstalled: what it left behind is scanned now.
                     if let Some(id) = self.selected.clone() {
@@ -774,7 +777,13 @@ impl OxidizeApp {
     /// Move the selection with the arrow and page keys. The search field
     /// keeps its own keys; up and down are the table's even while typing.
     fn keyboard(&mut self, ctx: &egui::Context, display: &[usize]) {
-        if self.confirm.is_some() || display.is_empty() || self.tab != Tab::Programs {
+        if self.confirm.is_some() || self.tab != Tab::Programs {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
+            self.focus_search = true;
+        }
+        if display.is_empty() {
             return;
         }
         let page = ((self.table_view.1 / ROW_HEIGHT).floor() as isize).max(1);
@@ -1077,26 +1086,37 @@ impl OxidizeApp {
         action: &mut Option<Action>,
     ) {
         let t = *t;
-        // At most two fifths of the window, so a small window keeps a usable
-        // table.
-        let widest = (ui.available_width() * 0.4).clamp(300.0, 560.0);
-        egui::Panel::right("details")
-            .resizable(true)
-            .default_size(380.0)
-            .size_range(300.0..=widest)
-            .frame(
-                egui::Frame::new()
-                    .fill(t.side)
-                    .inner_margin(egui::Margin::same(16)),
-            )
-            .show(ui, |ui| self.details(ui, &t, action));
+        let frame = egui::Frame::new()
+            .fill(t.side)
+            .inner_margin(egui::Margin::same(20));
+        if is_tall(ui.available_size()) {
+            // A portrait window: the details under the table, so the table
+            // keeps the full width and its publisher column.
+            let tallest = (ui.available_height() * 0.6).max(260.0);
+            egui::Panel::bottom("details_below")
+                .resizable(true)
+                .default_size((ui.available_height() * 0.42).max(260.0))
+                .size_range(220.0..=tallest)
+                .frame(frame)
+                .show(ui, |ui| self.details(ui, &t, action));
+        } else {
+            // At most two fifths of the window, so a small window keeps a
+            // usable table.
+            let widest = (ui.available_width() * 0.4).clamp(300.0, 560.0);
+            egui::Panel::right("details")
+                .resizable(true)
+                .default_size(380.0)
+                .size_range(300.0..=widest)
+                .frame(frame)
+                .show(ui, |ui| self.details(ui, &t, action));
+        }
 
         let overview = overview(&self.programs, today);
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
-                left: 16,
-                right: 12,
-                top: 10,
+                left: 20,
+                right: 20,
+                top: 16,
                 bottom: 0,
             }))
             .show(ui, |ui| {
@@ -1236,71 +1256,74 @@ fn analysed_status(analysis: &clean::Analysis) -> String {
 // ------------------------------------------------------------------------
 
 impl OxidizeApp {
-    /// The bar across the top: the name, whether it runs as administrator,
-    /// the settings and Refresh.
+    /// The bar across the top: the name and the two tabs on the left; the
+    /// settings, the administrator state and Refresh on the right. The
+    /// settings live in one menu, and a dry run says so in the bar, since it
+    /// changes what every button does.
     fn toolbar(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
-        // The settings share the row when there is room, else get their own.
-        let wide = ui.available_width() >= 900.0;
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Oxidize").size(17.0).color(t.text));
-            ui.add_space(10.0);
+            ui.label(RichText::new("Oxidize").size(16.0).strong().color(t.text));
+            ui.add_space(20.0);
             for (tab, label) in [(Tab::Programs, "Programs"), (Tab::Cleanup, "Clean up")] {
-                if ui.selectable_label(self.tab == tab, label).clicked() {
+                if tab_label(ui, t, self.tab == tab, label).clicked() {
                     self.tab = tab;
                 }
-            }
-            ui.add_space(6.0);
-            if self.elevated {
-                badge(ui, "Administrator", t.verdigris);
-            } else {
-                badge(ui, "Not elevated", t.weak);
-                if ui.small_button("Restart as administrator").clicked() {
-                    *action = Some(Action::RestartAdmin);
-                }
+                ui.add_space(8.0);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Refresh").clicked() {
+                if self.tab == Tab::Programs && ui.button("Refresh").clicked() {
                     *action = Some(Action::Refresh);
                 }
-                if wide {
-                    ui.add_space(10.0);
-                    // Laid out from the right, so the last one comes first.
-                    for setting in Setting::ALL.into_iter().rev() {
+                ui.menu_button("Options", |ui| {
+                    ui.set_min_width(240.0);
+                    for setting in Setting::ALL {
+                        if setting == Setting::System {
+                            ui.separator();
+                        }
                         self.setting(ui, setting, action);
                     }
+                });
+                if self.elevated {
+                    ui.label(RichText::new("Administrator").color(t.weak))
+                        .on_hover_text("Running with administrator rights");
+                } else if ui
+                    .button("Restart as administrator")
+                    .on_hover_text(
+                        "Programs installed for all users and Windows' own stores \
+                         need administrator rights",
+                    )
+                    .clicked()
+                {
+                    *action = Some(Action::RestartAdmin);
+                }
+                if self.dry_run {
+                    badge(ui, "Dry run: nothing changes", t.amber);
                 }
             });
         });
-        if !wide {
-            ui.horizontal_wrapped(|ui| {
-                for setting in Setting::ALL {
-                    self.setting(ui, setting, action);
-                }
-            });
-        }
     }
 
     fn setting(&mut self, ui: &mut egui::Ui, setting: Setting, action: &mut Option<Action>) {
         match setting {
             Setting::DryRun => {
-                ui.checkbox(&mut self.dry_run, "Dry run")
+                ui.checkbox(&mut self.dry_run, "Dry run, change nothing")
                     .on_hover_text("Show what would happen without changing anything");
             }
             Setting::Backups => {
-                ui.checkbox(&mut self.make_backups, "Backups")
+                ui.checkbox(&mut self.make_backups, "Back up before deleting")
                     .on_hover_text(
                         "Export registry keys to .reg and quarantine files before deleting",
                     );
             }
             Setting::Silent => {
-                ui.checkbox(&mut self.silent, "Silent uninstall")
+                ui.checkbox(&mut self.silent, "Uninstall silently where possible")
                     .on_hover_text(
                         "Use the program's unattended uninstall switches where available",
                     );
             }
             Setting::System => {
                 if ui
-                    .checkbox(&mut self.include_system, "System components")
+                    .checkbox(&mut self.include_system, "Show system components")
                     .on_hover_text("Also list the components Windows hides from its own list")
                     .changed()
                 {
@@ -1384,7 +1407,7 @@ impl OxidizeApp {
             };
             let search = ui.add(
                 egui::TextEdit::singleline(&mut self.filter)
-                    .hint_text("Search name or publisher")
+                    .hint_text("Search name or publisher  (Ctrl+F)")
                     .desired_width(width)
                     .margin(egui::Margin::symmetric(8, 5)),
             );
@@ -1436,24 +1459,36 @@ impl OxidizeApp {
         let cols = columns(ui.available_width());
         self.table_header(ui, t, &cols);
         if display.is_empty() {
-            ui.add_space(48.0);
-            ui.vertical_centered(|ui| {
-                if self.programs.is_empty() && self.busy {
-                    ui.spinner();
-                    ui.label(RichText::new("Reading the installed programs...").color(t.weak));
-                } else if self.programs.is_empty() {
-                    ui.label(RichText::new("No programs found.").color(t.weak));
-                } else {
-                    ui.label(RichText::new("No program matches.").color(t.weak));
-                }
+            // In place of the rows, on the names' left edge.
+            ui.add_space(20.0);
+            ui.horizontal(|ui| {
+                ui.add_space(ROW_PAD + ICON + 10.0);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 8.0;
+                    if self.programs.is_empty() && self.busy {
+                        ui.label(RichText::new("Reading the installed programs...").color(t.weak));
+                    } else if self.programs.is_empty() {
+                        ui.label(RichText::new("No installed programs were found.").color(t.text));
+                        ui.label(
+                            RichText::new("Refresh reads the list from Windows again.")
+                                .color(t.weak),
+                        );
+                    } else {
+                        let what = if self.filter.trim().is_empty() {
+                            format!("No programs in {}.", self.quick.label())
+                        } else {
+                            format!("No programs match \u{201c}{}\u{201d}.", self.filter.trim())
+                        };
+                        ui.label(RichText::new(what).color(t.text));
+                        if ui.button("Show all programs").clicked() {
+                            self.filter.clear();
+                            self.quick = QuickFilter::All;
+                        }
+                    }
+                });
             });
             return;
         }
-        let max_bytes = display
-            .iter()
-            .filter_map(|&i| self.programs[i].size_bytes())
-            .max()
-            .unwrap_or(0);
         let mut offset = None;
         if std::mem::take(&mut self.reveal) {
             let row = self
@@ -1478,7 +1513,7 @@ impl OxidizeApp {
                 let mut clicked = None;
                 for row in rows {
                     let i = display[row];
-                    if self.program_row(ui, t, &cols, i, max_bytes, &body) {
+                    if self.program_row(ui, t, &cols, i, &body) {
                         clicked = Some(i);
                     }
                 }
@@ -1549,7 +1584,6 @@ impl OxidizeApp {
         t: &Tint,
         cols: &[Placed],
         i: usize,
-        max_bytes: u64,
         font: &egui::FontId,
     ) -> bool {
         let program = &self.programs[i];
@@ -1601,7 +1635,7 @@ impl OxidizeApp {
                     egui::Align::Min,
                 ),
                 Column::Publisher => weak(program.publisher.as_deref().unwrap_or("")),
-                Column::Size => size_cell(&painter, t, cell, program.size_bytes(), max_bytes, font),
+                Column::Size => size_cell(&painter, t, cell, program.size_bytes(), font),
                 Column::Installed => weak(program.install_date.as_deref().unwrap_or("")),
                 Column::Source => weak(scope_label(program)),
             }
@@ -1613,10 +1647,30 @@ impl OxidizeApp {
     /// is known about it, and the result of the last scan or removal.
     fn details(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
         let Some(program) = self.selected_program().cloned() else {
-            ui.add_space(48.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Select a program to see its details.").color(t.weak));
-            });
+            ui.add_space(4.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.label(
+                RichText::new("No program selected")
+                    .size(16.0)
+                    .color(t.text),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(
+                        "Pick one in the list to remove it completely, run its own \
+                         uninstaller, or see what it left behind.",
+                    )
+                    .color(t.weak),
+                )
+                .wrap(),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new("Up and Down move through the list, Ctrl+F searches it.")
+                        .color(t.weak),
+                )
+                .wrap(),
+            );
             return;
         };
         // Taken for the frame and put back, so the report is not copied.
@@ -1741,7 +1795,7 @@ impl OxidizeApp {
             "Installed",
             program.install_date.as_deref().unwrap_or("-"),
         );
-        fact(ui, t, "Scope", scope_label(program));
+        fact(ui, t, "Installed for", scope_label(program));
         fact(ui, t, "Registry", &program.source.label());
         fact(
             ui,
@@ -1818,9 +1872,12 @@ fn scan_results(
     });
     let n_checked = checked.iter().filter(|c| **c).count();
     let remove_label = if dry_run {
-        format!("Preview removal of {n_checked} item(s)")
+        format!("Preview removal of {}", count(n_checked, "item", "items"))
     } else {
-        format!("Remove {n_checked} checked item(s)")
+        format!(
+            "Remove {}",
+            count(n_checked, "checked item", "checked items")
+        )
     };
     let full = egui::vec2(ui.available_width(), 30.0);
     if ui
@@ -2000,11 +2057,22 @@ fn stat(ui: &mut egui::Ui, t: &Tint, value: &str, label: &str) {
     });
 }
 
+/// A window clearly taller than it is wide, such as one on a portrait
+/// screen.
+fn is_tall(size: egui::Vec2) -> bool {
+    size.y > size.x * 1.15
+}
+
+/// `n` and the noun that goes with it: "1 program", "20 programs".
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// One line of facts in the details panel: a name, and its value wrapping
 /// beside it.
 fn fact(ui: &mut egui::Ui, t: &Tint, name: &str, value: &str) {
     ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(74.0, 18.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(100.0, 18.0), egui::Sense::hover());
         ui.painter().text(
             rect.left_center(),
             egui::Align2::LEFT_CENTER,
@@ -2032,11 +2100,51 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
     }
 }
 
+/// A tab in the top bar: plain text, the open one brighter and underlined in
+/// copper.
+fn tab_label(ui: &mut egui::Ui, t: &Tint, open: bool, label: &str) -> egui::Response {
+    let font = egui::FontId::proportional(14.0);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), font, t.text);
+    let size = egui::vec2(galley.size().x + 8.0, 28.0);
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, open, label)
+    });
+    if ui.is_rect_visible(rect) {
+        let color = if open || response.hovered() {
+            t.text
+        } else {
+            t.weak
+        };
+        let pos = egui::pos2(
+            rect.center().x - galley.size().x / 2.0,
+            rect.center().y - galley.size().y / 2.0 - 1.0,
+        );
+        ui.painter().galley(pos, galley, color);
+        if open {
+            let line = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + 4.0, rect.bottom() - 2.0),
+                egui::pos2(rect.right() - 4.0, rect.bottom()),
+            );
+            ui.painter().rect_filled(line, 1.0, t.copper);
+        }
+        if response.has_focus() {
+            ui.painter().rect_stroke(
+                rect,
+                4.0,
+                egui::Stroke::new(1.0, t.copper),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+    response
+}
+
 /// A quick filter above the table: its name and how many it lets through.
 fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) -> egui::Response {
     let font = egui::FontId::proportional(13.0);
     let mut job = egui::text::LayoutJob::default();
-    let color = if selected { t.copper } else { t.text };
+    let color = if selected { t.text } else { t.weak };
     job.append(label, 0.0, egui::TextFormat::simple(font.clone(), color));
     job.append(
         &count.to_string(),
@@ -2051,13 +2159,13 @@ fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) 
     });
     if ui.is_rect_visible(rect) {
         let fill = if selected {
-            t.selected
+            t.button_active
         } else if response.hovered() {
             t.hover
         } else {
             Color32::TRANSPARENT
         };
-        let stroke = if selected { t.copper } else { t.line };
+        let stroke = if selected { t.line_strong } else { t.line };
         ui.painter().rect_filled(rect, 13.0, fill);
         ui.painter().rect_stroke(
             rect,
@@ -2071,30 +2179,18 @@ fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) 
     response
 }
 
-/// The size column: a bar against the biggest program shown, and the size.
+/// A size, right-aligned so the units line up down the column.
 fn size_cell(
     painter: &egui::Painter,
     t: &Tint,
     cell: egui::Rect,
     bytes: Option<u64>,
-    max_bytes: u64,
     font: &egui::FontId,
 ) {
     let Some(bytes) = bytes else { return };
-    let track = egui::Rect::from_min_size(
-        egui::pos2(cell.left(), cell.center().y - 2.0),
-        egui::vec2(44.0, 4.0),
-    );
-    painter.rect_filled(track, 2.0, t.track);
-    if max_bytes > 0 && bytes > 0 {
-        let share = (bytes as f32 / max_bytes as f32).clamp(0.0, 1.0);
-        let fill = track.with_max_x(track.left() + (track.width() * share).max(2.0));
-        painter.rect_filled(fill, 2.0, t.copper);
-    }
-    let text = cell.with_min_x(track.right() + 8.0);
     cell_text(
         painter,
-        text,
+        cell,
         &util::human_size(bytes),
         font.clone(),
         t.text,
@@ -2176,8 +2272,6 @@ struct Tint {
     hover: Color32,
     /// The selected row and quick filter.
     selected: Color32,
-    /// The empty part of a bar.
-    track: Color32,
     copper: Color32,
     /// Text on a copper fill.
     on_copper: Color32,
@@ -2204,8 +2298,7 @@ impl Tint {
                 button_hover: rgb(0x32, 0x2e, 0x2b),
                 button_active: rgb(0x3b, 0x36, 0x32),
                 hover: rgb(0x25, 0x22, 0x20),
-                selected: rgb(0x3b, 0x29, 0x1f),
-                track: rgb(0x2e, 0x2a, 0x27),
+                selected: rgb(0x2f, 0x2b, 0x28),
                 copper: rgb(0xe2, 0x79, 0x3d),
                 on_copper: rgb(0x1b, 0x12, 0x0c),
                 verdigris: rgb(0x5e, 0xc3, 0xb3),
@@ -2227,8 +2320,7 @@ impl Tint {
                 button_hover: rgb(0xf6, 0xf2, 0xee),
                 button_active: rgb(0xed, 0xe7, 0xe0),
                 hover: rgb(0xf1, 0xed, 0xe8),
-                selected: rgb(0xf7, 0xe3, 0xd4),
-                track: rgb(0xe9, 0xe3, 0xdc),
+                selected: rgb(0xea, 0xe4, 0xdd),
                 copper: rgb(0xb5, 0x52, 0x1d),
                 on_copper: rgb(0xff, 0xff, 0xff),
                 verdigris: rgb(0x21, 0x7a, 0x6e),
@@ -2335,7 +2427,7 @@ fn apply_style(ctx: &egui::Context) {
 fn bar_frame(fill: Color32) -> egui::Frame {
     egui::Frame::new()
         .fill(fill)
-        .inner_margin(egui::Margin::symmetric(14, 8))
+        .inner_margin(egui::Margin::symmetric(20, 8))
 }
 
 /// The one copper button of a view.
@@ -2372,7 +2464,7 @@ impl Column {
             Column::Publisher => "Publisher",
             Column::Size => "Size",
             Column::Installed => "Installed",
-            Column::Source => "Source",
+            Column::Source => "Installed for",
         }
     }
 
@@ -2388,9 +2480,9 @@ impl Column {
     /// The width of a column that does not stretch.
     fn fixed_width(self) -> Option<f32> {
         match self {
-            Column::Size => Some(132.0),
+            Column::Size => Some(88.0),
             Column::Installed => Some(92.0),
-            Column::Source => Some(80.0),
+            Column::Source => Some(96.0),
             Column::Name | Column::Publisher => None,
         }
     }
@@ -2756,6 +2848,10 @@ impl Placed {
     }
 }
 
+/// The widest the name and publisher columns get.
+const MAX_NAME: f32 = 440.0;
+const MAX_PUBLISHER: f32 = 300.0;
+
 /// The columns a table `width` wide has room for, laid out. Name and size
 /// always show; the date, the publisher and the source join as it widens.
 fn columns(width: f32) -> Vec<Placed> {
@@ -2780,9 +2876,11 @@ fn columns(width: f32) -> Vec<Placed> {
     shown
         .into_iter()
         .map(|column| {
+            // On a wide screen the text columns stop growing, so a size
+            // stays within reach of its name; the rest of the row is empty.
             let width = column.fixed_width().unwrap_or(match column {
-                Column::Publisher => flexible * 0.4,
-                _ if publisher => flexible * 0.6,
+                Column::Publisher => (flexible * 0.4).min(MAX_PUBLISHER),
+                _ if publisher => (flexible * 0.6).min(MAX_NAME),
                 _ => flexible,
             });
             let placed = Placed { column, x, width };
@@ -4215,5 +4313,25 @@ mod tests {
             let last = cols.last().unwrap();
             assert!(last.x + last.width <= width - ROW_PAD + 0.01, "{width}");
         }
+        // A wide table keeps the size close to the name.
+        let wide = columns(2400.0);
+        assert!(wide[0].width <= MAX_NAME && wide[1].width <= MAX_PUBLISHER);
+        assert!(wide[2].x < 900.0, "{:?}", wide[2]);
+    }
+
+    #[test]
+    fn a_portrait_window_is_tall_and_a_landscape_one_is_not() {
+        assert!(is_tall(egui::vec2(1080.0, 1872.0)));
+        assert!(!is_tall(egui::vec2(1920.0, 1032.0)));
+        assert!(!is_tall(egui::vec2(1180.0, 760.0)));
+        // Square-ish windows keep the details beside the table.
+        assert!(!is_tall(egui::vec2(900.0, 1000.0)));
+    }
+
+    #[test]
+    fn counts_take_the_right_noun() {
+        assert_eq!(count(1, "program", "programs"), "1 program");
+        assert_eq!(count(0, "program", "programs"), "0 programs");
+        assert_eq!(count(20, "program", "programs"), "20 programs");
     }
 }

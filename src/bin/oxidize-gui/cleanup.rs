@@ -257,14 +257,8 @@ pub fn view(
                 }
                 return;
             };
-            let biggest = analysis
-                .findings
-                .iter()
-                .map(|f| shown_bytes(state, f))
-                .max()
-                .unwrap_or(0);
             for f in &analysis.findings {
-                category_row(ui, t, state, f, biggest);
+                category_row(ui, t, state, f);
             }
             ui.add_space(12.0);
             let choice = state.choice_in(&analysis);
@@ -332,9 +326,8 @@ fn notes_line(f: &Finding) -> Option<String> {
 const ROW_INDENT: f32 = 28.0;
 
 /// One category, as a row like the program table's: its tick, its title,
-/// its size with a bar against the biggest category, and under it what it
-/// is and what stays.
-fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, biggest: u64) {
+/// its size, and under it what it is and what stays.
+fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
     ui.add_space(8.0);
     ui.horizontal(|ui| {
         let mut on = state.ticked.contains(&f.category) && f.actionable();
@@ -367,7 +360,7 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, b
                     egui::Align::Max,
                 );
             } else {
-                size_cell(ui.painter(), t, cell, Some(bytes), biggest, &font);
+                size_cell(ui.painter(), t, cell, Some(bytes), &font);
             }
         });
     });
