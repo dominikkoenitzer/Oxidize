@@ -2465,6 +2465,26 @@ mod tests {
     }
 
     #[test]
+    fn a_short_form_of_an_installed_vendor_is_never_alone() {
+        // A program published as "Quill" while the same company's programs
+        // are listed as "Quillmark Systems Inc.": its key and folder are the
+        // company's, not this program's.
+        let mut t = name_target("Quill Tuner", Some("Quill"));
+        t.registry = Some((
+            "quill-tuner".to_string(),
+            RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+        ));
+        let own = listed("Quill Tuner", "quill-tuner", Some("Quill"));
+        let sibling = listed(
+            "Quillmark Armory",
+            "quillmark-armory",
+            Some("Quillmark Systems Inc."),
+        );
+        assert!(vendor_alone(&t, std::slice::from_ref(&own)));
+        assert!(!vendor_alone(&t, &[own, sibling]));
+    }
+
+    #[test]
     fn only_the_publishers_whole_name_is_its_key() {
         let t = name_target("Example Player", Some("Example Studio Inc."));
         assert!(is_publisher_exactly("Example Studio", &t));
