@@ -43,6 +43,12 @@ pub const BACKUP_LABEL: &str = "Clean up";
 
 const DAY: u64 = 86_400;
 
+/// `days` as an age. A number of days too large to count in seconds is
+/// forever, never a wrapped-around few seconds that would take everything.
+fn days_ago(days: u64) -> Duration {
+    Duration::from_secs(days.saturating_mul(DAY))
+}
+
 /// What the cleaner can clean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -609,7 +615,7 @@ fn recycle_bin(places: &Places, opts: &Options) -> Finding {
         let items = recycle::items(bin);
         chosen.extend(recycle::select(
             items,
-            Duration::from_secs(days * DAY),
+            days_ago(days),
             opts.protected,
             opts.now,
             &mut f.kept,
