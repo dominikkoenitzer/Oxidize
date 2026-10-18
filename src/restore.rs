@@ -347,6 +347,110 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_goes_back_only_where_it_came_from() {
+        let root = Path::new(r"C:\B\backups\2026-10-18 Example");
+        let origin = |from: &str| origin_of(root, Path::new(from));
+        assert_eq!(
+            origin(r"C:\B\backups\2026-10-18 Example\files\C\ProgramData\Foo"),
+            Some(r"C:\ProgramData\Foo".into())
+        );
+        assert_eq!(
+            origin(r"c:\b\BACKUPS\2026-10-18 example\files\D\Games\Foo\a.ini"),
+            Some(r"D:\Games\Foo\a.ini".into())
+        );
+        assert_eq!(
+            origin(r"C:\B\backups\2026-10-18 Example\files\server\share\Foo"),
+            Some(r"\\server\share\Foo".into())
+        );
+        for outside in [
+            r"C:\B\backups\2026-10-18 Example\registry\x.reg",
+            r"C:\B\backups\2026-10-18 Example\files",
+            r"C:\B\backups\2026-10-18 Example\filesX\C\Foo",
+            r"C:\Elsewhere\files\C\Foo",
+        ] {
+            assert_eq!(origin(outside), None, "{outside}");
+        }
+    }
+
+    #[test]
+    fn an_entry_that_points_outside_its_backup_is_refused() {
+        let root = fixture("outside");
+        let file = root.join("settings.ini");
+        fs::write(&file, "x=1").unwrap();
+        let mut session = BackupSession::new("Oxidize Outside Test").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+
+        // Entries a hand-edited manifest could hold: a copy taken from
+        // anywhere, put back anywhere, or a registry file from elsewhere.
+        let stranger = root.join("stranger.txt");
+        fs::write(&stranger, "not the backup's").unwrap();
+        let elsewhere = root.join("moved here.txt");
+        let own_copy = session.root().join("files").join("C").join("other.txt");
+        fs::create_dir_all(own_copy.parent().unwrap()).unwrap();
+        fs::write(&own_copy, "copy").unwrap();
+        let climbing = session
+            .root()
+            .join("files")
+            .join("..")
+            .join("..")
+            .join("stranger.txt");
+        let forged = [
+            Undo::MoveBack {
+                from: stranger.clone(),
+                to: elsewhere.clone(),
+            },
+            Undo::MoveBack {
+                from: own_copy.clone(),
+                to: elsewhere.clone(),
+            },
+            Undo::MoveBack {
+                from: climbing,
+                to: elsewhere.clone(),
+            },
+            Undo::RegImport {
+                file: root.join("anything.reg"),
+            },
+            Undo::TaskImport {
+                name: r"\Example".into(),
+                file: root.join("anything.xml"),
+            },
+        ];
+        let mut manifest = backup::read_manifest(session.root()).unwrap();
+        for undo in forged {
+            manifest.entries.insert(
+                0,
+                backup::ManifestEntry {
+                    kind: LeftoverKind::File,
+                    path: "forged".into(),
+                    undo,
+                },
+            );
+        }
+        fs::write(
+            session.root().join(backup::MANIFEST),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        for dry_run in [true, false] {
+            let items = restore(&listed(&session), dry_run).unwrap();
+            let refused: Vec<_> = items.iter().filter(|i| i.path == "forged").collect();
+            assert_eq!(refused.len(), 5);
+            for item in refused {
+                let err = item.result.as_ref().unwrap_err();
+                assert!(err.starts_with("refused:"), "{err}");
+            }
+        }
+        // The real entry came home; nothing else moved.
+        assert_eq!(fs::read_to_string(&file).unwrap(), "x=1");
+        assert_eq!(fs::read_to_string(&stranger).unwrap(), "not the backup's");
+        assert!(own_copy.exists());
+        assert!(!elsewhere.exists());
+        assert!(listed(&session).restored.is_none());
+        cleanup(&session, &root);
+    }
+
+    #[test]
     fn a_partial_restore_stays_unmarked() {
         let root = fixture("partial");
         let (a, b) = (root.join("a.txt"), root.join("b.txt"));
