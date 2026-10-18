@@ -280,6 +280,42 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_that_records_a_whole_drive_owns_nothing_on_it() {
+        let pf = crate::scanner::env_dir("ProgramFiles").unwrap();
+        let exe = pf.join("Example Real").join("real.exe");
+        let query = exe.to_string_lossy().to_string();
+        for broken in [
+            format!("{}\\", pf.display()),
+            format!("\"{}\"", pf.display()),
+            r"C:\".to_string(),
+            "C:".to_string(),
+            "Example Real".to_string(),
+        ] {
+            let mut real = program("Example Real", None);
+            real.display_icon = Some(format!("{query},0"));
+            let programs = vec![program("Broken Entry", Some(&broken)), real];
+            let matches = hunt(&query, &programs);
+            assert_eq!(matches[0].program.display_name, "Example Real", "{broken}");
+            assert!(
+                matches
+                    .iter()
+                    .all(|m| m.program.display_name != "Broken Entry"),
+                "{broken}"
+            );
+        }
+        // Two folders that both hold it: the deeper one is the closer owner.
+        let suite = pf.join("Example Suite");
+        let tool = suite.join("Tool");
+        let programs = vec![
+            program("Example Suite", Some(&suite.to_string_lossy())),
+            program("Example Tool", Some(&format!("\"{}\\\"", tool.display()))),
+        ];
+        let matches = hunt(&tool.join("tool.exe").to_string_lossy(), &programs);
+        assert_eq!(matches[0].program.display_name, "Example Tool");
+        assert!(matches[0].score > matches[1].score);
+    }
+
+    #[test]
     fn a_query_that_belongs_to_nothing_matches_nothing() {
         let programs = vec![program(
             "Vendor Player",
