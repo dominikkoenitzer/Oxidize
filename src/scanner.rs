@@ -1441,8 +1441,14 @@ fn is_protected_path_in(p: &Path, roots: &[PathBuf]) -> bool {
 /// Is `p` inside Downloads or a desktop, where the folders are the user's
 /// own? A removal that empties one of them leaves it standing.
 pub fn in_user_files(p: &Path) -> bool {
+    within_any(p, system::user_file_folders())
+}
+
+/// Is `p` one of `folders` or inside one, both read the way Windows reads
+/// them?
+pub fn within_any(p: &Path, folders: &[PathBuf]) -> bool {
     let s = resolve_for_guard(p);
-    system::user_file_folders()
+    folders
         .iter()
         .flat_map(|f| root_forms(f))
         .any(|g| g.len() > 3 && (s == g || s.starts_with(&format!("{g}\\"))))
