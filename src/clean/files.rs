@@ -574,6 +574,41 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_folder_swapped_for_a_junction_after_the_walk_leads_nowhere() {
+        let root = fixture("swapped");
+        let elsewhere = fixture("swapped_target");
+        file_aged(&root.join(r"sub\old.tmp"), 10, 40);
+        file_aged(&elsewhere.join("old.tmp"), 10, 40);
+        fs::create_dir_all(elsewhere.join("empty")).unwrap();
+        fs::create_dir_all(root.join(r"sub\empty")).unwrap();
+        let w = walk(&root, &week(), &Protected::default(), SystemTime::now());
+        assert_eq!(w.files(), 1);
+
+        // Between the analysis and the cleaning, `sub` becomes a junction
+        // to a folder that holds a file of the same name.
+        fs::remove_dir_all(root.join("sub")).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(root.join("sub"))
+            .arg(&elsewhere)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let done = delete(
+            &w.candidates,
+            &week(),
+            &Protected::default(),
+            SystemTime::now(),
+        );
+        assert_eq!(done.files, 0);
+        assert!(elsewhere.join("old.tmp").exists());
+        assert!(elsewhere.join("empty").exists());
+        let _ = fs::remove_dir(root.join("sub"));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
     fn a_read_only_file_is_deleted_too() {
         let root = fixture("readonly");
         let path = root.join("ro.tmp");
