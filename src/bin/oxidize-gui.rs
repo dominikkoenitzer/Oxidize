@@ -3553,6 +3553,27 @@ mod tests {
         assert_eq!(app.undo_backup(), None);
     }
 
+    #[test]
+    fn the_status_line_keeps_the_last_result_while_the_list_reloads() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.status = LOADING.to_string();
+        app.jobs = 1;
+        app.tx.send(Msg::Programs(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        // The count stands beside the search field, not here as well.
+        assert_eq!(app.status, "");
+
+        app.status = "Uninstaller finished. The program is still registered.".to_string();
+        app.jobs = 1;
+        app.tx.send(Msg::Programs(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(
+            app.status,
+            "Uninstaller finished. The program is still registered."
+        );
+    }
+
     fn example_program() -> Program {
         Program {
             registry_key: "example-player".to_string(),
