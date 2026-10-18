@@ -80,7 +80,9 @@ impl Protected {
 
     /// Is `path` protected, or inside something protected?
     pub fn covers(&self, path: &Path) -> bool {
-        self.covers_key(&key_of(path))
+        // Nothing listed covers nothing, and asking Windows for the real
+        // name of every file costs more than the delete.
+        !self.keys.is_empty() && self.covers_key(&key_of(path))
     }
 
     /// `covers` for a path already turned into a key, so a walk through
