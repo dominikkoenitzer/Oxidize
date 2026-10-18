@@ -3773,6 +3773,19 @@ mod tests {
     }
 
     #[test]
+    fn a_file_on_a_drive_that_is_not_there_is_not_missing() {
+        let Some(letter) = ('M'..='Z').find(|l| !Path::new(&format!("{l}:\\")).exists()) else {
+            return;
+        };
+        let t = name_target("Quillmark", Some("Example Studio"));
+        let away = PathBuf::from(format!(r"{letter}:\Apps\Quillmark\quillmark.exe"));
+        assert!(!exe_missing(&away));
+        assert!(match_exe_item("Helper", Some(&away), &t).is_none());
+        let gone = std::env::temp_dir().join(r"Quillmark\quillmark.exe");
+        assert!(exe_missing(&gone));
+    }
+
+    #[test]
     fn one_vendor_name_starts_another_only_at_a_word() {
         assert!(same_vendor(
             "Example Studio",
