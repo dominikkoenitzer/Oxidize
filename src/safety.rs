@@ -487,9 +487,14 @@ pub fn remove_leftovers_into(
 /// the user made. An installer that was the only file in Downloads leaves
 /// Downloads standing.
 fn may_remove_emptied(parent: &Path) -> bool {
+    may_remove_emptied_beside(parent, system::user_file_folders())
+}
+
+/// [`may_remove_emptied`] with the user's own folders given.
+fn may_remove_emptied_beside(parent: &Path, user_files: &[PathBuf]) -> bool {
     !scanner::is_protected_path(parent)
         && !scanner::path_within_shared_dir(parent)
-        && !scanner::in_user_files(parent)
+        && !scanner::within_any(parent, user_files)
         && scanner::is_dir_empty(parent)
 }
 
@@ -712,6 +717,22 @@ mod tests {
         assert_eq!(outcome.emptied_parents, std::slice::from_ref(&vendor));
         assert!(!vendor.exists());
         assert!(busy.join("other product.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn a_folder_the_user_made_in_downloads_stays_when_emptied() {
+        // A stand-in for Downloads, holding the folder an installer was in.
+        let base = std::env::temp_dir().join("oxidize_user_files_guard_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let downloads = base.join("Downloads");
+        let installers = downloads.join("Installers");
+        std::fs::create_dir_all(&installers).unwrap();
+        let user_files = [downloads.clone()];
+        assert!(!may_remove_emptied_beside(&installers, &user_files));
+        assert!(!may_remove_emptied_beside(&downloads, &user_files));
+        // The same empty folder anywhere else is a vendor's and goes.
+        assert!(may_remove_emptied_beside(&installers, &[]));
         let _ = std::fs::remove_dir_all(&base);
     }
 
