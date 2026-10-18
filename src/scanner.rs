@@ -3744,6 +3744,35 @@ mod tests {
     }
 
     #[test]
+    fn an_install_folder_without_a_drive_and_root_is_no_install_folder() {
+        for recorded in [
+            r"C:\",
+            "C:",
+            r"C:/",
+            "Quillmark",
+            r".\Quillmark",
+            r"..\x",
+            r#""C:\""#,
+        ] {
+            let mut p = player();
+            p.install_location = Some(recorded.to_string());
+            let t = build_target_with(&p, &Snapshot::with_programs(vec![p.clone()]));
+            assert!(
+                t.install_location.is_none(),
+                "{recorded}: {:?}",
+                t.install_location
+            );
+        }
+        let mut p = player();
+        p.install_location = Some(r#""D:\Games\Example Player\""#.to_string());
+        let t = build_target_with(&p, &Snapshot::with_programs(vec![p.clone()]));
+        assert_eq!(
+            t.install_location.as_deref(),
+            Some(Path::new(r"D:\Games\Example Player"))
+        );
+    }
+
+    #[test]
     fn a_shared_root_or_a_generic_name_vouches_for_nothing() {
         // Recorded as Program Files itself: protected, so not recorded at all.
         let mut at_root = player();
