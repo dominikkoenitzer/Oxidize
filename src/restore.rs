@@ -38,8 +38,32 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
     // as something still waiting in it. A partial restore stays unmarked.
     if !dry_run && out.iter().all(|i| i.result.is_ok()) {
         let _ = backup::mark_restored(&info.path);
+        // What went home leaves the folders it sat in behind, empty.
+        prune_empty_dirs(&info.path.join("files"));
     }
     Ok(out)
+}
+
+/// Remove `dir` and the folders below it that hold nothing, deepest first.
+/// A folder with anything in it stays, and links are never followed.
+fn prune_empty_dirs(dir: &Path) {
+    let Ok(meta) = fs::symlink_metadata(dir) else {
+        return;
+    };
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return;
+    }
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_type()
+                .is_ok_and(|t| t.is_dir() && !t.is_symlink())
+            {
+                prune_empty_dirs(&entry.path());
+            }
+        }
+    }
+    let _ = fs::remove_dir(dir);
 }
 
 /// An entry may only take its copy out of this backup and only put it back
