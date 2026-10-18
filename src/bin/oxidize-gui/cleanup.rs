@@ -920,6 +920,19 @@ mod tests {
     }
 
     #[test]
+    fn the_protected_list_stays_as_it_is_while_work_runs() {
+        let mut state = tab();
+        state.busy = true;
+        state.new_protected = r"C:\Example Keep".to_string();
+        // Refused before anything is written to the user's list.
+        state.add_protected();
+        assert!(state.protected.is_empty());
+        state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
+        state.remove_protected(r"C:\Example Keep");
+        assert_eq!(state.protected.entries(), [r"C:\Example Keep"]);
+    }
+
+    #[test]
     fn a_line_that_stands_alone_starts_with_a_capital() {
         assert_eq!(sentence("stays: 2 changed"), "Stays: 2 changed");
         assert_eq!(sentence(""), "");
