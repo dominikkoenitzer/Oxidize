@@ -947,6 +947,29 @@ mod tests {
     }
 
     #[test]
+    fn a_cleaning_that_was_undone_frees_nothing_and_offers_no_undo() {
+        let mut state = tab();
+        let cleaned = |category, backup: Option<&str>| Cleaned {
+            category,
+            freed: 4096,
+            removed: 2,
+            kept: Vec::new(),
+            backup: backup.map(str::to_string),
+            notes: Vec::new(),
+        };
+        state.results = Some(vec![
+            cleaned(Category::Temp, None),
+            cleaned(Category::Orphans, Some("2026-10-18 Oxidize clean")),
+        ]);
+        state.restored("2026-10-18 Oxidize clean");
+        let results = state.results.as_ref().unwrap();
+        assert_eq!((results[0].freed, results[0].removed), (4096, 2));
+        assert_eq!((results[1].freed, results[1].removed), (0, 0));
+        assert!(results[1].backup.is_none());
+        assert_eq!(results[1].notes, ["put back from the backup"]);
+    }
+
+    #[test]
     fn a_line_that_stands_alone_starts_with_a_capital() {
         assert_eq!(sentence("stays: 2 changed"), "Stays: 2 changed");
         assert_eq!(sentence(""), "");
