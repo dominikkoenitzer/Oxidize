@@ -115,3 +115,22 @@ impl Remove for Remover {
         safety::remove_leftovers(items, label, &ctx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_uninstaller_is_waited_for_as_long_as_the_plan_says() {
+        let plan = UninstallPlan {
+            argv: vec![system::system32("cmd.exe"), "/c".into(), "exit 0".into()],
+            is_msi: false,
+            source: "test".into(),
+            unattended: true,
+        };
+        let said = Remover.uninstall(&plan).unwrap();
+        assert!(!said.contains("still running"), "{said}");
+        // `plan_removal` tells the user Oxidize waits up to two minutes.
+        assert_eq!(UNINSTALL_WAIT, Duration::from_secs(120));
+    }
+}
