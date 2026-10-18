@@ -1128,31 +1128,37 @@ fn is_publisher_exactly(name: &str, target: &ScanTarget) -> bool {
     bare.len() >= 4 && bare == without_company_form(publisher)
 }
 
+/// Company forms that say nothing about who the company is.
+const COMPANY_FORMS: &[&str] = &[
+    "inc",
+    "llc",
+    "ltd",
+    "corp",
+    "corporation",
+    "company",
+    "co",
+    "limited",
+    "gmbh",
+    "ag",
+    "srl",
+    "sas",
+    "sa",
+    "bv",
+    "incorporated",
+    "plc",
+    "pty",
+];
+
 /// A name in lower case without spaces or punctuation and without its
 /// company form.
 fn without_company_form(name: &str) -> String {
-    const FORMS: &[&str] = &[
-        "inc",
-        "llc",
-        "ltd",
-        "corp",
-        "corporation",
-        "company",
-        "co",
-        "limited",
-        "gmbh",
-        "ag",
-        "srl",
-        "sas",
-        "sa",
-        "bv",
-        "incorporated",
-        "plc",
-        "pty",
-    ];
+    company_words(name).concat()
+}
+
+fn company_words(name: &str) -> Vec<String> {
     name.split(|c: char| !c.is_alphanumeric())
         .map(str::to_lowercase)
-        .filter(|w| !w.is_empty() && !FORMS.contains(&w.as_str()))
+        .filter(|w| !w.is_empty() && !COMPANY_FORMS.contains(&w.as_str()))
         .collect()
 }
 
@@ -1183,10 +1189,15 @@ fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
 
 /// Two publisher names for one vendor: the same words, or one the start of
 /// the other once the company form is gone ("Example Studio" and "Example
-/// Studio Games Pty Ltd").
+/// Studio Games Pty Ltd"). The start has to end where a word does: "Quill"
+/// is not the start of "Quillmark Systems".
 fn same_vendor(a: &str, b: &str) -> bool {
-    let (a, b) = (without_company_form(a), without_company_form(b));
-    !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
+    let (a, b) = (company_words(a), company_words(b));
+    let leads = |short: &[String], long: &[String]| {
+        let short = short.concat();
+        (1..=long.len()).any(|k| long[..k].concat() == short)
+    };
+    !a.is_empty() && !b.is_empty() && (leads(&a, &b) || leads(&b, &a))
 }
 
 fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
