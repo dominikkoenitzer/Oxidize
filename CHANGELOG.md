@@ -11,7 +11,9 @@
 - A registry path with an empty part, or a key every program shares, is
   never deleted.
 - `oxidize mcp` refuses `--dry-run`, `--yes` and `--no-backup` instead of
-  ignoring them.
+  ignoring them, and waits for an uninstaller two minutes, as its plan says.
+- A restore dry run refuses a copy whose place is taken, as the real run
+  does.
 - A file named like the program's but elsewhere, or anything in a recorded
   install folder whose name says nothing about the program, counts at
   Medium only. An install folder must name a drive and a root.
@@ -24,7 +26,10 @@
   reads a protected list saved with a byte order mark.
 - The window runs one thing at a time, waits for running work before it
   closes, reports a removal as it ran, keeps the last result in the status
-  line, and keeps a removal's Undo when another backup is restored.
+  line, and keeps a removal's Undo when another backup is restored. Clean up
+  says Cleaning while it cleans and what it freed afterwards, shows an undone
+  cleaning as freeing nothing, and offers no cleaning with every folder
+  unticked.
 
 ## 0.2.7, 2026-10-17
 
