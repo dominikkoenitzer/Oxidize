@@ -3523,6 +3523,26 @@ mod tests {
         assert!(!app.busy());
     }
 
+    #[test]
+    fn undoing_one_backup_leaves_the_undo_of_another() {
+        let program = example_program();
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+        app.on_completed(program.clone(), finished(Some("example-player-1")), false);
+        assert_eq!(app.undo_backup(), Some("example-player-1"));
+
+        // The Clean up tab's backup is restored.
+        let restored = Ok(vec![RestoreItem {
+            path: "a folder".to_string(),
+            result: Ok(()),
+        }]);
+        app.on_restored("Oxidize clean", restored.clone());
+        assert_eq!(app.undo_backup(), Some("example-player-1"));
+
+        app.on_restored("example-player-1", restored);
+        assert_eq!(app.undo_backup(), None);
+    }
+
     fn example_program() -> Program {
         Program {
             registry_key: "example-player".to_string(),
