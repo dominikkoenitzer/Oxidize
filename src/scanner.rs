@@ -5,6 +5,7 @@
 //! sibling products, so the scanner descends into it and never flags it
 //! wholesale. Denylists keep the OS and shared locations out entirely.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
@@ -1373,47 +1374,99 @@ fn is_protected_path_in(p: &Path, roots: &[PathBuf]) -> bool {
     if s.len() <= 3 {
         return true;
     }
-    {
-        let windir = env_dir("windir").unwrap_or_else(system::windows_dir);
-        let w = windir.to_string_lossy().to_lowercase();
-        let w = w.trim_end_matches('\\');
-        if s == w || s.starts_with(&format!("{w}\\")) {
-            return true;
-        }
+    let guards = guard_paths();
+    let inside = |g: &str| s == g || s.starts_with(&format!("{g}\\"));
+    if guards.trees.iter().any(|g| inside(g)) {
+        return true;
     }
-    // Oxidize's own folder holds the backups every undo depends on and the
-    // protected list; no product's name, however close, may reach into it.
-    if let Some(own) = env_dir("LOCALAPPDATA").map(|p| p.join("Oxidize")) {
-        let o = own.to_string_lossy().to_lowercase();
-        let o = o.trim_end_matches('\\');
-        if s == o || s.starts_with(&format!("{o}\\")) {
-            return true;
-        }
+    if guards.exact.iter().any(|g| s == g) {
+        return true;
     }
-    for root in roots {
-        if s == root.to_string_lossy().to_lowercase().trim_end_matches('\\') {
-            return true;
-        }
+    roots
+        .iter()
+        .any(|root| root_forms(root).iter().any(|g| s == g))
+}
+
+/// [`guard_forms`] of a scan root, worked out once per root: a scan asks
+/// about hundreds of folders against the same dozen roots.
+fn root_forms(root: &Path) -> Vec<String> {
+    static SEEN: OnceLock<std::sync::Mutex<HashMap<PathBuf, Vec<String>>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Some(forms) = seen.lock().ok().and_then(|m| m.get(root).cloned()) {
+        return forms;
     }
-    let guards = [
-        env_dir("USERPROFILE"),
-        env_dir("PUBLIC"),
-        env_dir("USERPROFILE").and_then(|p| p.parent().map(Path::to_path_buf)),
-        env_dir("USERPROFILE").map(|p| p.join("Documents")),
-        // Every Store app keeps its data one level below this folder; the
-        // empty-parent cleanup after a data-folder leftover must stop here.
-        env_dir("LOCALAPPDATA").map(|p| p.join("Packages")),
-    ];
-    for guard in guards.into_iter().flatten() {
-        if s == guard
-            .to_string_lossy()
-            .to_lowercase()
-            .trim_end_matches('\\')
-        {
-            return true;
-        }
+    let forms = guard_forms(root);
+    if let Ok(mut m) = seen.lock() {
+        m.insert(root.to_path_buf(), forms.clone());
     }
-    false
+    forms
+}
+
+/// What [`is_protected_path`] compares against, in both the written and the
+/// resolved form. A guard read only as written misses a profile or AppData
+/// that a junction moved to another drive, since the path checked is
+/// resolved.
+struct Guards {
+    /// Nothing in or below these: the Windows folder and Oxidize's own.
+    trees: Vec<String>,
+    /// These folders themselves: the profile, the folders Windows keeps for
+    /// the user and the machine, and the one holding every Store app's data.
+    exact: Vec<String>,
+}
+
+fn guard_paths() -> &'static Guards {
+    static GUARDS: OnceLock<Guards> = OnceLock::new();
+    GUARDS.get_or_init(|| {
+        let forms = |paths: Vec<Option<PathBuf>>| -> Vec<String> {
+            let mut out: Vec<String> = Vec::new();
+            for g in paths.into_iter().flatten().flat_map(|p| guard_forms(&p)) {
+                if g.len() > 3 && !out.contains(&g) {
+                    out.push(g);
+                }
+            }
+            out
+        };
+        // Oxidize's own folder holds the backups every undo depends on and
+        // the protected list; no product's name, however close, may reach
+        // into it.
+        let trees = forms(vec![
+            Some(env_dir("windir").unwrap_or_else(system::windows_dir)),
+            Some(system::windows_dir()),
+            env_dir("LOCALAPPDATA").map(|p| p.join("Oxidize")),
+        ]);
+        let mut exact = vec![
+            env_dir("USERPROFILE"),
+            env_dir("PUBLIC"),
+            env_dir("USERPROFILE").and_then(|p| p.parent().map(Path::to_path_buf)),
+            env_dir("USERPROFILE").map(|p| p.join("Documents")),
+            env_dir("USERPROFILE").map(|p| p.join("Downloads")),
+            env_dir("APPDATA").and_then(|p| p.parent().map(Path::to_path_buf)),
+            env_dir("LOCALAPPDATA").and_then(|p| p.parent().map(|a| a.join("LocalLow"))),
+            env_dir("TEMP"),
+            env_dir("TMP"),
+            // Every Store app keeps its data one level below this folder;
+            // the empty-parent cleanup after a data-folder leftover must
+            // stop here.
+            env_dir("LOCALAPPDATA").map(|p| p.join("Packages")),
+        ];
+        exact.extend(system::known_folders().iter().cloned().map(Some));
+        Guards {
+            trees,
+            exact: forms(exact),
+        }
+    })
+}
+
+/// A guard as written and as resolved, each normalised like the path it is
+/// compared with.
+fn guard_forms(p: &Path) -> Vec<String> {
+    let written = norm_path_key(p);
+    let resolved = resolve_for_guard(p);
+    if written == resolved {
+        vec![written]
+    } else {
+        vec![written, resolved]
+    }
 }
 
 pub fn is_dir_empty(p: &Path) -> bool {
@@ -3064,6 +3117,61 @@ mod tests {
         assert!(!is_protected_path(Path::new(
             r"C:\Program Files\Some Vendor\Some App"
         )));
+    }
+
+    #[test]
+    fn the_folders_windows_keeps_for_the_user_are_never_deletable() {
+        let known = system::known_folders();
+        // Windows answers for these on every machine.
+        assert!(known.len() >= 20, "{known:?}");
+        for folder in known {
+            assert!(is_protected_path(folder), "{}", folder.display());
+            // A folder inside one is not the folder itself, except in the
+            // Windows folder, where nothing is.
+            assert_eq!(
+                is_protected_path(&folder.join("Example Vendor Leftover")),
+                system::in_windows_dir(folder),
+                "{}",
+                folder.display()
+            );
+        }
+        let profile = env_dir("USERPROFILE").unwrap();
+        for name in ["Downloads", "Saved Games", "Music", "Pictures", "Videos"] {
+            assert!(is_protected_path(&profile.join(name)), "{name}");
+        }
+        let local = env_dir("LOCALAPPDATA").unwrap();
+        assert!(is_protected_path(&local.parent().unwrap().join("LocalLow")));
+        assert!(is_protected_path(local.parent().unwrap()));
+        assert!(is_protected_path(&std::env::temp_dir()));
+    }
+
+    #[test]
+    fn a_root_behind_a_junction_is_protected_where_it_really_is() {
+        let base = std::env::temp_dir().join("oxidize_guard_junction_test");
+        let _ = fs::remove_dir_all(&base);
+        let real = base.join("real root");
+        fs::create_dir_all(real.join("Vendor")).unwrap();
+        let link = base.join("linked root");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        // The root is known by its junction, and asked about by its real
+        // name, by the junction, and written with forward slashes.
+        let roots = [link.clone()];
+        assert!(is_protected_path_in(&real, &roots));
+        assert!(is_protected_path_in(&link, &roots));
+        let slashed = PathBuf::from(link.to_string_lossy().replace('\\', "/"));
+        assert!(is_protected_path_in(&slashed, &roots));
+        assert!(is_protected_path_in(&real, &[slashed]));
+        // What is inside it is still only a folder.
+        assert!(!is_protected_path_in(&real.join("Vendor"), &roots));
+        assert!(!is_protected_path_in(&link.join("Vendor"), &roots));
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
