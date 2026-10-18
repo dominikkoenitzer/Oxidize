@@ -3476,6 +3476,23 @@ mod tests {
         assert_eq!(app.jobs, 0);
     }
 
+    #[test]
+    fn the_window_waits_for_running_work_before_it_closes() {
+        let mut app = app();
+        assert_eq!(app.close_step(false), None);
+        app.jobs = 1;
+        assert_eq!(
+            app.close_step(true),
+            Some(egui::ViewportCommand::CancelClose)
+        );
+        assert_eq!(app.close_step(false), None);
+        app.job_done();
+        assert_eq!(app.close_step(false), Some(egui::ViewportCommand::Close));
+        // Nothing running: closing is closing.
+        let mut idle = OxidizeApp::blank();
+        assert_eq!(idle.close_step(true), None);
+    }
+
     fn example_program() -> Program {
         Program {
             registry_key: "example-player".to_string(),
