@@ -439,6 +439,39 @@ fn a_running_browser_keeps_its_cache_and_says_why() {
 }
 
 #[test]
+fn a_browser_started_after_the_analysis_keeps_its_cache() {
+    let pc = Pc::new("browser_started");
+    pc.fill();
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BrowserCache).unwrap();
+    assert_eq!((f.count, f.bytes), (1, 800));
+    let choice = a.choice(&[Category::BrowserCache], Confidence::High);
+
+    // The user starts the browser before clicking Clean.
+    *tools.running.lock().unwrap() = vec![PathBuf::from(
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    )];
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let c = &done[0];
+    assert_eq!((c.removed, c.freed), (0, 0));
+    assert_eq!(
+        kept(&c.kept, &KeptReason::Running("Chrome".into())),
+        (1, 800)
+    );
+    let cache = pc
+        .local()
+        .join(r"Google\Chrome\User Data\Default\Cache\Cache_Data\f_000001");
+    assert!(cache.exists());
+
+    // Closed again, the same analysis cleans it.
+    tools.running.lock().unwrap().clear();
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (1, 800));
+    assert!(!cache.exists());
+}
+
+#[test]
 fn the_recycle_bin_goes_only_when_chosen_and_only_old_items() {
     let pc = Pc::new("bin_category");
     pc.fill();
