@@ -1264,9 +1264,10 @@ fn locate_exe(exe: &Path) -> PathBuf {
 /// Is the file a reference points to gone? Only a full path can say so. A
 /// bare name that nothing answers to, or a path relative to a folder nobody
 /// knows, is unknown, and resolving it against our own current folder would
-/// call nearly every one of them missing.
+/// call nearly every one of them missing. A file on a drive that is not
+/// plugged in is not gone either; it comes back with the drive.
 fn exe_missing(exe: &Path) -> bool {
-    exe.is_absolute() && !exe.exists()
+    exe.is_absolute() && !exe.exists() && system::volume_available(exe)
 }
 
 /// A path whose components name the product, for dangling references. Below
@@ -2204,7 +2205,10 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
                     Confidence::Medium,
                     "inside the recorded install folder",
                 ));
-            } else if !dir.exists() && path_names_product(&dir, target) {
+            } else if !dir.exists()
+                && system::volume_available(&dir)
+                && path_names_product(&dir, target)
+            {
                 out.push(Leftover::path_entry(
                     hive,
                     entry,
