@@ -143,7 +143,7 @@ Each removal makes one folder: `%LOCALAPPDATA%\Oxidize\backups\<YYYY-MM-DD HHMMS
 
 ## As an MCP server
 
-`oxidize mcp` serves the same engine over MCP on stdin and stdout, for an assistant on the user's PC, and runs only while the client has it open. In the client's MCP settings, `command` is the full path to `oxidize.exe` and `args` is `["mcp"]`:
+`oxidize mcp` serves the same engine over MCP on stdin and stdout, for an assistant on the user's PC, and runs only while the client has it open. It refuses `--dry-run`, `--yes` and `--no-backup`, since `plan_removal` is the preview and every applied plan is backed up. In the client's MCP settings, `command` is the full path to `oxidize.exe` and `args` is `["mcp"]`:
 
 ```json
 {

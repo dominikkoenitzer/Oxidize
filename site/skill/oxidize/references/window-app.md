@@ -11,6 +11,7 @@ You cannot drive the window from a terminal. Tell the user what to click, one st
 - The table of installed programs: name, publisher, size, install date and source. Clicking a header sorts by it, clicking it again reverses the order. The arrow keys and Page Up/Down move the selection, also while the cursor is in Search.
 - Right: the selected program's name, version and publisher, the buttons Remove completely, Run uninstaller and Scan for leftovers, its size, install date, scope, registry location and install folder, and below them the result.
 - Bottom: a status line, and a Log button that opens the log of what was closed, removed, already gone or failed.
+- While something runs (a spinner beside the status line), the buttons, Refresh, the Options menu and the protected folders wait until it is done. Closing the window then waits too, and it closes by itself once the work is finished.
 - Beside the name in the top bar, Programs and Clean up switch between the program list and the cleanup.
 
 ## Remove a program completely
