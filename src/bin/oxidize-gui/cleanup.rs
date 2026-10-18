@@ -1041,6 +1041,23 @@ mod tests {
     }
 
     #[test]
+    fn folders_of_removed_programs_with_none_ticked_are_not_chosen() {
+        let mut c = tab();
+        c.take_analysis(Places::default(), analysis());
+        assert_eq!(c.choice().categories, [Category::Orphans]);
+        let ticked = c.folders.clone();
+        for path in &ticked {
+            c.set_folder(path, false);
+        }
+        // Nothing to clean, so no "Clean 0 B" and no question about it.
+        assert!(c.choice().categories.is_empty());
+        assert!(
+            c.ticked.contains(&Category::Orphans),
+            "the tick itself stays"
+        );
+    }
+
+    #[test]
     fn the_question_says_what_cannot_be_undone() {
         let a = analysis();
         let mut choice = a.choice(&[Category::Orphans], Confidence::High);
