@@ -47,6 +47,115 @@ pub fn path_under(p: &Path, dir: &Path) -> bool {
     !d.is_empty() && (p == d || p.starts_with(&format!("{d}\\")))
 }
 
+/// The folders Windows keeps for the user and the machine (Downloads, Saved
+/// Games, the cloud folder, the Start menu, Program Files and the rest), where
+/// Windows says they are. A redirected Documents or a Desktop moved to a cloud
+/// folder is found where it really is, which the profile path plus a name
+/// would miss. Read once per process.
+pub fn known_folders() -> &'static [PathBuf] {
+    static FOLDERS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    FOLDERS.get_or_init(|| read_known_folders(KnownSet::All))
+}
+
+/// The folders whose contents the user arranges by hand: Downloads and the
+/// desktops. A folder in there that a removal leaves empty is the user's.
+pub fn user_file_folders() -> &'static [PathBuf] {
+    static FOLDERS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    FOLDERS.get_or_init(|| read_known_folders(KnownSet::UserFiles))
+}
+
+#[derive(Clone, Copy)]
+enum KnownSet {
+    All,
+    UserFiles,
+}
+
+#[cfg(windows)]
+fn read_known_folders(set: KnownSet) -> Vec<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::*;
+
+    let user_files = [
+        FOLDERID_Desktop,
+        FOLDERID_Downloads,
+        FOLDERID_PublicDesktop,
+        FOLDERID_PublicDownloads,
+    ];
+    let others = [
+        FOLDERID_Profile,
+        FOLDERID_Documents,
+        FOLDERID_Music,
+        FOLDERID_Pictures,
+        FOLDERID_Videos,
+        FOLDERID_SavedGames,
+        FOLDERID_Contacts,
+        FOLDERID_Favorites,
+        FOLDERID_Links,
+        FOLDERID_SavedSearches,
+        FOLDERID_Objects3D,
+        FOLDERID_SkyDrive,
+        FOLDERID_Screenshots,
+        FOLDERID_CameraRoll,
+        FOLDERID_SavedPictures,
+        FOLDERID_Templates,
+        FOLDERID_SendTo,
+        FOLDERID_Recent,
+        FOLDERID_RoamingAppData,
+        FOLDERID_LocalAppData,
+        FOLDERID_LocalAppDataLow,
+        FOLDERID_UserProgramFiles,
+        FOLDERID_StartMenu,
+        FOLDERID_Programs,
+        FOLDERID_Startup,
+        FOLDERID_Public,
+        FOLDERID_PublicDocuments,
+        FOLDERID_PublicMusic,
+        FOLDERID_PublicPictures,
+        FOLDERID_PublicVideos,
+        FOLDERID_CommonStartMenu,
+        FOLDERID_CommonPrograms,
+        FOLDERID_CommonStartup,
+        FOLDERID_ProgramData,
+        FOLDERID_ProgramFiles,
+        FOLDERID_ProgramFilesX86,
+        FOLDERID_ProgramFilesX64,
+        FOLDERID_ProgramFilesCommon,
+        FOLDERID_ProgramFilesCommonX86,
+        FOLDERID_ProgramFilesCommonX64,
+        FOLDERID_UserProfiles,
+        FOLDERID_Fonts,
+        FOLDERID_Windows,
+        FOLDERID_System,
+        FOLDERID_SystemX86,
+    ];
+    let ids: Vec<windows::core::GUID> = match set {
+        KnownSet::UserFiles => user_files.to_vec(),
+        KnownSet::All => user_files.iter().chain(others.iter()).copied().collect(),
+    };
+    let mut out: Vec<PathBuf> = Vec::new();
+    for id in ids {
+        // Never creates the folder; one that is not there yet still names
+        // the place it would be.
+        let Ok(raw) = (unsafe { SHGetKnownFolderPath(&id, KF_FLAG_DONT_VERIFY, None) }) else {
+            continue;
+        };
+        let text = unsafe { raw.to_string() };
+        unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
+        if let Ok(text) = text {
+            let path = PathBuf::from(text);
+            if !path.as_os_str().is_empty() && !out.contains(&path) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn read_known_folders(_set: KnownSet) -> Vec<PathBuf> {
+    Vec::new()
+}
+
 pub fn in_windows_dir(p: &Path) -> bool {
     path_under(p, &windir())
 }
