@@ -11,7 +11,9 @@
 - A registry path with an empty part, or a key every program shares, is
   never deleted.
 - `oxidize mcp` refuses `--dry-run`, `--yes` and `--no-backup` instead of
-  ignoring them, and waits for an uninstaller two minutes, as its plan says.
+  ignoring them. It waits for an uninstaller to finish, up to 30 minutes, and
+  says so when one still runs.
+- A restore imports a registry export only into the key it was taken from.
 - A restore dry run refuses a copy whose place is taken, as the real run
   does.
 - A file named like the program's but elsewhere, or anything in a recorded
