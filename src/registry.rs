@@ -303,3 +303,52 @@ pub fn value_exists(hive: Hive, subpath: &str, value_name: &str) -> bool {
         .map(|k| k.get_raw_value(value_name).is_ok())
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_shared_or_empty_key_is_never_deleted_whole() {
+        for key in [
+            "",
+            "SOFTWARE",
+            r"SOFTWARE\",
+            r"SOFTWARE\\Vendor",
+            r"SOFTWARE\Vendor\",
+            r"software\microsoft",
+            r"SOFTWARE\Classes",
+            r"SOFTWARE\WOW6432Node",
+            r"SYSTEM\CurrentControlSet\Services",
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+        ] {
+            assert!(is_shared_root_key(key), "{key:?}");
+        }
+        for key in [
+            r"SOFTWARE\Example Vendor",
+            r"SOFTWARE\Example Vendor\Example Product",
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Example",
+            r"SYSTEM\CurrentControlSet\Services\ExampleService",
+        ] {
+            assert!(!is_shared_root_key(key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_key_path_ending_in_a_separator_deletes_nothing() {
+        let test = format!(r"Software\OxidizeEmptyLeafTest{}", std::process::id());
+        let child = format!(r"{test}\Child");
+        let (key, _) = predef(Hive::CurrentUser).create_subkey(&child).unwrap();
+        key.set_value("kept", &"yes").unwrap();
+        drop(key);
+
+        // Windows would read the empty last part as "everything in here".
+        let err = delete_key_tree(Hive::CurrentUser, &format!(r"{test}\")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert!(delete_key_tree(Hive::CurrentUser, "").is_err());
+        assert!(!key_absent(Hive::CurrentUser, &child));
+
+        delete_key_tree(Hive::CurrentUser, &test).unwrap();
+        assert!(key_absent(Hive::CurrentUser, &test));
+    }
+}
