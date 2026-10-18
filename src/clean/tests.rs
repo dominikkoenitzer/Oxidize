@@ -642,3 +642,10 @@ fn what_could_not_be_read_is_counted_in_items() {
         Some("stays: 33 items could not be read")
     );
 }
+
+#[test]
+fn a_huge_number_of_days_keeps_everything_instead_of_wrapping_around() {
+    assert_eq!(days_ago(30), Duration::from_secs(30 * 86_400));
+    assert_eq!(days_ago(u64::MAX), Duration::from_secs(u64::MAX));
+    assert!(days_ago(u64::MAX / 1000) > days_ago(1_000_000));
+}
