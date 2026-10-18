@@ -344,6 +344,130 @@ mod tests {
         let _ = fs::remove_dir(base.parent().unwrap());
     }
 
+    /// Where the backup keeps its copy of `origin`.
+    fn copy_of(session: &BackupSession, origin: &Path) -> std::path::PathBuf {
+        let s = origin.to_string_lossy();
+        session
+            .root()
+            .join("files")
+            .join(&s[..1])
+            .join(s[2..].trim_matches('\\'))
+    }
+
+    /// Put an entry into the backup's manifest by hand, the way an edited
+    /// manifest would hold it.
+    fn add_entry(session: &BackupSession, undo: Undo) {
+        let mut manifest = backup::read_manifest(session.root()).unwrap_or_default();
+        manifest.entries.push(backup::ManifestEntry {
+            kind: LeftoverKind::File,
+            path: "planted".into(),
+            undo,
+        });
+        fs::write(
+            session.root().join(backup::MANIFEST),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+    }
+
+    fn planted_result(session: &BackupSession) -> String {
+        restore(&listed(session), false)
+            .unwrap()
+            .into_iter()
+            .find(|i| i.path == "planted")
+            .unwrap()
+            .result
+            .unwrap_err()
+    }
+
+    #[test]
+    fn a_copy_is_never_put_back_into_a_protected_folder() {
+        let root = fixture("protected_place");
+        let session = BackupSession::new("Oxidize Protected Place Test").unwrap();
+        // A copy laid out as if it came from the temp folder itself, which
+        // is one of the folders Windows keeps.
+        let temp = std::env::temp_dir();
+        let temp = Path::new(temp.to_str().unwrap().trim_end_matches('\\'));
+        let from = copy_of(&session, temp);
+        fs::create_dir_all(&from).unwrap();
+        add_entry(
+            &session,
+            Undo::MoveBack {
+                from: from.clone(),
+                to: temp.to_path_buf(),
+            },
+        );
+        let err = planted_result(&session);
+        assert!(
+            err.starts_with("refused:") && err.contains("protected"),
+            "{err}"
+        );
+        assert!(from.exists());
+        cleanup(&session, &root);
+    }
+
+    #[test]
+    fn a_junction_planted_in_the_backup_leads_nowhere() {
+        let root = fixture("planted_junction");
+        let outside = fixture("planted_target");
+        fs::write(outside.join("x.txt"), "not the backup's").unwrap();
+        let session = BackupSession::new("Oxidize Planted Junction Test").unwrap();
+        // `files\...\link` is a junction to a folder outside the backup; the
+        // entry names a file "inside" it and its proper origin.
+        let home = root.join("link");
+        let link = copy_of(&session, &home);
+        junction(&link, &outside);
+        add_entry(
+            &session,
+            Undo::MoveBack {
+                from: link.join("x.txt"),
+                to: home.join("x.txt"),
+            },
+        );
+        let err = planted_result(&session);
+        assert!(err.starts_with("refused:"), "{err}");
+        assert_eq!(
+            fs::read_to_string(outside.join("x.txt")).unwrap(),
+            "not the backup's"
+        );
+        assert!(!home.join("x.txt").exists());
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&outside);
+        cleanup(&session, &root);
+    }
+
+    #[test]
+    fn clearing_a_restored_backup_never_follows_a_link() {
+        let root = fixture("prune_link");
+        let outside = fixture("prune_link_target");
+        fs::create_dir_all(outside.join("keep")).unwrap();
+        let file = root.join("settings.ini");
+        fs::write(&file, "x=1").unwrap();
+        let mut session = BackupSession::new("Oxidize Prune Link Test").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        let link = session.root().join("files").join("link");
+        junction(&link, &outside);
+
+        let items = restore(&listed(&session), false).unwrap();
+        assert!(items.iter().all(|i| i.result.is_ok()));
+        // The empty folder behind the junction is not the backup's.
+        assert!(outside.join("keep").is_dir());
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&outside);
+        cleanup(&session, &root);
+    }
+
     #[test]
     fn a_complete_restore_lists_the_backup_as_restored() {
         let root = fixture("complete");
