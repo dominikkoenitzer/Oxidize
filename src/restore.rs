@@ -45,22 +45,18 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
 }
 
 /// Remove `dir` and the folders below it that hold nothing, deepest first.
-/// A folder with anything in it stays, and links are never followed.
+/// A folder with anything in it stays, and links are never followed: the
+/// type is read from the entry itself, never from what it points at, and a
+/// junction or a symbolic link is not a folder by that reading.
 fn prune_empty_dirs(dir: &Path) {
-    let Ok(meta) = fs::symlink_metadata(dir) else {
-        return;
-    };
-    if !meta.is_dir() || meta.file_type().is_symlink() {
+    if !fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir()) {
         return;
     }
+    // Each entry answers the same question first, so a file or a link
+    // inside is left as it is.
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if entry
-                .file_type()
-                .is_ok_and(|t| t.is_dir() && !t.is_symlink())
-            {
-                prune_empty_dirs(&entry.path());
-            }
+            prune_empty_dirs(&entry.path());
         }
     }
     let _ = fs::remove_dir(dir);
