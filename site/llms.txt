@@ -25,6 +25,6 @@ oxidize clean shows what temporary files, crash dumps, browser caches, the Recyc
 
 ## MCP server
 
-- `oxidize.exe mcp` is a local MCP server on stdin and stdout. Client config: `command` is the full path to oxidize.exe, `args` is `["mcp"]`.
+- `oxidize.exe mcp` is a local MCP server on stdin and stdout. Client config: `command` is the full path to oxidize.exe, `args` is `["mcp"]`. It refuses `--dry-run`, `--yes` and `--no-backup` (exit code 2, code `usage`).
 - `list_programs`, `scan_leftovers`, `find_orphans`, `trace`, `list_backups` and `plan_removal` only read. `plan_removal` lists each uninstaller, whether it runs, and every leftover that would go.
 - `apply_removal_plan` carries out one plan from `plan_removal` of the same session, only after the user agreed to it, exactly as shown and once: it closes running copies, runs the uninstallers the plan keeps, removes the listed leftovers with a backup of every item, and returns what a fresh scan still finds, the backup name and the `oxidize restore` command.
