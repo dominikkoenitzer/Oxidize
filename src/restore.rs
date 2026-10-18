@@ -399,6 +399,86 @@ mod tests {
             .unwrap_err()
     }
 
+    /// A `.reg` export as `reg export` writes it: UTF-16 with a byte order
+    /// mark.
+    fn reg_file(path: &Path, sections: &[&str]) {
+        let mut text = "Windows Registry Editor Version 5.00\r\n\r\n".to_string();
+        for s in sections {
+            text.push_str(&format!("[{s}]\r\n\"Planted\"=\"yes\"\r\n\r\n"));
+        }
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn a_registry_export_writes_only_into_the_key_it_came_from() {
+        let root = fixture("reg_scope");
+        let file = root.join("export.reg");
+        let own = r"HKEY_CURRENT_USER\SOFTWARE\Example Vendor";
+        reg_file(&file, &[own, &format!(r"{own}\Settings")]);
+        assert!(backup::reg_file_in_scope(&file, Some(own)).is_ok());
+        assert!(backup::reg_file_in_scope(&file, None).is_ok());
+
+        for (sections, key) in [
+            // One more section that writes an autostart.
+            (
+                vec![
+                    own,
+                    r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+                ],
+                Some(own),
+            ),
+            // A key beside the recorded one that only starts like it.
+            (
+                vec![r"HKEY_CURRENT_USER\SOFTWARE\Example Vendor Two"],
+                Some(own),
+            ),
+            // A section that deletes a key.
+            (vec![own, r"-HKEY_CURRENT_USER\SOFTWARE\Other"], Some(own)),
+            // A key every program shares, recorded or read from the file.
+            (vec![r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft"], None),
+            (
+                vec![r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Policy"],
+                Some(r"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft"),
+            ),
+            (vec![r"HKEY_CLASSES_ROOT\exefile"], None),
+        ] {
+            reg_file(&file, &sections);
+            assert!(
+                backup::reg_file_in_scope(&file, key).is_err(),
+                "{sections:?} {key:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_registry_export_planted_in_a_backup_is_never_imported() {
+        let root = fixture("reg_planted");
+        let session = BackupSession::new("Oxidize Planted Export Test").unwrap();
+        let recorded = r"HKEY_CURRENT_USER\SOFTWARE\Example Vendor";
+        let target = format!(r"Software\OxidizePlantedExportTest{}", std::process::id());
+        let file = session.root().join("registry").join("forged.reg");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        reg_file(&file, &[&format!(r"HKEY_CURRENT_USER\{target}")]);
+        add_entry(
+            &session,
+            Undo::RegImport {
+                file: file.clone(),
+                key: Some(recorded.to_string()),
+            },
+        );
+        let err = planted_result(&session);
+        assert!(err.starts_with("refused:"), "{err}");
+        let imported = !registry::key_absent(Hive::CurrentUser, &target);
+        let _ = registry::delete_key_tree(Hive::CurrentUser, &target);
+        assert!(!imported, "the planted key was written");
+        cleanup(&session, &root);
+    }
+
     #[test]
     fn a_copy_is_never_put_back_into_a_protected_folder() {
         let root = fixture("protected_place");
