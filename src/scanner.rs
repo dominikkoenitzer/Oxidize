@@ -3773,6 +3773,21 @@ mod tests {
     }
 
     #[test]
+    fn one_vendor_name_starts_another_only_at_a_word() {
+        assert!(same_vendor(
+            "Example Studio",
+            "Example Studio Games Pty Ltd"
+        ));
+        assert!(same_vendor("Example Studio Inc.", "EXAMPLE STUDIO"));
+        assert!(same_vendor("ExampleStudio", "Example Studio"));
+        assert!(same_vendor("ExampleStudio", "ExampleStudio Games"));
+        assert!(!same_vendor("Quill", "Quillmark Systems"));
+        assert!(!same_vendor("Quillmark Systems", "Quill"));
+        assert!(!same_vendor("Inc.", "Quill Inc."));
+        assert!(!same_vendor("", "Quill"));
+    }
+
+    #[test]
     fn a_shared_root_or_a_generic_name_vouches_for_nothing() {
         // Recorded as Program Files itself: protected, so not recorded at all.
         let mut at_root = player();
