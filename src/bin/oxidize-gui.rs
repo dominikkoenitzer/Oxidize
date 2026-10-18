@@ -586,8 +586,17 @@ impl OxidizeApp {
                 }
                 self.log.push(line.clone());
                 self.status = line;
-                // The result on screen no longer holds.
-                self.complete = None;
+                // The result on screen no longer holds, if it was this
+                // backup's. Undoing a cleaning leaves a removal's own undo.
+                if self
+                    .complete
+                    .as_ref()
+                    .and_then(|c| c.outcome.removal.as_ref())
+                    .and_then(|r| r.backup_name.as_deref())
+                    == Some(name)
+                {
+                    self.complete = None;
+                }
                 true
             }
             Err(e) => {
