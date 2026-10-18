@@ -80,23 +80,29 @@ impl Inspect for ThisPc {
 /// uninstaller gets no console input or output: those carry the protocol.
 pub struct Remover;
 
-/// How long an uninstaller, and then its entry's going away, is waited for.
-pub const UNINSTALL_WAIT: Duration = Duration::from_secs(120);
+/// How long an uninstaller is waited for. Someone may be clicking through
+/// it, so the wait is long; one that is still running after it is reported
+/// as running, and its leftovers stay.
+pub const UNINSTALLER_RUN: Duration = Duration::from_secs(30 * 60);
+
+/// How long the uninstall entry then has to go away.
+pub const ENTRY_WAIT: Duration = Duration::from_secs(120);
 
 impl Remove for Remover {
-    /// The plan promises a wait of two minutes, not more: an uninstaller
-    /// that hangs would otherwise hold the tool call and every later one.
     fn uninstall(&self, plan: &UninstallPlan) -> Result<String> {
         Ok(
-            match uninstall::run_for(plan, Stdio::null(), Stdio::null(), UNINSTALL_WAIT)? {
+            match uninstall::run_for(plan, Stdio::null(), Stdio::null(), UNINSTALLER_RUN)? {
                 Some(status) => uninstall::describe_exit(status, plan.is_msi),
-                None => format!("was still running after {} s", UNINSTALL_WAIT.as_secs()),
+                None => format!(
+                    "is still running after {} minutes; its leftovers stay until it has finished",
+                    UNINSTALLER_RUN.as_secs() / 60
+                ),
             },
         )
     }
 
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool {
-        uninstall::wait_for_completion(program, plan, UNINSTALL_WAIT)
+        uninstall::wait_for_completion(program, plan, ENTRY_WAIT)
     }
 
     fn remove_app(&self, app: &Package) -> Result<bool> {
@@ -130,7 +136,11 @@ mod tests {
         };
         let said = Remover.uninstall(&plan).unwrap();
         assert!(!said.contains("still running"), "{said}");
-        // `plan_removal` tells the user Oxidize waits up to two minutes.
-        assert_eq!(UNINSTALL_WAIT, Duration::from_secs(120));
+        // `plan_removal` tells the user how long each wait is.
+        let how = crate::mcp::HOW_IT_RUNS;
+        assert!(how.contains("up to 30 minutes"), "{how}");
+        assert!(how.contains("two minutes"), "{how}");
+        assert_eq!(UNINSTALLER_RUN, Duration::from_secs(30 * 60));
+        assert_eq!(ENTRY_WAIT, Duration::from_secs(120));
     }
 }
