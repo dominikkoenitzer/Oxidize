@@ -367,6 +367,9 @@ mod tests {
         assert_eq!(info.items, 1);
         let json = serde_json::to_value(&info).unwrap();
         assert!(json["restored"].is_string());
+        // The folders the copy sat in went with it; the manifest stays.
+        assert!(!session.root().join("files").exists());
+        assert!(session.root().join(backup::MANIFEST).exists());
         cleanup(&session, &root);
     }
 
@@ -488,6 +491,8 @@ mod tests {
         let items = restore(&listed(&session), false).unwrap();
         assert_eq!(items.iter().filter(|i| i.result.is_err()).count(), 1);
         assert!(listed(&session).restored.is_none());
+        // The copy that could not go back is still there to try again.
+        assert!(session.root().join("files").exists());
         cleanup(&session, &root);
     }
 }
