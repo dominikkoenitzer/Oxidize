@@ -100,6 +100,9 @@ impl Cleanup {
             .into_iter()
             .filter(|c| self.ticked.contains(c))
             .filter(|c| a.finding(*c).is_some_and(Finding::actionable))
+            // The folders of removed programs with every folder unticked
+            // would clean nothing under a button that offers to.
+            .filter(|c| *c != Category::Orphans || !self.folders.is_empty())
             .collect();
         let folders = if categories.contains(&Category::Orphans) {
             self.folders.clone()
