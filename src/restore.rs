@@ -159,13 +159,15 @@ fn check(action: &Undo) -> Result<()> {
                 anyhow::bail!("the backup file is missing: {}", file.display())
             }
         }
-        Undo::MoveBack { from, to } => {
-            if from.exists() || to.exists() {
-                Ok(())
-            } else {
+        // The same answers the real run gives: a copy with something new in
+        // its place stays where it is, and one already home is fine.
+        Undo::MoveBack { from, to } => match (from.exists(), to.exists()) {
+            (true, true) => anyhow::bail!("already exists: {}", to.display()),
+            (false, false) => {
                 anyhow::bail!("the quarantined copy is missing: {}", from.display())
             }
-        }
+            _ => Ok(()),
+        },
         Undo::PathAdd { .. } | Undo::ValueWrite { .. } => Ok(()),
         Undo::RawValueWrite { vtype, .. } => reg_type(*vtype)
             .map(|_| ())
