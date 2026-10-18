@@ -14,6 +14,8 @@ use super::*;
 struct FakeTools {
     calls: Mutex<Vec<&'static str>>,
     delivery: Mutex<(usize, u64)>,
+    /// What runs by the time the cleaning starts.
+    running: Mutex<Vec<PathBuf>>,
 }
 
 impl FakeTools {
@@ -53,6 +55,9 @@ impl Tools for FakeTools {
     }
     fn free_bytes(&self, _path: &Path) -> Option<u64> {
         Some(1000)
+    }
+    fn running_exes(&self) -> Vec<PathBuf> {
+        self.running.lock().unwrap().clone()
     }
 }
 

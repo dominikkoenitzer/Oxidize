@@ -853,6 +853,9 @@ mod tests {
         fn free_bytes(&self, _path: &std::path::Path) -> Option<u64> {
             None
         }
+        fn running_exes(&self) -> Vec<PathBuf> {
+            Vec::new()
+        }
     }
 
     fn folder(name: &str, confidence: Confidence) -> OrphanItem {

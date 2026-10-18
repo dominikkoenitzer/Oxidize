@@ -64,6 +64,8 @@ pub trait Tools: Send + Sync {
     fn remove_windows_old(&self) -> Result<()>;
     /// Free bytes on the drive `path` is on.
     fn free_bytes(&self, path: &Path) -> Option<u64>;
+    /// The executables running now.
+    fn running_exes(&self) -> Vec<std::path::PathBuf>;
 }
 
 /// The real tools.
@@ -106,6 +108,10 @@ impl Tools for WindowsTools {
 
     fn free_bytes(&self, path: &Path) -> Option<u64> {
         free_bytes(path)
+    }
+
+    fn running_exes(&self) -> Vec<std::path::PathBuf> {
+        system::running_exes()
     }
 }
 
