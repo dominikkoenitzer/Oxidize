@@ -488,8 +488,11 @@ mod tests {
         let mut session = BackupSession::new("Oxidize Partial Restore Test").unwrap();
         session.quarantine(LeftoverKind::File, &a).unwrap();
         session.quarantine(LeftoverKind::File, &b).unwrap();
-        // Something new sits where b was, so b cannot go back.
+        // Something new sits where b was, so b cannot go back, and the dry
+        // run says so before the real one finds out.
         fs::write(&b, "new").unwrap();
+        let preview = restore(&listed(&session), true).unwrap();
+        assert_eq!(preview.iter().filter(|i| i.result.is_err()).count(), 1);
         let items = restore(&listed(&session), false).unwrap();
         assert_eq!(items.iter().filter(|i| i.result.is_err()).count(), 1);
         assert!(listed(&session).restored.is_none());
