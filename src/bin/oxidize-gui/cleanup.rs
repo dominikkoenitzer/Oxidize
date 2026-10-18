@@ -37,6 +37,9 @@ pub struct Cleanup {
     /// Something runs. The protected list stays as it is until it is done:
     /// a cleaning already under way works from the list it started with.
     pub busy: bool,
+    /// The ticked categories are being cleaned; the analysis went with
+    /// the work.
+    pub cleaning: bool,
 }
 
 /// The two views of the tab, each with its own one action.
@@ -48,6 +51,30 @@ pub enum View {
 }
 
 impl Cleanup {
+    /// Anything to show beyond the first explanation: an analysis, traces,
+    /// a cleaning under way or the result of one.
+    fn has_something(&self) -> bool {
+        self.analysis.is_some() || !self.slate.is_empty() || self.results.is_some() || self.cleaning
+    }
+
+    /// What stands where the analysis was, while there is none.
+    fn without_analysis(&self) -> (String, String) {
+        if self.cleaning {
+            ("Cleaning...".into(), "Removing what was ticked.".into())
+        } else if let Some(results) = &self.results {
+            let freed: u64 = results.iter().map(|c| c.freed).sum();
+            (
+                format!("{} freed", util::human_size(freed)),
+                "Analyse again to see what is left.".into(),
+            )
+        } else {
+            (
+                "Analysing...".into(),
+                "Counting what each category holds.".into(),
+            )
+        }
+    }
+
     pub fn new() -> Self {
         let (protected, protect_error) = match protect::load() {
             Ok(p) => (p, None),
@@ -66,6 +93,7 @@ impl Cleanup {
             show_protected: false,
             focus: None,
             busy: false,
+            cleaning: false,
         }
     }
 
@@ -235,7 +263,7 @@ fn head(
     dry_run: bool,
     action: &mut Option<Action>,
 ) {
-    let analysed = state.analysis.is_some() || !state.slate.is_empty();
+    let analysed = state.has_something();
     let (big, small) = headline(state, busy);
     ui.horizontal(|ui| {
         ui.label(RichText::new(big).size(24.0).color(t.text));
@@ -298,7 +326,7 @@ fn head(
 /// The two lines at the top left: a figure, and what it is.
 fn headline(state: &Cleanup, busy: bool) -> (String, String) {
     match (state.view, &state.analysis) {
-        _ if state.analysis.is_none() && state.slate.is_empty() => {
+        _ if !state.has_something() => {
             if busy {
                 (
                     "Analysing...".into(),
@@ -314,10 +342,7 @@ fn headline(state: &Cleanup, busy: bool) -> (String, String) {
             }
         }
         (View::Slate, _) => slate::headline(&state.slate),
-        (View::Files, None) => (
-            "Analysing...".into(),
-            "Counting what each category holds.".into(),
-        ),
+        (View::Files, None) => state.without_analysis(),
         (View::Files, Some((_, a))) => {
             let choice = state.choice_in(a);
             let n = choice.categories.len();
@@ -383,7 +408,7 @@ pub fn view(
         .id_salt("cleanup_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if state.analysis.is_none() && state.slate.is_empty() {
+            if !state.has_something() {
                 if !busy {
                     what_it_counts(ui, t);
                 }
@@ -417,7 +442,7 @@ pub fn view(
 /// The panel beside the list: the category in focus, what Clean slate
 /// clears, or the protected folders when asked for or before an analysis.
 pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
-    let analysed = state.analysis.is_some() || !state.slate.is_empty();
+    let analysed = state.has_something();
     if state.show_protected || !analysed {
         protected_panel(ui, t, state);
         return;
@@ -431,7 +456,8 @@ pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
                 return;
             }
             let Some((places, analysis)) = state.analysis.take() else {
-                ui.label(RichText::new("Analysing...").color(t.weak));
+                let (_, line) = state.without_analysis();
+                ui.label(RichText::new(line).color(t.weak));
                 return;
             };
             let found = state
@@ -933,6 +959,7 @@ mod tests {
             show_protected: false,
             focus: None,
             busy: false,
+            cleaning: false,
         }
     }
 

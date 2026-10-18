@@ -506,6 +506,7 @@ impl OxidizeApp {
             return;
         };
         self.status = "Cleaning...".to_string();
+        self.cleanup.cleaning = true;
         self.log
             .push(format!("Cleaning {} categories", choice.categories.len()));
         let protected = self.cleanup.protected.clone();
@@ -524,6 +525,7 @@ impl OxidizeApp {
     /// Take in a finished cleaning.
     fn on_cleaned(&mut self, results: Vec<clean::Cleaned>) {
         self.job_done();
+        self.cleanup.cleaning = false;
         for c in &results {
             self.log.push(format!(
                 "{}: {} freed, {} removed",
@@ -781,6 +783,8 @@ impl OxidizeApp {
                 }
                 Msg::TracesCleared(results) => self.on_traces_cleared(results),
                 Msg::Error(e) => {
+                    // A cleaning that stopped is no longer under way.
+                    self.cleanup.cleaning = false;
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
                     self.job_done();
