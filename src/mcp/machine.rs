@@ -80,14 +80,23 @@ impl Inspect for ThisPc {
 /// uninstaller gets no console input or output: those carry the protocol.
 pub struct Remover;
 
+/// How long an uninstaller, and then its entry's going away, is waited for.
+pub const UNINSTALL_WAIT: Duration = Duration::from_secs(120);
+
 impl Remove for Remover {
+    /// The plan promises a wait of two minutes, not more: an uninstaller
+    /// that hangs would otherwise hold the tool call and every later one.
     fn uninstall(&self, plan: &UninstallPlan) -> Result<String> {
-        let status = uninstall::run_with(plan, Stdio::null(), Stdio::null())?;
-        Ok(uninstall::describe_exit(status, plan.is_msi))
+        Ok(
+            match uninstall::run_for(plan, Stdio::null(), Stdio::null(), UNINSTALL_WAIT)? {
+                Some(status) => uninstall::describe_exit(status, plan.is_msi),
+                None => format!("was still running after {} s", UNINSTALL_WAIT.as_secs()),
+            },
+        )
     }
 
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool {
-        uninstall::wait_for_completion(program, plan, Duration::from_secs(120))
+        uninstall::wait_for_completion(program, plan, UNINSTALL_WAIT)
     }
 
     fn remove_app(&self, app: &Package) -> Result<bool> {
