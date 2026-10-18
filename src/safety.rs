@@ -456,11 +456,7 @@ pub fn remove_leftovers_into(
     // empty folder needs no backup; it is recorded so restore recreates it.
     for p in removed_fs {
         if let Some(parent) = p.parent() {
-            if !scanner::is_protected_path(parent)
-                && !scanner::path_within_shared_dir(parent)
-                && scanner::is_dir_empty(parent)
-                && std::fs::remove_dir(parent).is_ok()
-            {
+            if may_remove_emptied(parent) && std::fs::remove_dir(parent).is_ok() {
                 outcome.emptied_parents.push(parent.to_path_buf());
             }
         }
@@ -483,6 +479,18 @@ pub fn remove_leftovers_into(
         outcome.backup_name = Some(s.name());
     }
     Ok(outcome)
+}
+
+/// May the folder a removed item sat in go now that it is empty? Only a
+/// vendor's folder: never a protected or shared one, never a folder Windows
+/// keeps for the user, and never one in Downloads or on a desktop, which
+/// the user made. An installer that was the only file in Downloads leaves
+/// Downloads standing.
+fn may_remove_emptied(parent: &Path) -> bool {
+    !scanner::is_protected_path(parent)
+        && !scanner::path_within_shared_dir(parent)
+        && !scanner::in_user_files(parent)
+        && scanner::is_dir_empty(parent)
 }
 
 /// The vendor key a removed product key sat under, by name alone. Only
@@ -664,6 +672,47 @@ mod tests {
         assert!(vendor_key_above(r"SOFTWARE\NVIDIA Corporation\Global").is_none());
         // A key that does not exist is not empty, so nothing is proposed.
         assert!(empty_vendor_key(Hive::CurrentUser, r"SOFTWARE\NoSuchVendor\NoSuchApp").is_none());
+    }
+
+    #[test]
+    fn only_a_vendor_folder_left_empty_goes_with_the_product() {
+        let base = std::env::temp_dir().join("oxidize_emptied_parent_test");
+        let _ = std::fs::remove_dir_all(&base);
+        let vendor = base.join("Example Vendor");
+        let busy = base.join("Busy Vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::create_dir_all(&busy).unwrap();
+        std::fs::write(busy.join("other product.txt"), "x").unwrap();
+        assert!(may_remove_emptied(&vendor));
+        assert!(!may_remove_emptied(&busy));
+        // Never the folders Windows keeps, empty or not, nor temp itself.
+        assert!(!may_remove_emptied(&std::env::temp_dir()));
+        for folder in system::known_folders() {
+            assert!(!may_remove_emptied(folder), "{}", folder.display());
+        }
+
+        // The whole removal: the product goes, its empty vendor folder too.
+        let product = vendor.join("Example Product");
+        std::fs::create_dir_all(&product).unwrap();
+        std::fs::write(product.join("settings.ini"), "x=1").unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            product.clone(),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let ctx = SafetyContext {
+            dry_run: false,
+            make_backups: false,
+        };
+        let outcome = remove_leftovers(&[item], "Example Product", &ctx).unwrap();
+        assert_eq!(outcome.deleted, 1);
+        assert_eq!(outcome.emptied_parents, std::slice::from_ref(&vendor));
+        assert!(!vendor.exists());
+        assert!(busy.join("other product.txt").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
