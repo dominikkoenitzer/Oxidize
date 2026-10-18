@@ -508,6 +508,14 @@ fn file_bytes(items: &[Leftover]) -> u64 {
         .sum()
 }
 
+/// How a plan is carried out, as `plan_removal` tells the user.
+pub(crate) const HOW_IT_RUNS: &str = "Running copies of each program are closed first. A program \
+    installed for this user only, with nothing machine-wide, is removed by Oxidize alone, its \
+    uninstall entry included; any other uninstaller runs in turn, and Oxidize waits for it to \
+    finish, up to 30 minutes, then up to two minutes for its entry to go. An uninstaller still \
+    running after that keeps its leftovers. Then exactly the leftovers listed are removed, each one \
+    backed up first. Nothing else is touched.";
+
 fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
     let steps: Vec<Value> = plan
         .steps
@@ -560,10 +568,7 @@ fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
         "needs_admin": safety::needs_elevation(&all),
         "elevated": m.is_elevated(),
         "backup_folder": m.backups_folder(),
-        "how": "Running copies of each program are closed first. A program installed for this user \
-    only, with nothing machine-wide, is removed by Oxidize alone, its uninstall entry included; any \
-    other uninstaller runs in turn and Oxidize waits up to two minutes for it to finish. Then exactly \
-    the leftovers listed are removed, each one backed up first. Nothing else is touched.",
+        "how": HOW_IT_RUNS,
         "apply": "apply_removal_plan with this plan_id, once the user agrees",
         "commands": plan.commands,
     })
