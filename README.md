@@ -117,8 +117,10 @@ not wipe free space.
 
 `oxidize mcp` runs an MCP (Model Context Protocol) server for an assistant on
 your PC. It talks to the assistant over stdin and stdout, nothing else, and
-runs only while the assistant has it open. Add it to the assistant's MCP
-settings with the full path to `oxidize.exe`:
+runs only while the assistant has it open. It takes no `--dry-run`, `--yes` or
+`--no-backup`: the assistant previews with `plan_removal`, and every plan it
+applies is backed up. Add it to the assistant's MCP settings with the full
+path to `oxidize.exe`:
 
 ```json
 {
@@ -300,7 +302,7 @@ run's output; otherwise the run keeps its own window for its questions.
 |---|---|
 | 0 | done |
 | 1 | error |
-| 2 | the command line did not parse |
+| 2 | the command line did not parse, or asked a command for what it does not do |
 | 3 | the program is still installed after its uninstall |
 | 4 | the removal is incomplete: an item failed or something is left |
 | 5 | cancelled: a question was answered no, or `--json` ran without `-y` |
@@ -309,8 +311,8 @@ run's output; otherwise the run keeps its own window for its questions.
 
 With `--json`, a run that fails before it has a result prints one object
 instead: `{"error": {"code": "not_found", "message": "..."}}`. The codes are
-`error`, `not_found`, `ambiguous`, `still_installed`, `incomplete` and
-`cancelled`. A run that already printed its result only sets the exit code,
+`error`, `not_found`, `ambiguous`, `usage`, `still_installed`, `incomplete`
+and `cancelled`. A run that already printed its result only sets the exit code,
 so stdout always holds one JSON document. A command that would ask a question
 needs `-y` as well; without it the answer is no.
 
