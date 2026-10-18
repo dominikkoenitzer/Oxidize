@@ -267,7 +267,7 @@ pub fn exe_token_end(s: &str) -> Option<usize> {
 
 /// The end of the longest leading run that names a file on disk, the way
 /// `CreateProcess` resolves an unquoted program.
-fn program_prefix_end(s: &str) -> Option<usize> {
+pub fn program_prefix_end(s: &str) -> Option<usize> {
     let is_program = |p: &str| {
         !p.is_empty()
             && (std::path::Path::new(p).is_file()

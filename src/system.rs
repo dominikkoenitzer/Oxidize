@@ -181,9 +181,9 @@ pub fn command_exe(command: &str) -> Option<PathBuf> {
         // spaces runs up to and including the first `.exe` that ends a token.
         // The scan runs over the original bytes, not a lower-cased copy, whose
         // length can differ and shift the index.
-        match util::exe_token_end(&expanded) {
+        match util::exe_token_end(&expanded).or_else(|| util::program_prefix_end(&expanded)) {
             Some(i) => expanded[..i].to_string(),
-            None => util::split_command_line(&expanded).into_iter().next()?,
+            None => unquoted_program(&expanded)?,
         }
     };
     s = s.trim_matches('"').to_string();
@@ -205,8 +205,32 @@ pub fn command_exe(command: &str) -> Option<PathBuf> {
             .to_string_lossy()
             .to_string();
     }
-    // Unquoted paths with spaces and no extension: take the token as given.
-    Some(PathBuf::from(s))
+    // Windows adds `.exe` to a program named without an extension.
+    let path = PathBuf::from(&s);
+    if path.extension().is_none() && !path.exists() {
+        let with_exe = PathBuf::from(format!("{s}.exe"));
+        if with_exe.is_file() {
+            return Some(with_exe);
+        }
+    }
+    Some(path)
+}
+
+/// The program of an unquoted command line that names nothing on disk and
+/// has no `.exe` in it. With no space there is only the one token. With a
+/// space after a first token that has an extension, `C:\Gone\tool.cmd /x`,
+/// that token is the program. Otherwise the line could be a path with
+/// spaces in it, `C:\Program Files\Vendor\start.bat`, and cutting it at
+/// the first space would name `C:\Program`, which is missing for every such
+/// line: where the program ends is unknown, and unknown is not missing.
+fn unquoted_program(line: &str) -> Option<String> {
+    let line = line.trim();
+    let Some((first, _)) = line.split_once([' ', '\t']) else {
+        return (!line.is_empty()).then(|| line.to_string());
+    };
+    let has_extension = Path::new(first).extension().is_some();
+    let names_a_folder = first.contains(['\\', '/']);
+    (has_extension || !names_a_folder).then(|| first.to_string())
 }
 
 const APP_PATHS_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths";
