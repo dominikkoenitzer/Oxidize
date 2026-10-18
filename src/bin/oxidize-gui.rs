@@ -1208,6 +1208,7 @@ impl OxidizeApp {
     /// The Clean up tab, with the protected folders beside it.
     fn cleanup_tab(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
         let (busy, dry_run) = (self.busy(), self.dry_run);
+        self.cleanup.busy = busy;
         // The same layout as the program view: the list, and beside it (or
         // under it on a portrait screen) the panel for what is in focus.
         let frame = egui::Frame::new()

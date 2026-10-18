@@ -34,6 +34,9 @@ pub struct Cleanup {
     pub show_protected: bool,
     /// The category the panel beside the list shows.
     pub focus: Option<Category>,
+    /// Something runs. The protected list stays as it is until it is done:
+    /// a cleaning already under way works from the list it started with.
+    pub busy: bool,
 }
 
 /// The two views of the tab, each with its own one action.
@@ -62,6 +65,7 @@ impl Cleanup {
             view: View::Files,
             show_protected: false,
             focus: None,
+            busy: false,
         }
     }
 
@@ -135,7 +139,7 @@ impl Cleanup {
 
     fn add_protected(&mut self) {
         let entry = self.new_protected.trim().to_string();
-        if entry.is_empty() {
+        if entry.is_empty() || self.busy {
             return;
         }
         if self.protected.add(&entry) {
@@ -145,7 +149,7 @@ impl Cleanup {
     }
 
     fn remove_protected(&mut self, entry: &str) {
-        if self.protected.remove(entry) {
+        if !self.busy && self.protected.remove(entry) {
             self.save_protected();
         }
     }
@@ -784,7 +788,8 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
                 .desired_width((ui.available_width() - 60.0).max(80.0)),
         );
         let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if ui.button("Add").clicked() || enter {
+        let add = ui.add_enabled(!state.busy, egui::Button::new("Add"));
+        if add.clicked() || (enter && !state.busy) {
             state.add_protected();
         }
     });
@@ -815,7 +820,11 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
                             ui.add(egui::Label::new(RichText::new(entry).color(t.text)).truncate())
                         },
                     );
-                    if hovered && ui.small_button("Remove").clicked() {
+                    if hovered
+                        && ui
+                            .add_enabled(!state.busy, egui::Button::new("Remove").small())
+                            .clicked()
+                    {
                         remove = Some(entry.clone());
                     }
                 });
@@ -906,6 +915,7 @@ mod tests {
             view: View::Files,
             show_protected: false,
             focus: None,
+            busy: false,
         }
     }
 
