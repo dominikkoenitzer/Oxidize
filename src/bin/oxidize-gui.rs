@@ -32,6 +32,9 @@ mod slate;
 /// The lowest confidence "Remove completely" removes.
 const COMPLETE_LEVEL: Confidence = Confidence::High;
 
+/// The status line while the program list is read.
+const LOADING: &str = "Loading installed programs...";
+
 /// A program at least this big counts as large for the quick filter.
 const LARGE_BYTES: u64 = 1024 * 1024 * 1024;
 /// A program installed at most this many days ago counts as recent.
@@ -246,7 +249,7 @@ impl OxidizeApp {
         let mut app = OxidizeApp::blank();
         app.elevated = safety::is_elevated();
         app.jobs = 1;
-        app.status = "Loading installed programs...".to_string();
+        app.status = LOADING.to_string();
         // Kick off the initial program load on a worker thread.
         let tx = app.tx.clone();
         let ctx = cc.egui_ctx.clone();
@@ -305,7 +308,13 @@ impl OxidizeApp {
     }
 
     fn load_programs(&mut self, ctx: &egui::Context) {
-        self.status = "Loading installed programs...".to_string();
+        self.status = LOADING.to_string();
+        self.reload_programs(ctx);
+    }
+
+    /// Read the program list again after an action, leaving that action's
+    /// result in the status line.
+    fn reload_programs(&mut self, ctx: &egui::Context) {
         let include_system = self.include_system;
         self.spawn(ctx, move || {
             Msg::Programs(registry::enumerate_installed_programs(include_system))
@@ -635,10 +644,11 @@ impl OxidizeApp {
                         .is_some_and(|id| self.programs.iter().any(|p| p.id() == id));
                     self.programs = programs;
                     self.job_done();
-                    self.status = format!(
-                        "{} installed.",
-                        count(self.programs.len(), "program", "programs")
-                    );
+                    // The count stands beside the search field; the line
+                    // here keeps what the last action did.
+                    if self.status == LOADING {
+                        self.status.clear();
+                    }
                     // Drop a stale selection, unless it is the program just
                     // uninstalled: what it left behind is scanned now.
                     if let Some(id) = self.selected.clone() {
@@ -704,7 +714,7 @@ impl OxidizeApp {
                         "Program removed from the installed list.".to_string()
                     };
                     self.job_done();
-                    self.load_programs(ctx);
+                    self.reload_programs(ctx);
                 }
                 Msg::Removed(outcome) => {
                     // As the removal ran, not as the setting reads now.
@@ -732,7 +742,7 @@ impl OxidizeApp {
                             let program = program.clone();
                             self.start_scan(ctx, program);
                         }
-                        self.load_programs(ctx);
+                        self.reload_programs(ctx);
                     }
                 }
                 Msg::Completed {
@@ -741,12 +751,12 @@ impl OxidizeApp {
                     dry_run,
                 } => {
                     if self.on_completed(program, *outcome, dry_run) {
-                        self.load_programs(ctx);
+                        self.reload_programs(ctx);
                     }
                 }
                 Msg::Restored { backup, result } => {
                     if self.on_restored(&backup, result) {
-                        self.load_programs(ctx);
+                        self.reload_programs(ctx);
                     }
                 }
                 Msg::Icon { id, rgba, w, h } => {
