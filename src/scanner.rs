@@ -1387,6 +1387,16 @@ fn is_protected_path_in(p: &Path, roots: &[PathBuf]) -> bool {
         .any(|root| root_forms(root).iter().any(|g| s == g))
 }
 
+/// Is `p` inside Downloads or a desktop, where the folders are the user's
+/// own? A removal that empties one of them leaves it standing.
+pub fn in_user_files(p: &Path) -> bool {
+    let s = resolve_for_guard(p);
+    system::user_file_folders()
+        .iter()
+        .flat_map(|f| root_forms(f))
+        .any(|g| g.len() > 3 && (s == g || s.starts_with(&format!("{g}\\"))))
+}
+
 /// [`guard_forms`] of a scan root, worked out once per root: a scan asks
 /// about hundreds of folders against the same dozen roots.
 fn root_forms(root: &Path) -> Vec<String> {
@@ -3143,6 +3153,20 @@ mod tests {
         assert!(is_protected_path(&local.parent().unwrap().join("LocalLow")));
         assert!(is_protected_path(local.parent().unwrap()));
         assert!(is_protected_path(&std::env::temp_dir()));
+    }
+
+    #[test]
+    fn downloads_and_the_desktop_hold_the_users_own_folders() {
+        for folder in system::user_file_folders() {
+            assert!(in_user_files(folder), "{}", folder.display());
+            assert!(in_user_files(&folder.join("Installers")));
+        }
+        let profile = env_dir("USERPROFILE").unwrap();
+        assert!(in_user_files(&profile.join("Downloads").join("Setups")));
+        assert!(!in_user_files(&profile.join("Documents").join("Vendor")));
+        assert!(!in_user_files(Path::new(
+            r"C:\Program Files\Example Vendor"
+        )));
     }
 
     #[test]
