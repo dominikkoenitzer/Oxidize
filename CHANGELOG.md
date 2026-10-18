@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+- A removal never takes the folders Windows keeps for the user (Downloads,
+  Saved Games, the cloud folder, the desktops and the rest), wherever they
+  really are, and a folder in Downloads or on a desktop that a removal
+  empties stays.
+- Restore puts a copy back only from its own backup and only to where it
+  came from, and clears the backup's emptied folders after a whole restore.
+- A registry path with an empty part, or a key every program shares, is
+  never deleted.
+- `oxidize mcp` refuses `--dry-run`, `--yes` and `--no-backup` instead of
+  ignoring them.
+- A file named like the program's but elsewhere, or anything in a recorded
+  install folder whose name says nothing about the program, counts at
+  Medium only. An install folder must name a drive and a root.
+- An unquoted command line with spaces is read the way Windows reads it, so
+  a working autostart is no longer taken for a dangling one.
+- A file on a drive that is not plugged in counts as there, not gone; one
+  vendor name starts another only at a word.
+- Clean up asks again right before it cleans whether a browser runs, deletes
+  a file only while its path still leads where the analysis found it, and
+  reads a protected list saved with a byte order mark.
+- The window runs one thing at a time, waits for running work before it
+  closes, reports a removal as it ran, keeps the last result in the status
+  line, and keeps a removal's Undo when another backup is restored.
+
 ## 0.2.7, 2026-10-17
 
 - Oxidize's own folder, which holds its backups, is never taken for a leftover
