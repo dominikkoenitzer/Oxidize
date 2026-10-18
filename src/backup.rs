@@ -330,12 +330,23 @@ fn unused_root(base: &Path, stem: &str) -> PathBuf {
 }
 
 /// `%LOCALAPPDATA%\Oxidize\backups`.
+#[cfg(not(test))]
 pub fn backups_base() -> Result<PathBuf> {
     let local = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
         .context("LOCALAPPDATA is not set")?;
     Ok(local.join("Oxidize").join("backups"))
+}
+
+/// The tests make and restore backups of their own. They go to a folder of
+/// this test run, never among the real ones, where a run that fails halfway
+/// would leave them listed for the user to restore.
+#[cfg(test)]
+pub fn backups_base() -> Result<PathBuf> {
+    Ok(std::env::temp_dir()
+        .join(format!("oxidize-test-run-{}", std::process::id()))
+        .join("backups"))
 }
 
 /// One existing backup folder.
