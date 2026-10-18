@@ -30,6 +30,18 @@ pub struct Candidate {
     pub path: PathBuf,
     pub bytes: u64,
     pub dir: bool,
+    /// Where the walk found it, by real name: the real name of the folder
+    /// it started in, then the names it went through.
+    pub key: String,
+}
+
+impl Candidate {
+    /// Is the path still the place the walk found? A folder on the way
+    /// that has since been swapped for a junction leads somewhere else, and
+    /// what is there was never looked at.
+    fn still_where_found(&self) -> bool {
+        protect::key_of(&self.path) == self.key
+    }
 }
 
 /// What one walk found.
@@ -151,7 +163,7 @@ pub fn walk(root: &Path, rule: &Rule, protected: &Protected, now: SystemTime) ->
         return out;
     }
     if meta.is_file() {
-        consider_file(root.to_path_buf(), &meta, rule, now, &mut out);
+        consider_file(root.to_path_buf(), root_key, &meta, rule, now, &mut out);
         return out;
     }
     if !meta.is_dir() || is_link(&meta) {
@@ -184,25 +196,33 @@ pub fn walk(root: &Path, rule: &Rule, protected: &Protected, now: SystemTime) ->
             }
             if meta.is_dir() {
                 if old_enough(&meta, rule, now) {
-                    dirs.push(path.clone());
+                    dirs.push((path.clone(), child.clone()));
                 }
                 stack.push((path, child));
             } else {
-                consider_file(path, &meta, rule, now, &mut out);
+                consider_file(path, child, &meta, rule, now, &mut out);
             }
         }
     }
-    for dir in dirs {
+    for (dir, key) in dirs {
         out.candidates.push(Candidate {
             path: dir,
             bytes: 0,
             dir: true,
+            key,
         });
     }
     out
 }
 
-fn consider_file(path: PathBuf, meta: &fs::Metadata, rule: &Rule, now: SystemTime, out: &mut Walk) {
+fn consider_file(
+    path: PathBuf,
+    key: String,
+    meta: &fs::Metadata,
+    rule: &Rule,
+    now: SystemTime,
+    out: &mut Walk,
+) {
     if !extension_fits(&path, rule) {
         return;
     }
@@ -228,6 +248,7 @@ fn consider_file(path: PathBuf, meta: &fs::Metadata, rule: &Rule, now: SystemTim
         path,
         bytes,
         dir: false,
+        key,
     });
 }
 
@@ -266,7 +287,7 @@ pub fn delete(
             // Gone since the analysis: nothing to free, nothing to report.
             continue;
         };
-        if is_link(&meta) || !meta.is_file() {
+        if is_link(&meta) || !meta.is_file() || !c.still_where_found() {
             continue;
         }
         let bytes = meta.len();
@@ -294,7 +315,7 @@ pub fn delete(
         }
         // Only an empty folder goes, and never through a link.
         if let Ok(meta) = fs::symlink_metadata(&c.path) {
-            if meta.is_dir() && !is_link(&meta) {
+            if meta.is_dir() && !is_link(&meta) && c.still_where_found() {
                 let _ = fs::remove_dir(&c.path);
             }
         }
