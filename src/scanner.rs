@@ -2917,6 +2917,60 @@ mod tests {
     }
 
     #[test]
+    fn a_file_named_like_the_programs_elsewhere_is_not_the_programs() {
+        let base = std::env::temp_dir().join("oxidize_exe_name_test");
+        let _ = fs::remove_dir_all(&base);
+        let own = base.join("Example Runtime");
+        let other = base.join("Other App").join("bin");
+        fs::create_dir_all(&own).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("node.exe"), "MZ").unwrap();
+        let mut t = name_target("Example Runtime", Some("Example Foundation"));
+        t.exe_names = vec!["node.exe".to_string()];
+        t.install_location = Some(own.clone());
+        t.install_vouched = true;
+
+        // Another program's copy that is still there: a guess at most.
+        let theirs = other.join("node.exe");
+        assert!(matches!(
+            match_exe_item("Other App", Some(&theirs), &t),
+            Some((Confidence::Medium, _))
+        ));
+        // The program's own copy, or one that is gone with it, is its own.
+        assert!(matches!(
+            match_exe_item("x", Some(&own.join("node.exe")), &t),
+            Some((Confidence::High, _))
+        ));
+        assert!(matches!(
+            match_exe_item("x", Some(&base.join("Gone").join("node.exe")), &t),
+            Some((Confidence::High, _))
+        ));
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn what_runs_from_an_untrusted_install_folder_is_only_as_sure_as_the_folder() {
+        // A tool that recorded a folder whose name says nothing about it.
+        let mut t = name_target("Quillmark", Some("Example Studio"));
+        t.install_location = Some(PathBuf::from(r"C:\Users\x\Tools"));
+        assert!(own_install_folder(&t).is_none());
+        let hit = match_exe_item(
+            "Other Game",
+            Some(Path::new(r"C:\Users\x\Tools\OtherGame\game.exe")),
+            &t,
+        );
+        assert!(matches!(hit, Some((Confidence::Medium, _))), "{hit:?}");
+        // Once the folder is the program's own, so is what runs from it.
+        t.install_vouched = true;
+        let hit = match_exe_item(
+            "Other Game",
+            Some(Path::new(r"C:\Users\x\Tools\OtherGame\game.exe")),
+            &t,
+        );
+        assert!(matches!(hit, Some((Confidence::High, _))), "{hit:?}");
+    }
+
+    #[test]
     fn a_bare_program_name_is_never_a_missing_file() {
         let pwsh = build_target(&registered(
             "PowerShell 7-x64",
