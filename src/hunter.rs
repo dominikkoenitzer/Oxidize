@@ -162,18 +162,28 @@ pub fn hunt(query: &str, programs: &[Program]) -> Vec<HunterMatch> {
             .install_location
             .as_deref()
             .map(util::expand_env_vars)
+            .map(|s| {
+                s.trim()
+                    .trim_matches('"')
+                    .trim_end_matches(['\\', '/'])
+                    .to_string()
+            })
             .map(PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty());
+            // An entry that records a drive or `Program Files` as its folder
+            // would own every executable on it.
+            .filter(|p| p.is_absolute() && !crate::scanner::is_protected_path(p));
 
         // Path signals are weighted an order of magnitude above the name/icon
         // bonuses below, so a genuine "exe lives in this install folder" match
         // can never be outranked by coincidental DisplayIcon + folder hits.
+        // Of two folders that both hold it, the deeper one is the closer.
         if let Some(install) = &install {
+            let depth = install.components().count() as u32;
             if exe_paths.iter().any(|exe| path_under(exe, install)) {
-                score += 1000;
+                score += 1000 + depth;
                 reasons.push("executable runs from this program's install folder".to_string());
             } else if dirs.iter().any(|d| path_under(d, install)) {
-                score += 500;
+                score += 500 + depth;
                 reasons.push("located inside this program's install folder".to_string());
             }
         }
