@@ -404,4 +404,15 @@ pub(crate) mod tests {
         table[last * 4..last * 4 + 4].copy_from_slice(&1u32.to_le_bytes());
         assert!(parse(&file).is_err());
     }
+
+    #[test]
+    fn a_header_that_claims_a_huge_table_is_an_error_not_an_abort() {
+        let good = compound(&[("DestList", dest_list(40, 0, 5200))]);
+        assert!(parse(&good).is_ok());
+        for claimed in [u32::MAX, 0x0100_0000, (good.len() / 512 + 1) as u32] {
+            let mut file = good.clone();
+            file[0x2C..0x30].copy_from_slice(&claimed.to_le_bytes());
+            assert!(parse(&file).is_err(), "{claimed}");
+        }
+    }
 }
