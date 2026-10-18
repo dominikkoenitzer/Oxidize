@@ -855,6 +855,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_unquoted_path_with_spaces_is_never_cut_at_the_first_space() {
+        let dir = std::env::temp_dir().join("oxidize audit command exe");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("start.bat");
+        fs::write(&script, "@echo off").unwrap();
+        let tool = dir.join("tool.exe");
+        fs::write(&tool, "MZ").unwrap();
+
+        // A working entry is found where it is, not at `C:\Users\...\oxidize`.
+        let line = format!("{} /background", script.display());
+        assert_eq!(command_exe(&line), Some(script.clone()));
+        assert_eq!(command_exe(&script.to_string_lossy()), Some(script.clone()));
+        // Windows adds `.exe` to a name without one, quoted or not.
+        let bare = dir.join("tool");
+        assert_eq!(
+            command_exe(&format!("\"{}\" --quiet", bare.display())),
+            Some(tool.clone())
+        );
+        assert_eq!(
+            command_exe(&format!("{} --quiet", bare.display())),
+            Some(tool.clone())
+        );
+
+        // Nothing on disk to go by: where the program ends is unknown.
+        assert_eq!(command_exe(r"C:\Program Files\Gone Vendor\start /x"), None);
+        // One token, or a first token that is a file name, is the program.
+        assert_eq!(
+            command_exe(r"C:\Gone\tool.cmd /x"),
+            Some(PathBuf::from(r"C:\Gone\tool.cmd"))
+        );
+        assert_eq!(
+            command_exe(r"C:\Gone\Vendor\start"),
+            Some(PathBuf::from(r"C:\Gone\Vendor\start"))
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn command_exe_handles_service_prefixes() {
         assert_eq!(
             command_exe(r#""C:\Program Files\Vendor\svc.exe" /run"#),
