@@ -24,10 +24,10 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
     let manifest = backup::read_manifest(&info.path)?;
     let mut out = Vec::new();
     for entry in manifest.entries.iter().rev() {
-        let result = if dry_run {
-            check(&entry.undo)
-        } else {
-            undo(&entry.undo)
+        let result = match stays_inside(&info.path, &entry.undo) {
+            Err(e) => Err(e),
+            Ok(()) if dry_run => check(&entry.undo),
+            Ok(()) => undo(&entry.undo),
         };
         out.push(RestoreItem {
             path: entry.path.clone(),
@@ -40,6 +40,87 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
         let _ = backup::mark_restored(&info.path);
     }
     Ok(out)
+}
+
+/// An entry may only take its copy out of this backup and only put it back
+/// where that copy came from. The manifest is a plain file in the user's
+/// folder, and a restore can run as administrator: an entry pointing
+/// anywhere else is refused, not followed.
+fn stays_inside(root: &Path, action: &Undo) -> Result<()> {
+    match action {
+        Undo::RegImport { file } | Undo::TaskImport { file, .. } => {
+            if !within(root, file) {
+                anyhow::bail!("refused: {} is not part of this backup", file.display());
+            }
+        }
+        Undo::MoveBack { from, to } => {
+            if !within(&root.join("files"), from) {
+                anyhow::bail!("refused: {} is not part of this backup", from.display());
+            }
+            let origin = origin_of(root, from);
+            if origin.as_deref().map(norm) != Some(norm(to)) {
+                anyhow::bail!(
+                    "refused: the copy at {} did not come from {}",
+                    from.display(),
+                    to.display()
+                );
+            }
+            if crate::scanner::is_protected_path(to) {
+                anyhow::bail!("refused: {} is a protected folder", to.display());
+            }
+        }
+        Undo::PathAdd { .. } | Undo::ValueWrite { .. } | Undo::RawValueWrite { .. } => {}
+    }
+    Ok(())
+}
+
+fn norm(p: &Path) -> String {
+    p.to_string_lossy()
+        .to_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+/// `p` lies below `dir`, written plainly, with no `..` that could climb out
+/// and no folder on the way that leads somewhere else.
+fn within(dir: &Path, p: &Path) -> bool {
+    use std::path::Component;
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    let (d, s) = (norm(dir), norm(p));
+    if !(s.len() > d.len() && s.starts_with(&format!("{d}\\"))) {
+        return false;
+    }
+    // The item itself may be a link (a junction was quarantined as one), but
+    // the folders holding it are the backup's own.
+    match (p.parent().map(fs::canonicalize), fs::canonicalize(dir)) {
+        (Some(Ok(parent)), Ok(dir)) => parent.starts_with(&dir),
+        _ => true,
+    }
+}
+
+/// Where a quarantined copy came from: `<backup>\files\C\ProgramData\Foo`
+/// was `C:\ProgramData\Foo`, and `<backup>\files\server\share\Foo` was
+/// `\\server\share\Foo`. The reverse of the quarantine's own naming.
+fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
+    let files = norm(&root.join("files"));
+    let s = from.to_string_lossy().replace('/', "\\");
+    if !s.to_lowercase().starts_with(&format!("{files}\\")) {
+        return None;
+    }
+    let rest = s.get(files.len() + 1..)?;
+    let (first, tail) = rest.split_once('\\').unwrap_or((rest, ""));
+    if first.is_empty() {
+        return None;
+    }
+    let first_is_drive = first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic();
+    Some(if first_is_drive {
+        format!("{first}:\\{tail}").into()
+    } else {
+        format!(r"\\{first}\{tail}").into()
+    })
 }
 
 /// What a dry run can say without writing anything: the pieces the undo needs
