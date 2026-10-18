@@ -264,6 +264,32 @@ mod tests {
     }
 
     #[test]
+    fn a_path_that_is_gone_is_covered_by_the_real_name_of_its_folder() {
+        let dir = std::env::temp_dir().join("oxidize_protect_junction_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(real.join("keep")).unwrap();
+        let link = dir.join("link");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&real)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        // Protected by the junction's name, asked about by the real one,
+        // for a file that is no longer there; and the other way round.
+        let by_link = Protected::new([link.join("keep").display().to_string()]);
+        assert!(by_link.covers(&real.join("keep").join("gone.txt")));
+        assert!(by_link.covers(&real.join("keep").join("gone").join("deeper.txt")));
+        let by_real = Protected::new([real.join("keep").display().to_string()]);
+        assert!(by_real.covers(&link.join("keep").join("gone.txt")));
+        assert!(!by_real.covers(&link.join("other.txt")));
+        let _ = std::fs::remove_dir(&link);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn the_list_is_saved_and_read_back() {
         let dir = std::env::temp_dir().join("oxidize_protect_save_test");
         let _ = std::fs::remove_dir_all(&dir);
