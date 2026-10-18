@@ -88,6 +88,12 @@ impl<'a> Compound<'a> {
         // The sectors of the allocation table: 109 listed in the header,
         // the rest in a chain of further list sectors.
         let fat_sectors = u32_at(bytes, 0x2C) as usize;
+        // The table fits in the file; a header that says otherwise is
+        // broken, and believing it would reserve memory for a table of
+        // terabytes.
+        if fat_sectors > file.sector_count() {
+            bail!("the allocation table is larger than the file");
+        }
         let mut listed: Vec<u32> = (0..109).map(|i| u32_at(bytes, 0x4C + i * 4)).collect();
         let mut next = u32_at(bytes, 0x44);
         let mut hops = 0;
