@@ -137,6 +137,20 @@ impl Cleanup {
         }
     }
 
+    /// Everything in the backup `name` is back. A cleaning result that
+    /// moved its folders there no longer freed anything, and its Undo has
+    /// nothing left to do.
+    pub fn restored(&mut self, name: &str) {
+        for c in self.results.iter_mut().flatten() {
+            if c.backup.as_deref() == Some(name) {
+                c.freed = 0;
+                c.removed = 0;
+                c.backup = None;
+                c.notes.push("put back from the backup".to_string());
+            }
+        }
+    }
+
     fn add_protected(&mut self) {
         let entry = self.new_protected.trim().to_string();
         if entry.is_empty() || self.busy {

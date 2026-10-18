@@ -592,6 +592,8 @@ impl OxidizeApp {
                 let mut line = format!("Restored {restored} items from {name}");
                 if failed > 0 {
                     line.push_str(&format!(", {failed} failed"));
+                } else {
+                    self.cleanup.restored(name);
                 }
                 self.log.push(line.clone());
                 self.status = line;
