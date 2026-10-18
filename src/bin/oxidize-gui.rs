@@ -191,6 +191,9 @@ struct OxidizeApp {
     /// list reload at once, so a single flag that the first answer clears
     /// would let a second removal start while the first one runs.
     jobs: usize,
+    /// The window was asked to close while work ran; it closes once that
+    /// work is done.
+    close_when_done: bool,
     status: String,
     log: Vec<String>,
     confirm: Option<Confirm>,
@@ -229,6 +232,7 @@ impl OxidizeApp {
             include_system: false,
             elevated: false,
             jobs: 0,
+            close_when_done: false,
             status: String::new(),
             log: Vec::new(),
             confirm: None,
@@ -263,6 +267,18 @@ impl OxidizeApp {
     /// One job sent its answer.
     fn job_done(&mut self) {
         self.jobs = self.jobs.saturating_sub(1);
+    }
+
+    /// What closing the window does. While work runs it waits: a removal
+    /// or a cleaning cut off halfway leaves the program or the folder half
+    /// done. The window closes by itself once the work is.
+    fn close_step(&mut self, requested: bool) -> Option<egui::ViewportCommand> {
+        if requested && self.busy() {
+            self.close_when_done = true;
+            self.status = "Oxidize closes once the work under way is done.".to_string();
+            return Some(egui::ViewportCommand::CancelClose);
+        }
+        (self.close_when_done && !self.busy()).then_some(egui::ViewportCommand::Close)
     }
 
     /// Run `f` on a worker thread and repaint when it sends its result.
@@ -1074,6 +1090,10 @@ impl eframe::App for OxidizeApp {
         let today = chrono::Local::now().date_naive();
 
         self.drain_messages(ctx);
+        let requested = ctx.input(|i| i.viewport().close_requested());
+        if let Some(cmd) = self.close_step(requested) {
+            ctx.send_viewport_cmd(cmd);
+        }
         self.show_confirm(ctx);
         let display = self.display_indices(today);
         self.keyboard(ctx, &display);
