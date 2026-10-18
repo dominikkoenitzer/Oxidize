@@ -187,7 +187,10 @@ struct OxidizeApp {
     include_system: bool,
 
     elevated: bool,
-    busy: bool,
+    /// Work running on worker threads. One removal starts a scan and a
+    /// list reload at once, so a single flag that the first answer clears
+    /// would let a second removal start while the first one runs.
+    jobs: usize,
     status: String,
     log: Vec<String>,
     confirm: Option<Confirm>,
@@ -225,7 +228,7 @@ impl OxidizeApp {
             silent: false,
             include_system: false,
             elevated: false,
-            busy: false,
+            jobs: 0,
             status: String::new(),
             log: Vec::new(),
             confirm: None,
@@ -238,7 +241,7 @@ impl OxidizeApp {
         apply_style(&cc.egui_ctx);
         let mut app = OxidizeApp::blank();
         app.elevated = safety::is_elevated();
-        app.busy = true;
+        app.jobs = 1;
         app.status = "Loading installed programs...".to_string();
         // Kick off the initial program load on a worker thread.
         let tx = app.tx.clone();
@@ -252,8 +255,20 @@ impl OxidizeApp {
         app
     }
 
+    /// Is anything running? Nothing else may start while it is.
+    fn busy(&self) -> bool {
+        self.jobs > 0
+    }
+
+    /// One job sent its answer.
+    fn job_done(&mut self) {
+        self.jobs = self.jobs.saturating_sub(1);
+    }
+
     /// Run `f` on a worker thread and repaint when it sends its result.
-    fn spawn<F: FnOnce() -> Msg + Send + 'static>(&self, ctx: &egui::Context, f: F) {
+    /// Each run sends exactly one message, which ends it.
+    fn spawn<F: FnOnce() -> Msg + Send + 'static>(&mut self, ctx: &egui::Context, f: F) {
+        self.jobs += 1;
         let tx = self.tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -274,7 +289,6 @@ impl OxidizeApp {
     }
 
     fn load_programs(&mut self, ctx: &egui::Context) {
-        self.busy = true;
         self.status = "Loading installed programs...".to_string();
         let include_system = self.include_system;
         self.spawn(ctx, move || {
@@ -310,7 +324,6 @@ impl OxidizeApp {
     }
 
     fn start_scan(&mut self, ctx: &egui::Context, program: Program) {
-        self.busy = true;
         self.status = format!("Scanning for leftovers of {}...", program.display_name);
         self.spawn(ctx, move || {
             // One reading of the machine serves both steps.
@@ -326,7 +339,6 @@ impl OxidizeApp {
     }
 
     fn start_uninstall(&mut self, ctx: &egui::Context, program: Program, silent: bool) {
-        self.busy = true;
         self.status = format!("Running the uninstaller for {}...", program.display_name);
         self.spawn(ctx, move || match uninstall::plan(&program, silent) {
             Ok(plan) => match uninstall::run(&plan) {
@@ -352,7 +364,6 @@ impl OxidizeApp {
         label: String,
         safety_ctx: SafetyContext,
     ) {
-        self.busy = true;
         self.status = format!("Removing {}...", count(items.len(), "item", "items"));
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
@@ -368,7 +379,6 @@ impl OxidizeApp {
         program: Program,
         safety_ctx: SafetyContext,
     ) {
-        self.busy = true;
         self.complete = None;
         let dry_run = safety_ctx.dry_run;
         let line = if dry_run {
@@ -406,7 +416,6 @@ impl OxidizeApp {
     }
 
     fn start_undo(&mut self, ctx: &egui::Context, name: String) {
-        self.busy = true;
         let line = format!("Restoring {name}...");
         self.log.push(line.clone());
         self.status = line;
@@ -422,7 +431,6 @@ impl OxidizeApp {
     }
 
     fn start_analyse(&mut self, ctx: &egui::Context) {
-        self.busy = true;
         self.status = "Analysing what can be cleaned...".to_string();
         let protected = self.cleanup.protected.clone();
         self.spawn(ctx, move || {
@@ -438,7 +446,6 @@ impl OxidizeApp {
     }
 
     fn start_clear_traces(&mut self, ctx: &egui::Context) {
-        self.busy = true;
         self.status = "Clearing usage traces...".to_string();
         self.log.push("Clearing usage traces".to_string());
         let protected = self.cleanup.protected.clone();
@@ -451,7 +458,7 @@ impl OxidizeApp {
 
     /// Take in a finished clearing of the usage traces.
     fn on_traces_cleared(&mut self, results: Vec<clean::traces::TraceFinding>) {
-        self.busy = false;
+        self.job_done();
         for f in &results {
             let what = if f.count_known {
                 f.detail()
@@ -473,7 +480,6 @@ impl OxidizeApp {
         let Some((places, analysis)) = self.cleanup.analysis.take() else {
             return;
         };
-        self.busy = true;
         self.status = "Cleaning...".to_string();
         self.log
             .push(format!("Cleaning {} categories", choice.categories.len()));
@@ -492,7 +498,7 @@ impl OxidizeApp {
 
     /// Take in a finished cleaning.
     fn on_cleaned(&mut self, results: Vec<clean::Cleaned>) {
-        self.busy = false;
+        self.job_done();
         for c in &results {
             self.log.push(format!(
                 "{}: {} freed, {} removed",
@@ -523,7 +529,7 @@ impl OxidizeApp {
         self.log
             .extend(complete_log(&program.display_name, &outcome, dry_run));
         self.status = complete_status(&program.display_name, &outcome, dry_run);
-        self.busy = false;
+        self.job_done();
         if !dry_run {
             // Keeps it selected once it leaves the installed list.
             self.uninstalled = Some(program.clone());
@@ -541,7 +547,7 @@ impl OxidizeApp {
     /// Take in a finished undo. True when the program list should be read
     /// again.
     fn on_restored(&mut self, name: &str, result: Result<Vec<RestoreItem>, String>) -> bool {
-        self.busy = false;
+        self.job_done();
         match result {
             Ok(items) => {
                 let mut restored = 0;
@@ -603,7 +609,7 @@ impl OxidizeApp {
                         .as_ref()
                         .is_some_and(|id| self.programs.iter().any(|p| p.id() == id));
                     self.programs = programs;
-                    self.busy = false;
+                    self.job_done();
                     self.status = format!(
                         "{} installed.",
                         count(self.programs.len(), "program", "programs")
@@ -656,10 +662,10 @@ impl OxidizeApp {
                     };
                     self.scan_for = Some(id);
                     self.scan = Some(report);
-                    self.busy = false;
+                    self.job_done();
                 }
                 // A scan the user has already moved on from.
-                Msg::Scan { .. } => self.busy = false,
+                Msg::Scan { .. } => self.job_done(),
                 Msg::Uninstalled {
                     program,
                     message,
@@ -672,7 +678,7 @@ impl OxidizeApp {
                     } else {
                         "Program removed from the installed list.".to_string()
                     };
-                    self.busy = false;
+                    self.job_done();
                     self.load_programs(ctx);
                 }
                 Msg::Removed(outcome) => {
@@ -691,7 +697,7 @@ impl OxidizeApp {
                         );
                     }
                     self.status = line;
-                    self.busy = false;
+                    self.job_done();
                     if !self.dry_run {
                         // Re-scan to show what remains, and refresh the list.
                         self.scan = None;
@@ -727,15 +733,18 @@ impl OxidizeApp {
                     let (places, analysis) = *found;
                     self.status = analysed_status(&analysis);
                     self.cleanup.take_analysis(places, analysis);
-                    self.busy = false;
+                    self.job_done();
                 }
                 Msg::Cleaned(results) => self.on_cleaned(results),
-                Msg::TracesFound(found) => self.cleanup.slate.take_found(found),
+                Msg::TracesFound(found) => {
+                    self.cleanup.slate.take_found(found);
+                    self.job_done();
+                }
                 Msg::TracesCleared(results) => self.on_traces_cleared(results),
                 Msg::Error(e) => {
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
-                    self.busy = false;
+                    self.job_done();
                 }
             }
         }
@@ -851,6 +860,9 @@ impl OxidizeApp {
         };
 
         let mut decision: Option<bool> = None;
+        // A question can stay open while a reload or a scan finishes; it is
+        // answered only once nothing else runs.
+        let idle = !self.busy();
         let frame =
             egui::Frame::popup(&ctx.style_of(ctx.theme())).inner_margin(egui::Margin::same(20));
         let modal = egui::Modal::new(egui::Id::new("confirm"))
@@ -867,7 +879,7 @@ impl OxidizeApp {
                     } else {
                         primary_button(&t, &verb)
                     };
-                    if ui.add(button.min_size(size)).clicked() {
+                    if ui.add_enabled(idle, button.min_size(size)).clicked() {
                         decision = Some(true);
                     }
                     if ui.add(egui::Button::new("Cancel").min_size(size)).clicked() {
@@ -881,6 +893,7 @@ impl OxidizeApp {
         }
 
         match decision {
+            Some(true) if !idle => {}
             Some(true) => match self.confirm.take().unwrap() {
                 Confirm::Uninstall(p, silent) => self.start_uninstall(ctx, p, silent),
                 Confirm::Remove(items, label, safety) => {
@@ -1153,7 +1166,7 @@ impl OxidizeApp {
 
     /// The Clean up tab, with the protected folders beside it.
     fn cleanup_tab(&mut self, ui: &mut egui::Ui, t: &Tint, action: &mut Option<Action>) {
-        let (busy, dry_run) = (self.busy, self.dry_run);
+        let (busy, dry_run) = (self.busy(), self.dry_run);
         // The same layout as the program view: the list, and beside it (or
         // under it on a portrait screen) the panel for what is in focus.
         let frame = egui::Frame::new()
@@ -1189,6 +1202,12 @@ impl OxidizeApp {
 
     /// Carry out what a click asked for, after the panels are drawn.
     fn act(&mut self, ctx: &egui::Context, action: Action) {
+        // One thing at a time: a Refresh, a second removal or a restart
+        // while a removal runs would act on what it is still changing, and
+        // a restart would end it halfway.
+        if self.busy() {
+            return;
+        }
         {
             match action {
                 Action::Refresh => self.load_programs(ctx),
@@ -1295,23 +1314,31 @@ impl OxidizeApp {
                 ui.add_space(8.0);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if self.tab == Tab::Programs && ui.button("Refresh").clicked() {
+                // What runs was started with these settings and this list;
+                // they stay as they are until it is done.
+                let idle = !self.busy();
+                if self.tab == Tab::Programs
+                    && ui.add_enabled(idle, egui::Button::new("Refresh")).clicked()
+                {
                     *action = Some(Action::Refresh);
                 }
                 ui.menu_button("Options", |ui| {
                     ui.set_min_width(240.0);
-                    for setting in Setting::ALL {
-                        if setting == Setting::System {
-                            ui.separator();
+                    ui.add_enabled_ui(idle, |ui| {
+                        for setting in Setting::ALL {
+                            if setting == Setting::System {
+                                ui.separator();
+                            }
+                            self.setting(ui, setting, action);
                         }
-                        self.setting(ui, setting, action);
-                    }
+                    });
                 });
                 if self.elevated {
                     ui.label(RichText::new("Administrator").color(t.weak))
                         .on_hover_text("Running with administrator rights");
                 } else if ui
-                    .add(
+                    .add_enabled(
+                        idle,
                         egui::Button::new(RichText::new("Restart as administrator").color(t.weak))
                             .frame(false),
                     )
@@ -1372,7 +1399,7 @@ impl OxidizeApp {
                 room,
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
-                    if self.busy {
+                    if self.busy() {
                         ui.spinner();
                     }
                     ui.add(egui::Label::new(RichText::new(&self.status).color(t.weak)).truncate());
@@ -1492,7 +1519,7 @@ impl OxidizeApp {
                 ui.add_space(ROW_PAD + ICON + 10.0);
                 ui.vertical(|ui| {
                     ui.spacing_mut().item_spacing.y = 8.0;
-                    if self.programs.is_empty() && self.busy {
+                    if self.programs.is_empty() && self.busy() {
                         ui.label(RichText::new("Reading the installed programs...").color(t.weak));
                     } else if self.programs.is_empty() {
                         ui.label(RichText::new("No installed programs were found.").color(t.text));
@@ -1716,7 +1743,7 @@ impl OxidizeApp {
                 // scanned again or undone.
                 if let Some(done) = self.shown_complete() {
                     let undo = self.undo_backup().map(str::to_string);
-                    if show_complete(ui, t, done, undo.is_some(), !self.busy) {
+                    if show_complete(ui, t, done, undo.is_some(), !self.busy()) {
                         *action = undo.map(Action::Undo);
                     }
                     return;
@@ -1786,7 +1813,7 @@ impl OxidizeApp {
             });
         });
         ui.add_space(14.0);
-        let idle = !self.busy;
+        let idle = !self.busy();
         let full = egui::vec2(ui.available_width(), 34.0);
         if ui
             .add_enabled(idle, primary_button(t, "Remove completely").min_size(full))
@@ -3460,12 +3487,12 @@ mod tests {
         let program = example_program();
         let mut app = app();
         app.selected = Some(program.id().to_string());
-        app.busy = true;
+        app.jobs = 1;
 
         let reload = app.on_completed(program.clone(), finished(Some("example-player-1")), false);
 
         assert!(reload, "the program list is read again");
-        assert!(!app.busy);
+        assert!(!app.busy());
         let done = app.shown_complete().expect("the result is shown");
         assert!(done.outcome.complete());
         assert_eq!(app.undo_backup(), Some("example-player-1"));
@@ -3509,7 +3536,7 @@ mod tests {
 
         assert!(app.shown_complete().is_some());
         assert!(app.uninstalled.is_none());
-        assert!(!app.busy, "no reload was started");
+        assert!(!app.busy(), "no reload was started");
         assert_eq!(
             app.status,
             "dry run: 1 items of Example Player would be removed"
