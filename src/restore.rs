@@ -68,7 +68,15 @@ fn prune_empty_dirs(dir: &Path) {
 /// anywhere else is refused, not followed.
 fn stays_inside(root: &Path, action: &Undo) -> Result<()> {
     match action {
-        Undo::RegImport { file } | Undo::TaskImport { file, .. } => {
+        Undo::RegImport { file, key } => {
+            if !within(root, file) {
+                anyhow::bail!("refused: {} is not part of this backup", file.display());
+            }
+            if file.exists() {
+                backup::reg_file_in_scope(file, key.as_deref()).context("refused")?;
+            }
+        }
+        Undo::TaskImport { file, .. } => {
             if !within(root, file) {
                 anyhow::bail!("refused: {} is not part of this backup", file.display());
             }
@@ -148,7 +156,7 @@ fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
 /// quarantined copy is gone is worse than no dry run at all.
 fn check(action: &Undo) -> Result<()> {
     match action {
-        Undo::RegImport { file } | Undo::TaskImport { file, .. } => {
+        Undo::RegImport { file, .. } | Undo::TaskImport { file, .. } => {
             if file.exists() {
                 Ok(())
             } else {
@@ -173,7 +181,7 @@ fn check(action: &Undo) -> Result<()> {
 
 fn undo(action: &Undo) -> Result<()> {
     match action {
-        Undo::RegImport { file } => backup::import_registry_file(file),
+        Undo::RegImport { file, .. } => backup::import_registry_file(file),
         Undo::MoveBack { from, to } => move_back(from, to),
         Undo::TaskImport { name, file } => system::import_task(name, file),
         Undo::PathAdd { hive, entry, index } => path_add(*hive, entry, *index),
@@ -558,6 +566,7 @@ mod tests {
             },
             Undo::RegImport {
                 file: root.join("anything.reg"),
+                key: None,
             },
             Undo::TaskImport {
                 name: r"\Example".into(),

@@ -29,7 +29,13 @@ pub const MANIFEST: &str = "manifest.json";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Undo {
     /// `reg import` the file.
-    RegImport { file: PathBuf },
+    RegImport {
+        file: PathBuf,
+        /// The key it was exported from, `HKEY_...\subpath`. Restore
+        /// imports nothing outside it. Older manifests have none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+    },
     /// Move a quarantined path back to where it was.
     MoveBack { from: PathBuf, to: PathBuf },
     /// Re-create a task from its XML.
@@ -187,6 +193,7 @@ impl BackupSession {
             display,
             Undo::RegImport {
                 file: out_file.clone(),
+                key: Some(format!("{}\\{}", hive.full_name(), subpath)),
             },
         )?;
         Ok(out_file)
@@ -589,6 +596,51 @@ fn validate_reg_file(path: &Path, hive: Hive, subpath: &str) -> Result<()> {
             hive.full_name(),
             subpath
         );
+    }
+    Ok(())
+}
+
+/// Does the `.reg` file at `path` write only into `key` and below it, and
+/// is `key` one a removal could have taken? A backup sits in the user's own
+/// folder and can be restored as administrator, so a file that writes
+/// anywhere else, deletes keys, or stands for a key every program shares is
+/// refused before `reg import` sees it. Without a recorded key (an older
+/// backup) the file's first section is taken for it.
+pub fn reg_file_in_scope(path: &Path, key: Option<&str>) -> Result<()> {
+    let bytes = fs::read(path).context("reading backup file")?;
+    let text = system::decode_utf16_or_utf8(&bytes);
+    if !text
+        .to_lowercase()
+        .contains("windows registry editor version 5.00")
+    {
+        bail!("not a registry export");
+    }
+    let sections: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter_map(|l| l.strip_prefix('[').and_then(|l| l.strip_suffix(']')))
+        .collect();
+    let Some(first) = sections.first() else {
+        bail!("the export holds no key");
+    };
+    let root = key.unwrap_or(first).to_lowercase();
+    let sub = ["hkey_current_user\\", "hkey_local_machine\\"]
+        .iter()
+        .find_map(|h| root.strip_prefix(h));
+    let Some(sub) = sub else {
+        bail!("{root} is in neither hive a removal takes from");
+    };
+    if crate::registry::is_shared_root_key(sub) {
+        bail!("{root} is a key every program shares");
+    }
+    for section in &sections {
+        let s = section.to_lowercase();
+        if s.starts_with('-') {
+            bail!("the export deletes [{section}]");
+        }
+        if s != root && !s.starts_with(&format!("{root}\\")) {
+            bail!("the export writes [{section}], outside {root}");
+        }
     }
     Ok(())
 }
