@@ -3428,6 +3428,34 @@ mod tests {
         assert_eq!(app.selected.as_deref(), Some(program.id()));
     }
 
+    #[test]
+    fn the_first_answer_of_two_running_jobs_leaves_the_window_busy() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        // A removal ended and started a rescan and a list reload together.
+        app.jobs = 2;
+        app.selected = Some("example".to_string());
+        app.tx.send(Msg::Programs(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.busy(), "the rescan still runs");
+
+        // Nothing new starts meanwhile: no Refresh, no second removal.
+        app.act(&ctx, Action::Refresh);
+        app.act(&ctx, Action::RemoveCompletely(example_program()));
+        assert_eq!(app.jobs, 1);
+        assert!(app.confirm.is_none());
+        assert!(!app.status.starts_with("Loading"), "{}", app.status);
+
+        app.tx
+            .send(Msg::Error("the scan stopped".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+        // And a stray extra answer never takes the count below zero.
+        app.job_done();
+        assert_eq!(app.jobs, 0);
+    }
+
     fn example_program() -> Program {
         Program {
             registry_key: "example-player".to_string(),
