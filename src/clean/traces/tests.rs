@@ -506,3 +506,18 @@ fn amounts_read_as_words() {
         assert!(!t.title().is_empty() && !t.about().is_empty());
     }
 }
+
+#[test]
+fn a_file_explorer_took_first_is_not_a_failure() {
+    let dir = fixture("traces_gone_first");
+    let file = dir.join("recent.lnk");
+    fs::write(&file, "x").unwrap();
+    remove_if_there(&file).unwrap();
+    assert!(!file.exists());
+    // Gone already: the state that was asked for.
+    remove_if_there(&file).unwrap();
+    // Anything else is still an error.
+    fs::create_dir_all(dir.join("a folder")).unwrap();
+    assert!(remove_if_there(&dir.join("a folder")).is_err());
+    let _ = fs::remove_dir_all(&dir);
+}
