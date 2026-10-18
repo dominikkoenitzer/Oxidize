@@ -3495,6 +3495,25 @@ mod tests {
         assert_eq!(idle.close_step(true), None);
     }
 
+    #[test]
+    fn a_removal_is_reported_as_it_ran_not_as_the_setting_reads_now() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.jobs = 1;
+        // A preview started, then the dry run was switched off.
+        app.dry_run = false;
+        let outcome = DeletionOutcome {
+            attempted: 2,
+            dry_run: true,
+            ..DeletionOutcome::default()
+        };
+        app.tx.send(Msg::Removed(outcome)).unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.status.starts_with("dry run"), "{}", app.status);
+        // A preview changes nothing, so nothing is read again.
+        assert!(!app.busy());
+    }
+
     fn example_program() -> Program {
         Program {
             registry_key: "example-player".to_string(),
