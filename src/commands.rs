@@ -2866,6 +2866,40 @@ mod tests {
     use crate::safety::ItemOutcome;
     use clap::Parser;
 
+    #[test]
+    fn the_mcp_server_refuses_the_flags_of_a_single_run() {
+        for flags in [
+            &["--dry-run"][..],
+            &["--yes"],
+            &["--no-backup"],
+            &["--dry-run", "--yes"],
+        ] {
+            let mut argv = vec!["oxidize"];
+            argv.extend_from_slice(flags);
+            argv.push("mcp");
+            let cli = Cli::try_parse_from(&argv).unwrap();
+            let g = Global {
+                dry_run: cli.dry_run,
+                yes: cli.yes,
+                json: cli.json,
+                no_backup: cli.no_backup,
+            };
+            let err = mcp_takes_no_run_flags(&g).unwrap_err();
+            let out = exit::outcome(&err);
+            assert_eq!((out.code, out.exit), ("usage", exit::USAGE), "{flags:?}");
+            for flag in flags {
+                assert!(err.to_string().contains(flag), "{err}");
+            }
+        }
+        let plain = Global {
+            dry_run: false,
+            yes: false,
+            json: true,
+            no_backup: false,
+        };
+        assert!(mcp_takes_no_run_flags(&plain).is_ok());
+    }
+
     fn program(name: &str, key: &str, uninstall: Option<&str>) -> Program {
         Program {
             registry_key: key.to_string(),
