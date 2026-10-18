@@ -17,6 +17,7 @@ A run that fails before it has a result prints one object instead:
 | `error` | 1 | any other error |
 | `not_found` | 1 | no installed program, Store app or backup answers to the name |
 | `ambiguous` | 1 | several programs, apps or backups answer to the name; `message` lists them with their ids |
+| `usage` | 2 | the command does not take a flag it was given, such as `--dry-run` with `mcp` |
 | `still_installed` | 3 | the program is still installed after its uninstall |
 | `incomplete` | 4 | an item failed or something is left |
 | `cancelled` | 5 | a question was answered no, `--json` ran without `-y`, or the Windows prompt of `--elevate` was declined |
