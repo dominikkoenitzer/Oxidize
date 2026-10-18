@@ -253,6 +253,17 @@ mod tests {
     }
 
     #[test]
+    fn a_list_saved_with_a_byte_order_mark_protects_its_first_folder() {
+        let p = Protected::from_file_text("\u{feff}C:\\Keep\r\nC:\\Also\r\n");
+        assert_eq!(p.entries(), [r"C:\Keep", r"C:\Also"]);
+        assert!(p.covers(Path::new(r"C:\Keep\a.txt")));
+        assert!(p.covers(Path::new(r"C:\Also\b.txt")));
+        // A comment right after the mark stays a comment.
+        let p = Protected::from_file_text("\u{feff}# mine\nC:\\Keep\n");
+        assert_eq!(p.entries(), [r"C:\Keep"]);
+    }
+
+    #[test]
     fn the_list_is_saved_and_read_back() {
         let dir = std::env::temp_dir().join("oxidize_protect_save_test");
         let _ = std::fs::remove_dir_all(&dir);
