@@ -1022,6 +1022,31 @@ mod tests {
     }
 
     #[test]
+    fn the_head_says_cleaning_while_it_cleans_and_what_it_freed_after() {
+        let mut c = tab();
+        c.take_analysis(Places::default(), analysis());
+        // The analysis goes with the work.
+        c.analysis = None;
+        c.cleaning = true;
+        assert_eq!(headline(&c, true).0, "Cleaning...");
+        c.cleaning = false;
+        c.results = Some(vec![Cleaned {
+            category: Category::Temp,
+            freed: 2048,
+            removed: 3,
+            kept: Vec::new(),
+            backup: None,
+            notes: Vec::new(),
+        }]);
+        let (big, small) = headline(&c, false);
+        assert_eq!(big, format!("{} freed", util::human_size(2048)));
+        assert_eq!(small, "Analyse again to see what is left.");
+        // Changing the protected list afterwards keeps the result in view.
+        c.slate = Slate::default();
+        assert!(c.has_something());
+    }
+
+    #[test]
     fn a_new_analysis_ticks_the_safe_set_and_only_high_folders() {
         let mut c = tab();
         c.take_analysis(Places::default(), analysis());
