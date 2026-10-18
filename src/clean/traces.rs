@@ -570,6 +570,15 @@ fn empty_key(key: &RegKey) -> io::Result<()> {
     Ok(())
 }
 
+/// Delete a file that may have gone already: Explorer removes recent items
+/// and jump lists by itself too, and one it took first is not a failure.
+fn remove_if_there(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 fn reason_of(e: &io::Error) -> KeptReason {
     match e.raw_os_error() {
         Some(32) | Some(33) => KeptReason::InUse,
@@ -597,7 +606,7 @@ pub fn clear(places: &TracePlaces, protected: &Protected, shell: &dyn Shell) -> 
             if protected.covers(&path) {
                 continue;
             }
-            if let Err(e) = fs::remove_file(&path) {
+            if let Err(e) = remove_if_there(&path) {
                 note(Trace::RecentItems, reason_of(&e), 1, bytes);
             }
         }
@@ -609,10 +618,8 @@ pub fn clear(places: &TracePlaces, protected: &Protected, shell: &dyn Shell) -> 
             note(Trace::JumpLists, KeptReason::InUse, 1, bytes);
             continue;
         }
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => note(Trace::JumpLists, reason_of(&e), 1, bytes),
+        if let Err(e) = remove_if_there(&path) {
+            note(Trace::JumpLists, reason_of(&e), 1, bytes);
         }
     }
 
