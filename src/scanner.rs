@@ -233,7 +233,11 @@ pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
                 .to_string()
         })
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        // A drive and a root, or a share. `C:\` loses its separator above and
+        // reads as "the current folder on C:", and a bare `Quillmark` names a
+        // folder of whatever the current one is; neither says where the
+        // program is.
+        .filter(|p| p.is_absolute())
         // A program writes its own install location, so a protected one is
         // either a broken installer or a hostile one. Either way nothing may
         // be claimed through it: everything under the folder would count as
@@ -1353,7 +1357,7 @@ fn other_program_install_dirs(
         .map(util::expand_env_vars)
         .map(|s| s.trim().trim_matches('"').to_string())
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| p.is_absolute())
         .collect()
 }
 
