@@ -3033,6 +3033,28 @@ mod tests {
     }
 
     #[test]
+    fn what_points_at_a_gone_file_in_an_untrusted_folder_still_goes() {
+        // The program is uninstalled; its folder went with it, and the
+        // autostart, task, service and PATH entry point at nothing.
+        let base = std::env::temp_dir().join("oxidize_gone_untrusted_test");
+        let _ = fs::remove_dir_all(&base);
+        let tools = base.join("Tools");
+        let mut t = name_target("Quillmark", Some("Example Studio"));
+        t.install_location = Some(tools.clone());
+        t.exe_names = vec!["qm.exe".to_string()];
+        assert!(own_install_folder(&t).is_none());
+        let gone = tools.join("bin").join("qm.exe");
+        for hit in [
+            match_exe_item("Helper", Some(&gone), &t).map(|h| h.0),
+            match_run_value("Helper", &format!("\"{}\" --tray", gone.display()), &t).map(|h| h.0),
+            match_path_entry(&tools.join("bin"), &t).map(|h| h.0),
+        ] {
+            assert_eq!(hit, Some(Confidence::High));
+        }
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn a_bare_program_name_is_never_a_missing_file() {
         let pwsh = build_target(&registered(
             "PowerShell 7-x64",
