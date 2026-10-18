@@ -1240,10 +1240,19 @@ fn owned_exe(p: &Path, target: &ScanTarget) -> Option<(Confidence, &'static str)
         }
     }
     // A recorded folder whose name says nothing about the program, such as
-    // a games folder it was put in, is only as sure as the folder itself.
+    // a games folder it was put in, is only as sure as the folder itself
+    // while what it points at is still there. Once that file is gone with
+    // the program, what started it points at nothing and goes.
     if let Some(loc) = &target.install_location {
         if system::path_under(p, loc) {
-            return Some((Confidence::Medium, "inside the recorded install folder"));
+            return Some(if exe_missing(p) {
+                (
+                    Confidence::High,
+                    "points into the install folder, at a file that is gone",
+                )
+            } else {
+                (Confidence::Medium, "inside the recorded install folder")
+            });
         }
     }
     let base = util::file_basename_lower(&p.to_string_lossy())?;
@@ -2136,6 +2145,32 @@ fn windows_hosted_service(exe: &Path) -> bool {
         })
 }
 
+/// A `Path` entry's claim on the program. In its own install folder it is
+/// the program's. In a recorded folder whose name says nothing about it,
+/// only once the entry points at nothing: a folder still there may be
+/// another program's. A missing folder that names the product is the
+/// program's too, unless its drive is just not plugged in.
+fn match_path_entry(dir: &Path, target: &ScanTarget) -> Option<(Confidence, &'static str)> {
+    let inside = |loc: Option<&Path>| loc.is_some_and(|loc| system::path_under(dir, loc));
+    let gone = !dir.exists() && system::volume_available(dir);
+    if inside(own_install_folder(target)) {
+        Some((Confidence::High, "inside the install folder"))
+    } else if inside(target.install_location.as_deref()) {
+        Some(if gone {
+            (
+                Confidence::High,
+                "points into the install folder, at a folder that is gone",
+            )
+        } else {
+            (Confidence::Medium, "inside the recorded install folder")
+        })
+    } else if gone && path_names_product(dir, target) {
+        Some((Confidence::High, "points to a missing folder"))
+    } else {
+        None
+    }
+}
+
 fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
     let mut out = Vec::new();
 
@@ -2199,31 +2234,8 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             if system::in_windows_dir(&dir) {
                 continue;
             }
-            let inside = |loc: Option<&Path>| loc.is_some_and(|loc| system::path_under(&dir, loc));
-            if inside(own_install_folder(target)) {
-                out.push(Leftover::path_entry(
-                    hive,
-                    entry,
-                    Confidence::High,
-                    "inside the install folder",
-                ));
-            } else if inside(target.install_location.as_deref()) {
-                out.push(Leftover::path_entry(
-                    hive,
-                    entry,
-                    Confidence::Medium,
-                    "inside the recorded install folder",
-                ));
-            } else if !dir.exists()
-                && system::volume_available(&dir)
-                && path_names_product(&dir, target)
-            {
-                out.push(Leftover::path_entry(
-                    hive,
-                    entry,
-                    Confidence::High,
-                    "points to a missing folder",
-                ));
+            if let Some((conf, reason)) = match_path_entry(&dir, target) {
+                out.push(Leftover::path_entry(hive, entry, conf, reason));
             }
         }
     }
@@ -2998,24 +3010,26 @@ mod tests {
 
     #[test]
     fn what_runs_from_an_untrusted_install_folder_is_only_as_sure_as_the_folder() {
-        // A tool that recorded a folder whose name says nothing about it.
+        // A tool that recorded a folder whose name says nothing about it,
+        // holding another program's game that is still there.
+        let base = std::env::temp_dir().join("oxidize_untrusted_folder_test");
+        let _ = fs::remove_dir_all(&base);
+        let tools = base.join("Tools");
+        let game = tools.join("OtherGame").join("game.exe");
+        fs::create_dir_all(game.parent().unwrap()).unwrap();
+        fs::write(&game, "MZ").unwrap();
         let mut t = name_target("Quillmark", Some("Example Studio"));
-        t.install_location = Some(PathBuf::from(r"C:\Users\x\Tools"));
+        t.install_location = Some(tools.clone());
         assert!(own_install_folder(&t).is_none());
-        let hit = match_exe_item(
-            "Other Game",
-            Some(Path::new(r"C:\Users\x\Tools\OtherGame\game.exe")),
-            &t,
-        );
+        let hit = match_exe_item("Other Game", Some(&game), &t);
+        assert!(matches!(hit, Some((Confidence::Medium, _))), "{hit:?}");
+        let hit = match_path_entry(game.parent().unwrap(), &t);
         assert!(matches!(hit, Some((Confidence::Medium, _))), "{hit:?}");
         // Once the folder is the program's own, so is what runs from it.
         t.install_vouched = true;
-        let hit = match_exe_item(
-            "Other Game",
-            Some(Path::new(r"C:\Users\x\Tools\OtherGame\game.exe")),
-            &t,
-        );
+        let hit = match_exe_item("Other Game", Some(&game), &t);
         assert!(matches!(hit, Some((Confidence::High, _))), "{hit:?}");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
