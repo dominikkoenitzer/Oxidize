@@ -70,8 +70,35 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Commands::Backups(args) => cmd_backups(args, &g),
         Commands::Restore(args) => cmd_restore(args, &g),
         Commands::Clean(args) => cmd_clean(args, &g),
-        Commands::Mcp => crate::mcp::serve(),
+        Commands::Mcp => {
+            mcp_takes_no_run_flags(&g)?;
+            crate::mcp::serve()
+        }
     }
+}
+
+/// `oxidize mcp` serves until the assistant goes away, and its removals are
+/// planned, shown and backed up one by one. A `--dry-run` it ignored would
+/// let an assistant remove for real on a server started to try things out,
+/// so the flags that steer a single run are refused instead.
+fn mcp_takes_no_run_flags(g: &Global) -> Result<()> {
+    let given: Vec<&str> = [
+        (g.dry_run, "--dry-run"),
+        (g.yes, "--yes"),
+        (g.no_backup, "--no-backup"),
+    ]
+    .into_iter()
+    .filter_map(|(on, flag)| on.then_some(flag))
+    .collect();
+    if given.is_empty() {
+        return Ok(());
+    }
+    Err(Failure::usage(format!(
+        "oxidize mcp does not take {}: the assistant previews with plan_removal, \
+         and every plan it applies is asked for and backed up",
+        given.join(" or ")
+    ))
+    .into())
 }
 
 // list

@@ -65,6 +65,12 @@ impl Failure {
     pub fn cancelled(message: impl Into<String>, reported: bool) -> Self {
         Failure::new("cancelled", CANCELLED, message, reported)
     }
+
+    /// A command line that parses but asks for something the command does
+    /// not do.
+    pub fn usage(message: impl Into<String>) -> Self {
+        Failure::new("usage", USAGE, message, false)
+    }
 }
 
 impl fmt::Display for Failure {
