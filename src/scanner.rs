@@ -1183,8 +1183,17 @@ fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
         .any(|p| {
             p.publisher
                 .as_deref()
-                .is_some_and(|pubr| same_vendor(pubr, publisher))
+                .is_some_and(|pubr| may_be_same_vendor(pubr, publisher))
         })
+}
+
+/// [`same_vendor`] read loosely: one name the start of the other at any
+/// letter. Whether the vendor has nothing else installed decides whether its
+/// whole key and folder go, so a short form of a longer company name
+/// ("Quill" for "Quillmark Systems") has to count as that company here.
+fn may_be_same_vendor(a: &str, b: &str) -> bool {
+    let (a, b) = (without_company_form(a), without_company_form(b));
+    !a.is_empty() && !b.is_empty() && (a.starts_with(&b) || b.starts_with(&a))
 }
 
 /// Two publisher names for one vendor: the same words, or one the start of
