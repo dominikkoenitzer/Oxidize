@@ -1204,20 +1204,37 @@ fn matches_publisher(name: &str, target: &ScanTarget) -> bool {
 
 /// Is `p` inside the install folder, or does its exe name belong to the
 /// product?
-fn owned_exe(p: &Path, target: &ScanTarget) -> Option<&'static str> {
-    if let Some(loc) = &target.install_location {
-        if system::path_under(p, loc) {
-            return Some("inside the install folder");
+fn owned_exe(p: &Path, target: &ScanTarget) -> Option<(Confidence, &'static str)> {
+    if let Some(own) = own_install_folder(target) {
+        if system::path_under(p, own) {
+            return Some((Confidence::High, "inside the install folder"));
         }
     }
     if let Some(dir) = &target.vendor_dir {
         if system::path_under(p, dir) {
-            return Some("inside the vendor's folder");
+            return Some((Confidence::High, "inside the vendor's folder"));
+        }
+    }
+    // A recorded folder whose name says nothing about the program, such as
+    // a games folder it was put in, is only as sure as the folder itself.
+    if let Some(loc) = &target.install_location {
+        if system::path_under(p, loc) {
+            return Some((Confidence::Medium, "inside the recorded install folder"));
         }
     }
     let base = util::file_basename_lower(&p.to_string_lossy())?;
     if target.exe_names.contains(&base) {
-        return Some("runs the program's executable");
+        // The program's own copy is gone once it is uninstalled. A file of
+        // that name that is still there sits somewhere else and can be
+        // another program's: every runtime ships its own `node.exe`.
+        return Some(if exe_missing(p) {
+            (Confidence::High, "runs the program's executable")
+        } else {
+            (
+                Confidence::Medium,
+                "runs a file named like the program's executable",
+            )
+        });
     }
     None
 }
@@ -1940,10 +1957,18 @@ fn scan_app_paths(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Lef
             .iter()
             .any(|e| e.eq_ignore_ascii_case(&child))
         {
+            let key = format!("{base}\\{child}");
+            // The entry names the file it starts. One that starts a file of
+            // the same name in someone else's folder is theirs, not ours.
+            let conf = registry::read_string(hive, &key, "")
+                .and_then(|data| system::command_exe(&data))
+                .filter(|exe| exe.is_absolute())
+                .map(|exe| owned_exe(&exe, target).map_or(Confidence::Medium, |(c, _)| c))
+                .unwrap_or(Confidence::High);
             out.push(Leftover::reg_key(
                 hive,
-                format!("{base}\\{child}"),
-                Confidence::High,
+                key,
+                conf,
                 format!("App Paths entry for {child}"),
             ));
         }
@@ -1956,8 +1981,8 @@ fn match_run_value(name: &str, data: &str, target: &ScanTarget) -> Option<(Confi
         return Some((conf, format!("autostart, {reason}")));
     }
     let exe = locate_exe(&system::command_exe(data)?);
-    if let Some(why) = owned_exe(&exe, target) {
-        return Some((Confidence::High, format!("autostart, {why}")));
+    if let Some((conf, why)) = owned_exe(&exe, target) {
+        return Some((conf, format!("autostart, {why}")));
     }
     if exe_missing(&exe) && path_names_product(&exe, target) {
         return Some((
@@ -2055,8 +2080,8 @@ fn match_exe_item(
             return None;
         }
         let exe = locate_exe(exe);
-        if let Some(why) = owned_exe(&exe, target) {
-            return Some((Confidence::High, why.to_string()));
+        if let Some((conf, why)) = owned_exe(&exe, target) {
+            return Some((conf, why.to_string()));
         }
         if exe_missing(&exe) && path_names_product(&exe, target) {
             return Some((Confidence::High, "points to a missing file".to_string()));
@@ -2149,17 +2174,20 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             if system::in_windows_dir(&dir) {
                 continue;
             }
-            let inside = target
-                .install_location
-                .as_deref()
-                .map(|loc| system::path_under(&dir, loc))
-                .unwrap_or(false);
-            if inside {
+            let inside = |loc: Option<&Path>| loc.is_some_and(|loc| system::path_under(&dir, loc));
+            if inside(own_install_folder(target)) {
                 out.push(Leftover::path_entry(
                     hive,
                     entry,
                     Confidence::High,
                     "inside the install folder",
+                ));
+            } else if inside(target.install_location.as_deref()) {
+                out.push(Leftover::path_entry(
+                    hive,
+                    entry,
+                    Confidence::Medium,
+                    "inside the recorded install folder",
                 ));
             } else if !dir.exists() && path_names_product(&dir, target) {
                 out.push(Leftover::path_entry(
