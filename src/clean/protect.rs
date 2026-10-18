@@ -48,6 +48,9 @@ impl Protected {
 
     /// Add one entry. Returns false when it is empty or already listed.
     pub fn add(&mut self, entry: &str) -> bool {
+        // A list saved by an editor that writes a byte order mark starts
+        // with one, and it would make the first folder a name nothing has.
+        let entry = entry.trim_start_matches('\u{feff}');
         let entry = entry.trim().trim_matches('"').trim();
         if entry.is_empty() {
             return false;
@@ -107,6 +110,7 @@ impl Protected {
 
     /// Read the list from the text of the file.
     pub fn from_file_text(text: &str) -> Self {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         Protected::new(
             text.lines()
                 .map(str::trim)
