@@ -162,8 +162,13 @@ pub fn save_to(list: &Protected, path: &Path) -> Result<()> {
 /// A path the way it is compared: the real name where it exists, lower
 /// case, backslashes, no `\\?\` prefix, and no trailing separators, dots or
 /// spaces, which Windows ignores.
+///
+/// A path that does not exist (yet, or any more) takes the real name of the
+/// deepest folder of it that does: the Recycle Bin remembers where a file
+/// was, and a protected folder reached through a junction has to cover it
+/// by either name.
 pub fn key_of(path: &Path) -> String {
-    let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let real = real_name(path);
     let s = real.to_string_lossy().to_lowercase().replace('/', "\\");
     let s = s
         .strip_prefix("\\\\?\\unc\\")
@@ -175,6 +180,27 @@ pub fn key_of(path: &Path) -> String {
         .join("\\")
         .trim_end_matches('\\')
         .to_string()
+}
+
+/// `path` with the real name of its deepest existing part, and the rest
+/// as written.
+fn real_name(path: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut at = path;
+    while let Some(parent) = at.parent() {
+        match at.file_name() {
+            Some(name) => rest.push(name),
+            None => break,
+        }
+        if let Ok(real) = std::fs::canonicalize(parent) {
+            return rest.iter().rev().fold(real, |p, part| p.join(part));
+        }
+        at = parent;
+    }
+    path.to_path_buf()
 }
 
 /// The key of `name` inside the folder whose key is `parent`.
