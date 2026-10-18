@@ -212,12 +212,56 @@ pub fn enumerate_installed_programs(include_system: bool) -> Vec<Program> {
 /// that was read: `RegDeleteTree` on its own follows the process's own view,
 /// which would redirect a 32-bit build into `WOW6432Node`.
 pub fn delete_key_tree(hive: Hive, subpath: &str) -> io::Result<()> {
+    if is_shared_root_key(subpath) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to delete the shared key {}\\{subpath}",
+                hive.short_name()
+            ),
+        ));
+    }
     match subpath.rsplit_once('\\') {
         Some((parent, leaf)) => predef(hive)
             .open_subkey_with_flags(parent, KEY_READ | KEY_SET_VALUE | KEY_WOW64_64KEY)?
             .delete_subkey_all(leaf),
         None => predef(hive).delete_subkey_all(subpath),
     }
+}
+
+/// Keys no removal may take whole: a hive's own top level, any path with an
+/// empty part, and the keys every program shares. An empty name is the
+/// dangerous one: Windows reads it as "everything in the parent", so
+/// `SOFTWARE\` would empty all of `SOFTWARE`.
+pub fn is_shared_root_key(subpath: &str) -> bool {
+    const SHARED: &[&str] = &[
+        r"SOFTWARE\Classes",
+        r"SOFTWARE\Clients",
+        r"SOFTWARE\Microsoft",
+        r"SOFTWARE\Policies",
+        r"SOFTWARE\RegisteredApplications",
+        r"SOFTWARE\WOW6432Node",
+        r"SOFTWARE\WOW6432Node\Classes",
+        r"SOFTWARE\WOW6432Node\Microsoft",
+        r"SOFTWARE\WOW6432Node\Policies",
+        r"SOFTWARE\Microsoft\Windows",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\Classes\CLSID",
+        r"SOFTWARE\Classes\Applications",
+        r"SYSTEM\CurrentControlSet",
+        r"SYSTEM\CurrentControlSet\Services",
+        r"SYSTEM\ControlSet001",
+        r"SYSTEM\ControlSet001\Services",
+    ];
+    let parts: Vec<&str> = subpath.split('\\').collect();
+    parts.len() < 2
+        || parts.iter().any(|p| p.trim().is_empty())
+        || SHARED.iter().any(|k| k.eq_ignore_ascii_case(subpath))
 }
 
 /// True only when the key is genuinely not there. A key we may not open is
