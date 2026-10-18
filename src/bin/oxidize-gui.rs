@@ -698,7 +698,9 @@ impl OxidizeApp {
                     self.load_programs(ctx);
                 }
                 Msg::Removed(outcome) => {
-                    let lines = removal_log(&outcome, self.dry_run);
+                    // As the removal ran, not as the setting reads now.
+                    let dry_run = outcome.dry_run;
+                    let lines = removal_log(&outcome, dry_run);
                     let line = lines.last().cloned().unwrap_or_default();
                     self.log.extend(lines);
                     if let Some(name) = &outcome.backup_name {
@@ -714,7 +716,7 @@ impl OxidizeApp {
                     }
                     self.status = line;
                     self.job_done();
-                    if !self.dry_run {
+                    if !dry_run {
                         // Re-scan to show what remains, and refresh the list.
                         self.scan = None;
                         if let Some(program) = self.selected_program() {
