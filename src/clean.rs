@@ -263,6 +263,10 @@ pub struct Finding {
     pub folders: Vec<OrphanItem>,
     #[serde(skip)]
     work: Work,
+    /// Browser caches only: the browsers whose caches it holds, asked again
+    /// whether they run right before anything goes.
+    #[serde(skip)]
+    browsers: Vec<browsers::Browser>,
 }
 
 impl Finding {
@@ -278,6 +282,7 @@ impl Finding {
             preselected: false,
             folders: Vec::new(),
             work: Work::None,
+            browsers: Vec::new(),
         }
     }
 
@@ -671,6 +676,7 @@ fn browser_cache(places: &Places, opts: &Options) -> Finding {
         for d in &dirs {
             f.take_walk(files::walk(d, &rule, opts.protected, opts.now), rule);
         }
+        f.browsers.push(b);
     }
     if !names.is_empty() {
         f.notes.push(names.join(", "));
@@ -985,8 +991,33 @@ pub fn clean(analysis: &Analysis, choice: &Choice, opts: &CleanOptions) -> Vec<C
         match &f.work {
             Work::None => {}
             Work::Files(groups) => {
+                // A browser started since the analysis has its cache open;
+                // what is in it stays, the way it would have at the analysis.
+                let started: Vec<&browsers::Browser> = if f.browsers.is_empty() {
+                    Vec::new()
+                } else {
+                    let running = opts.tools.running_exes();
+                    f.browsers
+                        .iter()
+                        .filter(|b| browsers::is_running(b, &running))
+                        .collect()
+                };
                 for (candidates, rule) in groups {
-                    let done = files::delete(candidates, rule, opts.protected, opts.now);
+                    let mut left = Vec::new();
+                    for cand in candidates {
+                        match started
+                            .iter()
+                            .find(|b| crate::system::path_under(&cand.path, &b.data))
+                        {
+                            // Its folders stay with it, and are no files.
+                            Some(_) if cand.dir => {}
+                            Some(b) => {
+                                c.keep(KeptReason::Running(b.name.to_string()), 1, cand.bytes)
+                            }
+                            None => left.push(cand.clone()),
+                        }
+                    }
+                    let done = files::delete(&left, rule, opts.protected, opts.now);
                     c.freed += done.freed;
                     c.removed += done.files;
                     for k in done.kept {
