@@ -32,6 +32,11 @@
   says Cleaning while it cleans and what it freed afterwards, shows an undone
   cleaning as freeing nothing, and offers no cleaning with every folder
   unticked.
+- Clean up walks a temp folder only when it really is one. Without TMP and
+  TEMP, Windows names the profile as the temp folder; a profile, a drive, a
+  folder Windows keeps or anything holding one is left alone, with a note
+  saying why. A folder named by the environment counts only as a full path,
+  and the Windows folder is the one Windows names.
 
 ## 0.2.7, 2026-10-17
 
