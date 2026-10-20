@@ -210,7 +210,7 @@ pub fn child_key(parent: &str, name: &std::ffi::OsStr) -> String {
 }
 
 /// Is `p` strictly inside `dir`? Both are keys.
-fn under(p: &str, dir: &str) -> bool {
+pub(crate) fn under(p: &str, dir: &str) -> bool {
     p.len() > dir.len() && p.starts_with(dir) && p.as_bytes()[dir.len()] == b'\\'
 }
 

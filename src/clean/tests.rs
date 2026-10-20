@@ -81,6 +81,7 @@ impl Pc {
         let places = Places {
             user_temp: Some(user_temp),
             windows_temp: Some(windows_temp),
+            temp_check: TempCheck::default(),
             user_dumps: vec![
                 Spot {
                     path: local.join("CrashDumps"),
