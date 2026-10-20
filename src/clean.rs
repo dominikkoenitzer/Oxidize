@@ -14,6 +14,7 @@ pub mod files;
 pub mod jumplist;
 pub mod protect;
 pub mod recycle;
+pub mod temp_root;
 pub mod traces;
 pub mod windows;
 
@@ -31,6 +32,7 @@ use crate::{scanner, util};
 use files::{Candidate, Rule};
 use protect::Protected;
 use recycle::BinItem;
+use temp_root::TempCheck;
 use windows::Tools;
 
 /// Temporary files have to be this old, in days, before they go.
@@ -411,6 +413,9 @@ pub struct Choice {
 pub struct Places {
     pub user_temp: Option<PathBuf>,
     pub windows_temp: Option<PathBuf>,
+    /// What both temp folders are checked against before anything in them
+    /// is looked at, on top of this PC's own check.
+    pub temp_check: TempCheck,
     /// Dump and report folders of this user.
     pub user_dumps: Vec<Spot>,
     /// Machine-wide dump and report folders, which need administrator
@@ -478,6 +483,7 @@ impl Places {
         Places {
             user_temp: Some(std::env::temp_dir()),
             windows_temp: Some(windir.join("Temp")),
+            temp_check: TempCheck::this_pc().clone(),
             user_dumps,
             machine_dumps,
             recycle_bins: recycle::current_sid()
@@ -546,18 +552,34 @@ fn temp(places: &Places, opts: &Options) -> Finding {
         extensions: None,
         probe_in_use: true,
     };
-    if let Some(root) = &places.user_temp {
+    // Without TMP and TEMP the temp folder Windows names is the profile,
+    // and a variable can name any folder; only a real temp folder is
+    // walked.
+    let fit = |root: &PathBuf, f: &mut Finding, hint: &str| match temp_root::refusal(
+        root,
+        &places.temp_check,
+    ) {
+        None => true,
+        Some(why) => {
+            f.notes.push(format!(
+                "{why}, not a temp folder; nothing in it was looked at{hint}"
+            ));
+            false
+        }
+    };
+    let user_temp = places
+        .user_temp
+        .as_ref()
+        .filter(|root| fit(root, &mut f, " (TMP and TEMP name the temp folder)"));
+    if let Some(root) = user_temp {
         let walk = files::walk(root, &rule, opts.protected, opts.now);
         f.take_walk(walk, rule);
     }
     if let Some(root) = &places.windows_temp {
         // The user's own temp folder can sit inside Windows' one on some
         // setups; it was counted already.
-        let same = places
-            .user_temp
-            .as_ref()
-            .is_some_and(|u| protect::key_of(u) == protect::key_of(root));
-        if !same && root.is_dir() {
+        let same = user_temp.is_some_and(|u| protect::key_of(u) == protect::key_of(root));
+        if !same && root.is_dir() && fit(root, &mut f, "") {
             admin_walk(&mut f, root, rule, opts);
         }
     }
