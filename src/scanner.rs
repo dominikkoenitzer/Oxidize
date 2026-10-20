@@ -1321,10 +1321,12 @@ pub fn owned_folders(target: &ScanTarget) -> Vec<&Path> {
 // Filesystem
 // ----------
 
+/// A folder named by an environment variable. Only a full path counts: an
+/// empty or relative value would name a place in the current folder.
 pub fn env_dir(var: &str) -> Option<PathBuf> {
     std::env::var_os(var)
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|p| p.is_absolute())
 }
 
 /// Roots whose immediate children are inspected by name.
@@ -2413,35 +2415,6 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
 mod tests {
     use super::*;
     use crate::model::RegistryView;
-
-    fn target() -> ScanTarget {
-        let mut t = name_target("Google Chrome", Some("Google LLC"));
-        t.exe_names = vec!["chrome.exe".to_string()];
-        t.registry = Some((
-            "Google Chrome".to_string(),
-            RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
-        ));
-        t
-    }
-
-    fn listed(name: &str, key: &str, publisher: Option<&str>) -> Program {
-        Program {
-            registry_key: key.to_string(),
-            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
-            display_name: name.to_string(),
-            display_version: None,
-            publisher: publisher.map(str::to_string),
-            install_date: None,
-            install_location: None,
-            display_icon: None,
-            estimated_size_kb: None,
-            uninstall_string: None,
-            quiet_uninstall_string: None,
-            url_info_about: None,
-            is_windows_installer: false,
-            is_system_component: false,
-        }
-    }
 
     #[test]
     fn the_vendors_key_is_the_programs_only_when_nothing_else_of_theirs_is_installed() {
