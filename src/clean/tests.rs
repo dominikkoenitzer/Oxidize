@@ -688,3 +688,110 @@ fn a_huge_number_of_days_keeps_everything_instead_of_wrapping_around() {
     assert_eq!(days_ago(u64::MAX), Duration::from_secs(u64::MAX));
     assert!(days_ago(u64::MAX / 1000) > days_ago(1_000_000));
 }
+
+/// A profile laid out in the PC's folder, its files a month old, and a
+/// check that knows where its folders are.
+fn fake_profile(pc: &Pc) -> (PathBuf, TempCheck) {
+    let me = pc.root.join(r"Users\me");
+    let local = me.join(r"AppData\Local");
+    file_aged(&me.join("notes.txt"), 20, 60);
+    file_aged(&me.join(r"Documents\thesis.docx"), 100, 60);
+    file_aged(&me.join(r"Projects\app\main.rs"), 70, 60);
+    file_aged(&me.join(r"AppData\Roaming\Vendor\settings.json"), 30, 60);
+    file_aged(&local.join(r"Oxidize\backups\one\manifest.json"), 40, 60);
+    file_aged(&local.join(r"Temp\old.tmp"), 50, 60);
+    for d in [
+        r"Documents",
+        r"Projects\app",
+        r"Projects",
+        r"AppData\Roaming\Vendor",
+        r"AppData\Local\Oxidize\backups\one",
+    ] {
+        age(&me.join(d), 60);
+    }
+    let check = TempCheck {
+        kept: vec![
+            pc.root.join("Users"),
+            me.clone(),
+            me.join("Documents"),
+            me.join(r"AppData\Roaming"),
+            local.clone(),
+            local.join("Oxidize"),
+        ],
+        homes: vec![local.join("Temp")],
+        profile: Some(me.clone()),
+    };
+    (me, check)
+}
+
+#[test]
+fn a_temp_folder_that_is_no_temp_folder_is_never_walked_or_cleaned() {
+    for (name, inside) in [
+        ("profile", ""),
+        ("appdata", "AppData"),
+        ("local", r"AppData\Local"),
+        ("documents", "Documents"),
+        ("projects", "Projects"),
+    ] {
+        let mut pc = Pc::new(&format!("not_temp_{name}"));
+        let (me, check) = fake_profile(&pc);
+        let given = if inside.is_empty() {
+            me.clone()
+        } else {
+            me.join(inside)
+        };
+        pc.places.user_temp = Some(given.clone());
+        // Windows' temp folder named as the folder of all profiles, walked
+        // with administrator rights if it were let through.
+        pc.places.windows_temp = Some(pc.root.join("Users"));
+        pc.places.temp_check = check;
+        let before = pc.snapshot();
+        let tools = FakeTools::default();
+        let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+        let temp = a.finding(Category::Temp).unwrap();
+        assert_eq!((temp.count, temp.bytes), (0, 0), "{name}");
+        assert!(temp.kept.is_empty(), "{name}: {:?}", temp.kept);
+        assert_eq!(temp.notes.len(), 2, "{name}: {:?}", temp.notes);
+        assert!(
+            temp.notes[0].starts_with(&given.display().to_string())
+                && temp.notes[0].contains("not a temp folder")
+                && temp.notes[0].contains("TMP and TEMP"),
+            "{name}: {}",
+            temp.notes[0]
+        );
+        // Chosen by hand, though the analysis offers nothing to choose.
+        let chosen = Choice {
+            categories: vec![Category::Temp],
+            folders: Vec::new(),
+        };
+        let done = clean_with(&pc, &a, &chosen, &Protected::default(), true, &tools);
+        assert_eq!((done[0].removed, done[0].freed), (0, 0), "{name}");
+        assert_eq!(pc.snapshot(), before, "{name}: something was touched");
+    }
+    let mut pc = Pc::new("not_temp_control");
+    let (me, check) = fake_profile(&pc);
+    pc.places.user_temp = Some(me.join(r"AppData\Local\Temp"));
+    pc.places.temp_check = check;
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    assert!(a.finding(Category::Temp).unwrap().notes.is_empty());
+    let done = clean_with(
+        &pc,
+        &a,
+        &a.choice(&[Category::Temp], Confidence::High),
+        &Protected::default(),
+        false,
+        &tools,
+    );
+    assert_eq!((done[0].removed, done[0].freed), (1, 50));
+    assert!(!me.join(r"AppData\Local\Temp\old.tmp").exists());
+    for kept in [
+        "notes.txt",
+        r"Documents\thesis.docx",
+        r"Projects\app\main.rs",
+        r"AppData\Roaming\Vendor\settings.json",
+        r"AppData\Local\Oxidize\backups\one\manifest.json",
+    ] {
+        assert!(me.join(kept).exists(), "{kept}");
+    }
+}
