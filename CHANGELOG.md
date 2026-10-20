@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.8, 2026-10-20
 
 - A removal never takes the folders Windows keeps for the user (Downloads,
   Saved Games, the cloud folder, the desktops and the rest), wherever they
