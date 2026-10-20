@@ -198,15 +198,16 @@
     }
   },
   "new": {
-    "version": "0.2.7",
+    "version": "0.2.8",
     "items": [
-      "Oxidize's own folder, which holds its backups, is never taken for a leftover or for a folder no program claims, so a clean-up can no longer move the backups.",
-      "A calmer window: plain tabs, the settings in one Options menu, a dry run shown in the top bar, no size bars, and a quiet selected row.",
-      "Clean up shows what it would free and its one action at the top. Files and Clean slate are two views, and beside the list each category says what it would free, what cleans it and whether it can be undone. The protected folders open when you ask for them.",
-      "On a screen taller than it is wide, the details sit under the list.",
-      "Ctrl+F searches the program list, and a search that finds nothing says what it looked for.",
-      "A confirmation's button says what it does, and is red when it cannot be undone.",
-      "An empty name is refused instead of matching every program, and what could not be read is counted in items."
+      "A removal never takes the folders Windows keeps for you (Downloads, Saved Games, the cloud folder, the desktops and the rest), wherever they really are, and a folder in Downloads or on a desktop that a removal empties stays.",
+      "Clean up walks a temp folder only when it really is one: a profile, a drive or a folder Windows keeps is left alone, with a note saying why. It asks again right before it cleans whether a browser runs.",
+      "Restore puts a copy back only from its own backup and only to where it came from, and imports a registry export only into the key it was taken from.",
+      "A registry path with an empty part, or a key every program shares, is never deleted.",
+      "A file named like the program's but somewhere else, or anything in an install folder whose name says nothing about the program, counts at Medium only.",
+      "A working autostart with spaces in its path is no longer taken for a dangling one, and a file on a drive that is not plugged in counts as there.",
+      "<code>oxidize mcp</code> refuses <code>--dry-run</code>, <code>--yes</code> and <code>--no-backup</code>, and waits up to 30 minutes for an uninstaller to finish.",
+      "The window runs one thing at a time, waits for running work before it closes, and shows an undone cleaning as freeing nothing."
     ]
   },
   "requirements": [
