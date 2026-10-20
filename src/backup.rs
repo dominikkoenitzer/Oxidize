@@ -339,10 +339,8 @@ fn unused_root(base: &Path, stem: &str) -> PathBuf {
 /// `%LOCALAPPDATA%\Oxidize\backups`.
 #[cfg(not(test))]
 pub fn backups_base() -> Result<PathBuf> {
-    let local = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .context("LOCALAPPDATA is not set")?;
+    let local = crate::scanner::env_dir("LOCALAPPDATA")
+        .context("LOCALAPPDATA is not set to a full path")?;
     Ok(local.join("Oxidize").join("backups"))
 }
 

@@ -124,10 +124,8 @@ impl Protected {
 
 /// `%LOCALAPPDATA%\Oxidize\protected.txt`.
 pub fn file_path() -> Result<PathBuf> {
-    let local = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
-        .context("LOCALAPPDATA is not set")?;
+    let local = crate::scanner::env_dir("LOCALAPPDATA")
+        .context("LOCALAPPDATA is not set to a full path")?;
     Ok(local.join("Oxidize").join(FILE_NAME))
 }
 
