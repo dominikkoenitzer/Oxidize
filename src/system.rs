@@ -18,20 +18,74 @@ pub const SERVICES_KEY: &str = r"SYSTEM\CurrentControlSet\Services";
 
 /// Absolute path of a System32 executable, so PATH cannot redirect us.
 pub fn system32(exe: &str) -> String {
-    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
-    format!(r"{root}\System32\{exe}")
+    windir()
+        .join("System32")
+        .join(exe)
+        .to_string_lossy()
+        .to_string()
 }
 
-/// `%SystemRoot%`, falling back to the usual place when the variable is gone:
-/// a guard that disappears with an environment variable is no guard.
+/// The Windows folder, as Windows itself names it. `%SystemRoot%` is only
+/// asked when Windows does not answer, and only a full path counts: an empty
+/// or relative value would put the Windows folder, and every guard on it, in
+/// the current folder. A guard that disappears with an environment variable
+/// is no guard.
 pub fn windows_dir() -> PathBuf {
     windir()
 }
 
 fn windir() -> PathBuf {
-    std::env::var_os("SystemRoot")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        known_folder(Known::Windows)
+            .or_else(|| {
+                std::env::var_os("SystemRoot")
+                    .map(PathBuf::from)
+                    .filter(|p| p.is_absolute())
+            })
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+    })
+    .clone()
+}
+
+/// A folder Windows keeps, asked for by name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Known {
+    Windows,
+    Profile,
+    LocalAppData,
+}
+
+/// Where Windows says `which` is, whatever the environment says. None when
+/// Windows does not answer.
+pub fn known_folder(which: Known) -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::Shell::*;
+        let id = match which {
+            Known::Windows => FOLDERID_Windows,
+            Known::Profile => FOLDERID_Profile,
+            Known::LocalAppData => FOLDERID_LocalAppData,
+        };
+        known_path(&id)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = which;
+        None
+    }
+}
+
+/// `SHGetKnownFolderPath` without creating the folder: one that is not
+/// there yet still names the place it would be. Only a full path counts.
+#[cfg(windows)]
+fn known_path(id: &windows::core::GUID) -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::*;
+    let raw = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DONT_VERIFY, None) }.ok()?;
+    let text = unsafe { raw.to_string() };
+    unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
+    Some(PathBuf::from(text.ok()?)).filter(|p| p.is_absolute())
 }
 
 /// Case-insensitive "is `p` inside `dir`" on string paths.
@@ -72,7 +126,6 @@ enum KnownSet {
 
 #[cfg(windows)]
 fn read_known_folders(set: KnownSet) -> Vec<PathBuf> {
-    use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::*;
 
     let user_files = [
@@ -134,16 +187,8 @@ fn read_known_folders(set: KnownSet) -> Vec<PathBuf> {
     };
     let mut out: Vec<PathBuf> = Vec::new();
     for id in ids {
-        // Never creates the folder; one that is not there yet still names
-        // the place it would be.
-        let Ok(raw) = (unsafe { SHGetKnownFolderPath(&id, KF_FLAG_DONT_VERIFY, None) }) else {
-            continue;
-        };
-        let text = unsafe { raw.to_string() };
-        unsafe { CoTaskMemFree(Some(raw.0 as *const _)) };
-        if let Ok(text) = text {
-            let path = PathBuf::from(text);
-            if !path.as_os_str().is_empty() && !out.contains(&path) {
+        if let Some(path) = known_path(&id) {
+            if !out.contains(&path) {
                 out.push(path);
             }
         }
