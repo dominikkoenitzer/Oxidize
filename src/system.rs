@@ -900,6 +900,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_windows_folder_is_where_windows_says_it_is() {
+        let dir = windows_dir();
+        assert!(
+            dir.is_absolute() && dir.join("System32").is_dir(),
+            "{}",
+            dir.display()
+        );
+        assert_eq!(Some(dir.clone()), known_folder(Known::Windows));
+        let exe = PathBuf::from(system32("wevtutil.exe"));
+        assert!(
+            exe.is_absolute() && exe.starts_with(&dir),
+            "{}",
+            exe.display()
+        );
+    }
+
+    #[test]
     fn an_unquoted_path_with_spaces_is_never_cut_at_the_first_space() {
         let dir = std::env::temp_dir().join("oxidize audit command exe");
         let _ = fs::remove_dir_all(&dir);
