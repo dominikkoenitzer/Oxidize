@@ -2417,6 +2417,53 @@ mod tests {
     use crate::model::RegistryView;
 
     #[test]
+    fn a_folder_from_the_environment_is_a_full_path_or_none() {
+        for (name, value) in [
+            ("OXIDIZE_ENV_DIR_EMPTY", ""),
+            ("OXIDIZE_ENV_DIR_RELATIVE", r"AppData\Local"),
+            ("OXIDIZE_ENV_DIR_ROOTLESS", r"\Users\me"),
+        ] {
+            std::env::set_var(name, value);
+            assert_eq!(env_dir(name), None, "{value:?}");
+        }
+        std::env::set_var("OXIDIZE_ENV_DIR_FULL", r"C:\Users\me");
+        assert_eq!(
+            env_dir("OXIDIZE_ENV_DIR_FULL"),
+            Some(PathBuf::from(r"C:\Users\me"))
+        );
+        assert_eq!(env_dir("OXIDIZE_ENV_DIR_UNSET"), None);
+    }
+
+    fn target() -> ScanTarget {
+        let mut t = name_target("Google Chrome", Some("Google LLC"));
+        t.exe_names = vec!["chrome.exe".to_string()];
+        t.registry = Some((
+            "Google Chrome".to_string(),
+            RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
+        ));
+        t
+    }
+
+    fn listed(name: &str, key: &str, publisher: Option<&str>) -> Program {
+        Program {
+            registry_key: key.to_string(),
+            source: RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+            display_name: name.to_string(),
+            display_version: None,
+            publisher: publisher.map(str::to_string),
+            install_date: None,
+            install_location: None,
+            display_icon: None,
+            estimated_size_kb: None,
+            uninstall_string: None,
+            quiet_uninstall_string: None,
+            url_info_about: None,
+            is_windows_installer: false,
+            is_system_component: false,
+        }
+    }
+
+    #[test]
     fn the_vendors_key_is_the_programs_only_when_nothing_else_of_theirs_is_installed() {
         let mut t = name_target("Example Player", Some("Example Studio Inc."));
         t.registry = Some((
