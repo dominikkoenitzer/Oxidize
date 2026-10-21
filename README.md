@@ -2,7 +2,7 @@
 
 Oxidize uninstalls Windows programs and removes what they leave behind.
 
-[Download Oxidize](https://get-oxidize.vercel.app), then double-click it.
+[Download Oxidize](https://oxidize.punds.ch), then double-click it.
 
 The file is not signed, so Windows may say "Windows protected your PC"; click More info, then Run anyway.
 
@@ -188,9 +188,9 @@ Oxidize runs on Windows only and has no installer. Each release has three files:
 
 | file | |
 |---|---|
-| [`oxidize-gui.exe`](https://get-oxidize.vercel.app) | the window app |
-| [`oxidize.exe`](https://get-oxidize.vercel.app) | the command line |
-| [`oxidize-windows-x64.zip`](https://get-oxidize.vercel.app) | both in one zip |
+| [`oxidize-gui.exe`](https://oxidize.punds.ch) | the window app |
+| [`oxidize.exe`](https://oxidize.punds.ch) | the command line |
+| [`oxidize-windows-x64.zip`](https://oxidize.punds.ch) | both in one zip |
 
 To type `oxidize` in any terminal, `oxidize.exe` has to be in a folder on your
 PATH. Make a folder such as `C:\Tools` and move `oxidize.exe` into it. Search
