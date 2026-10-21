@@ -1,6 +1,6 @@
 # Download page
 
-The page behind https://get-oxidize.vercel.app: static files, no build step on the server.
+The page behind https://oxidize.punds.ch: static files, no build step on the server.
 It names no author and does not link to this repository.
 
 - `page.json` holds every word on the page and which screenshots it shows.
