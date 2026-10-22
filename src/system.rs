@@ -3,8 +3,9 @@
 //! folders and keys. Read here, removed through `safety`.
 
 use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use anyhow::{bail, Context, Result};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -386,22 +387,48 @@ pub fn services() -> Vec<ServiceInfo> {
 
 /// Stop and delete a service. Needs elevation.
 pub fn delete_service(name: &str) -> Result<()> {
+    delete_service_with(name, Command::output)
+}
+
+/// `delete_service`, with `run` running each sc command.
+fn delete_service_with(
+    name: &str,
+    mut run: impl FnMut(&mut Command) -> io::Result<Output>,
+) -> Result<()> {
+    use windows::Win32::Globalization::CP_OEMCP;
     let sc = system32("sc.exe");
     // Stopping may fail because it is already stopped; that is fine.
-    let _ = Command::new(&sc).args(["stop", name]).output();
-    let out = Command::new(&sc)
-        .args(["delete", name])
-        .output()
-        .context("running sc delete")?;
+    let _ = run(Command::new(&sc).args(["stop", name]));
+    let out = run(Command::new(&sc).args(["delete", name])).context("running sc delete")?;
     match out.status.code() {
         // 1060: does not exist. 1072: already marked for deletion.
         Some(0) | Some(1060) | Some(1072) => Ok(()),
+        // sc writes to a pipe in the OEM code page, whatever the console uses.
         Some(code) => bail!(
             "sc delete failed with code {code}: {}",
-            String::from_utf8_lossy(&out.stdout).trim()
+            code_page_text(&out.stdout, CP_OEMCP).trim()
         ),
         None => bail!("sc delete was terminated"),
     }
+}
+
+/// `bytes` as a console tool wrote them to a pipe in `code_page`.
+fn code_page_text(bytes: &[u8], code_page: u32) -> String {
+    use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    if bytes.is_empty() || i32::try_from(bytes.len()).is_err() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // SAFETY: both slices are live and the call reads and writes only within them.
+    let needed = unsafe { MultiByteToWideChar(code_page, flags, bytes, None) };
+    let mut wide = vec![0u16; usize::try_from(needed).unwrap_or(0)];
+    if wide.is_empty() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // SAFETY: as above.
+    let written = unsafe { MultiByteToWideChar(code_page, flags, bytes, Some(&mut wide)) };
+    wide.truncate(usize::try_from(written).unwrap_or(0));
+    String::from_utf16_lossy(&wide)
 }
 
 // Scheduled tasks
@@ -996,6 +1023,176 @@ mod tests {
         // A path with a folder is not looked up.
         assert_eq!(find(r"C:\Elsewhere\tool.exe"), None);
         assert_eq!(find(r"bin\tool.exe"), None);
+    }
+
+    /// An sc run that ended with `code` after printing `stdout`.
+    fn sc_exited(code: u32, stdout: &[u8]) -> io::Result<Output> {
+        use std::os::windows::process::ExitStatusExt;
+        Ok(Output {
+            status: std::process::ExitStatus::from_raw(code),
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    /// Remove `name` with sc answering from `results`, never running it.
+    /// Returns the outcome and each command line, program first.
+    fn remove_service(
+        name: &str,
+        results: Vec<io::Result<Output>>,
+    ) -> (Result<()>, Vec<Vec<String>>) {
+        let mut results = results.into_iter();
+        let mut ran = Vec::new();
+        let outcome = delete_service_with(name, |cmd| {
+            let mut line = vec![cmd.get_program().to_string_lossy().into_owned()];
+            line.extend(cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
+            ran.push(line);
+            results.next().expect("sc ran more often than expected")
+        });
+        (outcome, ran)
+    }
+
+    fn sc_line(args: &[&str]) -> Vec<String> {
+        let mut line = vec![system32("sc.exe")];
+        line.extend(args.iter().map(|a| a.to_string()));
+        line
+    }
+
+    #[test]
+    fn a_running_service_is_stopped_then_deleted() {
+        let stop_pending =
+            b"\r\nSERVICE_NAME: Svc\r\n        STATE              : 3  STOP_PENDING\r\n";
+        let (outcome, ran) = remove_service(
+            "Svc",
+            vec![
+                sc_exited(0, stop_pending),
+                sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+            ],
+        );
+        outcome.unwrap();
+        assert_eq!(
+            ran,
+            [sc_line(&["stop", "Svc"]), sc_line(&["delete", "Svc"])]
+        );
+        assert!(Path::new(&ran[0][0]).is_absolute(), "{}", ran[0][0]);
+        assert!(ran[0][0].to_lowercase().ends_with(r"\system32\sc.exe"));
+    }
+
+    #[test]
+    fn a_stopped_service_is_deleted_all_the_same() {
+        let not_started =
+            b"[SC] ControlService FAILED 1062:\r\n\r\nThe service has not been started.\r\n\r\n";
+        let (outcome, ran) = remove_service(
+            "Svc",
+            vec![
+                sc_exited(1062, not_started),
+                sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+            ],
+        );
+        outcome.unwrap();
+        assert_eq!(ran.len(), 2);
+    }
+
+    #[test]
+    fn a_failed_stop_still_leads_to_the_delete() {
+        let cannot_stop = b"[SC] ControlService FAILED 1052:\r\n\r\nThe requested control is not valid for this service.\r\n\r\n";
+        for stop in [
+            sc_exited(1052, cannot_stop),
+            Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+        ] {
+            let (outcome, ran) = remove_service(
+                "Svc",
+                vec![stop, sc_exited(0, b"[SC] DeleteService SUCCESS\r\n")],
+            );
+            outcome.unwrap();
+            assert_eq!(ran[1], sc_line(&["delete", "Svc"]));
+        }
+    }
+
+    #[test]
+    fn a_service_name_with_spaces_or_quotes_reaches_sc_as_one_argument() {
+        for name in [
+            "Vendor Update Service",
+            r#"Vendor "Quoted" Service"#,
+            r#"Ends with a quote""#,
+            " padded ",
+        ] {
+            let (outcome, ran) = remove_service(name, vec![sc_exited(0, b""), sc_exited(0, b"")]);
+            outcome.unwrap();
+            assert_eq!(
+                ran,
+                [sc_line(&["stop", name]), sc_line(&["delete", name])],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_service_or_one_already_marked_counts_as_removed() {
+        let missing = b"[SC] OpenService FAILED 1060:\r\n\r\nThe specified service does not exist as an installed service.\r\n\r\n";
+        let marked = b"[SC] DeleteService FAILED 1072:\r\n\r\nThe specified service has been marked for deletion.\r\n\r\n";
+        remove_service(
+            "Gone",
+            vec![sc_exited(1060, missing), sc_exited(1060, missing)],
+        )
+        .0
+        .unwrap();
+        remove_service("Going", vec![sc_exited(0, b""), sc_exited(1072, marked)])
+            .0
+            .unwrap();
+    }
+
+    #[test]
+    fn access_denied_is_an_error_that_says_what_sc_printed() {
+        let denied = b"[SC] OpenService FAILED 5:\r\n\r\nAccess is denied.\r\n\r\n";
+        let (outcome, ran) =
+            remove_service("Svc", vec![sc_exited(5, denied), sc_exited(5, denied)]);
+        assert_eq!(
+            outcome.unwrap_err().to_string(),
+            "sc delete failed with code 5: [SC] OpenService FAILED 5:\r\n\r\nAccess is denied."
+        );
+        assert_eq!(ran.len(), 2);
+    }
+
+    #[test]
+    fn sc_that_cannot_start_is_an_error() {
+        let (outcome, _) = remove_service(
+            "Svc",
+            vec![
+                Err(io::Error::from(io::ErrorKind::NotFound)),
+                Err(io::Error::from(io::ErrorKind::NotFound)),
+            ],
+        );
+        assert_eq!(outcome.unwrap_err().to_string(), "running sc delete");
+    }
+
+    #[test]
+    fn text_is_read_in_the_code_page_it_was_written_in() {
+        // "Accès refusé." in code pages 437 and 850.
+        let french = b"Acc\x8as refus\x82.";
+        assert_eq!(code_page_text(french, 437), "Accès refusé.");
+        assert_eq!(code_page_text(french, 850), "Accès refusé.");
+        assert_eq!(
+            code_page_text("Dienst für Updates".as_bytes(), 65001),
+            "Dienst für Updates"
+        );
+        assert_eq!(code_page_text(b"", 850), "");
+    }
+
+    #[test]
+    fn a_failure_reads_what_sc_printed_in_the_oem_code_page() {
+        let denied = b"[SC] OpenService FAILED 5:\r\n\r\nAcc\x8as refus\x82.\r\n\r\n";
+        let (outcome, _) = remove_service("Svc", vec![sc_exited(5, denied), sc_exited(5, denied)]);
+        let oem = unsafe { windows::Win32::Globalization::GetOEMCP() };
+        let message = outcome.unwrap_err().to_string();
+        assert_eq!(
+            message,
+            format!(
+                "sc delete failed with code 5: [SC] OpenService FAILED 5:\r\n\r\n{}",
+                code_page_text(b"Acc\x8as refus\x82.", oem)
+            )
+        );
+        assert!(!message.contains(char::REPLACEMENT_CHARACTER), "{message}");
     }
 
     #[test]
