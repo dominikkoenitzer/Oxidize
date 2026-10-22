@@ -395,6 +395,7 @@ fn delete_service_with(
     name: &str,
     mut run: impl FnMut(&mut Command) -> io::Result<Output>,
 ) -> Result<()> {
+    use windows::Win32::Globalization::CP_OEMCP;
     let sc = system32("sc.exe");
     // Stopping may fail because it is already stopped; that is fine.
     let _ = run(Command::new(&sc).args(["stop", name]));
@@ -402,12 +403,32 @@ fn delete_service_with(
     match out.status.code() {
         // 1060: does not exist. 1072: already marked for deletion.
         Some(0) | Some(1060) | Some(1072) => Ok(()),
+        // sc writes to a pipe in the OEM code page, whatever the console uses.
         Some(code) => bail!(
             "sc delete failed with code {code}: {}",
-            String::from_utf8_lossy(&out.stdout).trim()
+            code_page_text(&out.stdout, CP_OEMCP).trim()
         ),
         None => bail!("sc delete was terminated"),
     }
+}
+
+/// `bytes` as a console tool wrote them to a pipe in `code_page`.
+fn code_page_text(bytes: &[u8], code_page: u32) -> String {
+    use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
+    let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    if bytes.is_empty() || i32::try_from(bytes.len()).is_err() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // SAFETY: both slices are live and the call reads and writes only within them.
+    let needed = unsafe { MultiByteToWideChar(code_page, flags, bytes, None) };
+    let mut wide = vec![0u16; usize::try_from(needed).unwrap_or(0)];
+    if wide.is_empty() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    // SAFETY: as above.
+    let written = unsafe { MultiByteToWideChar(code_page, flags, bytes, Some(&mut wide)) };
+    wide.truncate(usize::try_from(written).unwrap_or(0));
+    String::from_utf16_lossy(&wide)
 }
 
 // Scheduled tasks
@@ -1143,6 +1164,35 @@ mod tests {
             ],
         );
         assert_eq!(outcome.unwrap_err().to_string(), "running sc delete");
+    }
+
+    #[test]
+    fn text_is_read_in_the_code_page_it_was_written_in() {
+        // "Accès refusé." in code pages 437 and 850.
+        let french = b"Acc\x8as refus\x82.";
+        assert_eq!(code_page_text(french, 437), "Accès refusé.");
+        assert_eq!(code_page_text(french, 850), "Accès refusé.");
+        assert_eq!(
+            code_page_text("Dienst für Updates".as_bytes(), 65001),
+            "Dienst für Updates"
+        );
+        assert_eq!(code_page_text(b"", 850), "");
+    }
+
+    #[test]
+    fn a_failure_reads_what_sc_printed_in_the_oem_code_page() {
+        let denied = b"[SC] OpenService FAILED 5:\r\n\r\nAcc\x8as refus\x82.\r\n\r\n";
+        let (outcome, _) = remove_service("Svc", vec![sc_exited(5, denied), sc_exited(5, denied)]);
+        let oem = unsafe { windows::Win32::Globalization::GetOEMCP() };
+        let message = outcome.unwrap_err().to_string();
+        assert_eq!(
+            message,
+            format!(
+                "sc delete failed with code 5: [SC] OpenService FAILED 5:\r\n\r\n{}",
+                code_page_text(b"Acc\x8as refus\x82.", oem)
+            )
+        );
+        assert!(!message.contains(char::REPLACEMENT_CHARACTER), "{message}");
     }
 
     #[test]
