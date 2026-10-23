@@ -1998,6 +1998,32 @@ fn restore_goes_ahead(dry_run: bool, yes: bool, json: bool, ask: impl FnOnce() -
     ask()
 }
 
+/// `restore --json`: each item, and the backup as it is now. After a real
+/// run it is read again, so a whole restore shows as restored and what went
+/// back no longer counts toward its size.
+fn restore_json(
+    info: &backup::BackupInfo,
+    items: &[restore::RestoreItem],
+    dry_run: bool,
+) -> serde_json::Value {
+    let now = (!dry_run)
+        .then(|| backup::list_backups().ok())
+        .flatten()
+        .and_then(|all| all.into_iter().find(|b| b.path == info.path));
+    let info = now.as_ref().unwrap_or(info);
+    let arr: Vec<_> = items
+        .iter()
+        .map(|i| {
+            json!({
+                "path": i.path,
+                "ok": i.result.is_ok(),
+                "error": i.result.as_ref().err(),
+            })
+        })
+        .collect();
+    json!({ "backup": info, "items": arr })
+}
+
 fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     let info = backup::find_backup(&args.name)?;
     let question = format!("Restore {} items from {}?", info.items, info.name);
@@ -2022,19 +2048,9 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     };
 
     if g.json {
-        let arr: Vec<_> = items
-            .iter()
-            .map(|i| {
-                json!({
-                    "path": i.path,
-                    "ok": i.result.is_ok(),
-                    "error": i.result.as_ref().err(),
-                })
-            })
-            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({ "backup": info, "items": arr }))?
+            serde_json::to_string_pretty(&restore_json(&info, &items, g.dry_run))?
         );
         if failed > 0 && !g.dry_run {
             return Err(incomplete().into());
@@ -4009,6 +4025,39 @@ mod tests {
         // otherwise the answer decides
         assert!(restore_goes_ahead(false, false, false, || true));
         assert!(!restore_goes_ahead(false, false, false, || false));
+    }
+
+    #[test]
+    fn a_whole_restore_as_json_lists_the_backup_as_restored_and_emptied() {
+        let root = std::env::temp_dir().join("oxidize_restore_json");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("settings.ini");
+        std::fs::write(&file, vec![b'x'; 65536]).unwrap();
+        let mut session = backup::BackupSession::new("Oxidize Restore Json Test").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        let info = backup::find_backup(&session.name()).unwrap();
+        assert!(info.size_bytes > 65536);
+
+        // A dry run puts nothing back, so the backup is listed as it was.
+        let items = restore::restore(&info, true).unwrap();
+        let j = restore_json(&info, &items, true);
+        assert_eq!(j["backup"]["size_bytes"], info.size_bytes);
+        assert!(j["backup"]["restored"].is_null());
+
+        let items = restore::restore(&info, false).unwrap();
+        let j = restore_json(&info, &items, false);
+        assert_eq!(j["items"][0]["ok"], true);
+        assert!(j["backup"]["restored"].is_string());
+        // Only the manifest is left in it.
+        let manifest = std::fs::metadata(session.root().join(backup::MANIFEST)).unwrap();
+        assert_eq!(j["backup"]["size_bytes"], manifest.len());
+
+        let base = backup::backups_base().unwrap();
+        let _ = std::fs::remove_dir_all(session.root());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir(&base);
+        let _ = std::fs::remove_dir(base.parent().unwrap());
     }
 
     #[test]
