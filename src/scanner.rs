@@ -2657,6 +2657,45 @@ mod tests {
     }
 
     #[test]
+    fn a_removed_program_takes_its_publisher_from_the_backup_of_its_removal() {
+        let root = std::env::temp_dir().join("oxidize_publisher_hint");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("settings.ini");
+        fs::write(&file, b"x").unwrap();
+        let mut session = crate::backup::BackupSession::new("Penwright").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        let registry = session.root().join("registry");
+        fs::create_dir_all(&registry).unwrap();
+        let text = "Windows Registry Editor Version 5.00\r\n\r\n\
+            [HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Penwright]\r\n\
+            \"DisplayName\"=\"Penwright\"\r\n\
+            \"Publisher\"=\"Inkhorn Software\"\r\n\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(registry.join("uninstall.reg"), bytes).unwrap();
+
+        // Found in the backup, so the names Windows cached are never read.
+        assert_eq!(
+            crate::backup::recorded_publisher("Penwright").as_deref(),
+            Some("Inkhorn Software")
+        );
+        let t = removed_program_target("Penwright", None);
+        assert_eq!(t.publisher.as_deref(), Some("Inkhorn Software"));
+        // A publisher the user names comes first.
+        let t = removed_program_target("Penwright", Some("Someone Else"));
+        assert_eq!(t.publisher.as_deref(), Some("Someone Else"));
+
+        let base = crate::backup::backups_base().unwrap();
+        let _ = fs::remove_dir_all(session.root());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir(&base);
+        let _ = fs::remove_dir(base.parent().unwrap());
+    }
+
+    #[test]
     fn vendor_only_name_keeps_its_token() {
         let t = name_target("Steam", Some("Valve Corporation"));
         assert_eq!(t.name_tokens, vec!["steam".to_string()]);
