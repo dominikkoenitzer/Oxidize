@@ -127,6 +127,16 @@ Counts what each category holds, from the files themselves, and what stays and w
 - `--orphans`: folders no installed program claims, under the roots `orphans` reads. A folder named like a program Oxidize or Windows Installer removed is High by the leftover rules, a looser match Medium, every other Low. They are moved into a backup like leftovers.
 - Folders and files listed in `%LOCALAPPDATA%\Oxidize\protected.txt` are never cleaned, with everything inside them; a folder that holds one is never removed as a whole.
 - `--no-backup` deletes the folders of removed programs for good. Nothing else the command cleans is backed up.
+- With `--json`, the plan and the run both carry `summary`: `bytes`, `count` and `protected` (`count` and `bytes` the protected list kept), in total and per category id under `categories`. Compare two runs by it.
+
+## protect
+
+`oxidize protect [--check PATH]`
+
+Reads only. Without `--check` it prints the protected list; with `--json`, its `file` and `entries`.
+
+- `--check PATH`: whether `PATH` is listed itself or lies inside a listed folder. `%VAR%` references are expanded and a relative path is taken from the current folder. The comparison is by the full real name, so a folder reached through a junction answers by either name, and `C:\Tools\wt` is not covered by `C:\Tools\wt-old`.
+- `--json` prints `path`, `resolved` (the full path as compared, lower case), `protected`, `by` (the entry as written that covers it, or `null`) and `holds` (entries inside it; such a folder is cleaned but never removed as a whole). The exit code is 0 either way.
 
 ## Backup folder
 
