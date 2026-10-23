@@ -12,8 +12,8 @@ use crate::backup;
 use crate::clean::traces::{self, TraceFinding};
 use crate::clean::{self, Analysis, Category, Choice, Cleaned, Finding};
 use crate::cli::{
-    BackupsArgs, CleanArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, RestoreArgs, ScanArgs,
-    SortKey, TraceArgs, UninstallArgs,
+    BackupsArgs, CleanArgs, Cli, Commands, LevelOpts, ListArgs, OrphansArgs, ProtectArgs,
+    RestoreArgs, ScanArgs, SortKey, TraceArgs, UninstallArgs,
 };
 use crate::exit::{self, Failure};
 use crate::model::{
@@ -70,6 +70,7 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Commands::Backups(args) => cmd_backups(args, &g),
         Commands::Restore(args) => cmd_restore(args, &g),
         Commands::Clean(args) => cmd_clean(args, &g),
+        Commands::Protect(args) => cmd_protect(args, &g),
         Commands::Mcp => {
             mcp_takes_no_run_flags(&g)?;
             crate::mcp::serve()
@@ -2126,7 +2127,11 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
         if g.json {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&json!({ "cleaned": [], "freed": 0 }))?
+                serde_json::to_string_pretty(&json!({
+                    "cleaned": [],
+                    "freed": 0,
+                    "summary": clean::Summary::default(),
+                }))?
             );
         } else {
             println!();
@@ -2143,7 +2148,11 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     if g.json {
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({ "cleaned": done, "freed": freed }))?
+            serde_json::to_string_pretty(&json!({
+                "cleaned": done,
+                "freed": freed,
+                "summary": clean::cleaned_summary(&done),
+            }))?
         );
     } else {
         print_cleaned(&done, freed);
@@ -2254,6 +2263,7 @@ pub(crate) fn clean_plan_json(analysis: &Analysis, choice: &Choice) -> serde_jso
         "chosen": choice.categories,
         "chosen_folders": choice.folders,
         "chosen_bytes": analysis.chosen_bytes(choice),
+        "summary": analysis.summary(),
     })
 }
 
@@ -2413,6 +2423,98 @@ fn print_cleaned(done: &[Cleaned], freed: u64) {
             "{}",
             term::dim(&format!("Undo: oxidize restore \"{name}\""))
         );
+    }
+}
+
+// protect
+// -------
+
+/// `oxidize protect`: the protected list, or with `--check` whether one
+/// path is on it.
+fn cmd_protect(args: &ProtectArgs, g: &Global) -> Result<()> {
+    let file = clean::protect::file_path()?;
+    let list = clean::protect::load_from(&file)?;
+    let Some(path) = &args.check else {
+        if g.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({ "file": file, "entries": list.entries() }))?
+            );
+        } else if list.is_empty() {
+            println!("Nothing is protected yet.");
+            println!(
+                "{}",
+                term::dim(&format!(
+                    "Folders listed in {} are never cleaned.",
+                    file.display()
+                ))
+            );
+        } else {
+            for e in list.entries() {
+                println!("  {e}");
+            }
+            println!();
+            println!(
+                "{}",
+                term::dim(&format!(
+                    "{} protected, listed in {}",
+                    list.entries().len(),
+                    file.display()
+                ))
+            );
+        }
+        return Ok(());
+    };
+    if path.trim().is_empty() {
+        return Err(Failure::usage("give a path to check").into());
+    }
+    let answer = protect_check(&list, path);
+    if g.json {
+        println!("{}", serde_json::to_string_pretty(&answer)?);
+        return Ok(());
+    }
+    match &answer.by {
+        Some(by) => println!("protected: {path}  {}", term::dim(&format!("by {by}"))),
+        None => println!("not protected: {path}"),
+    }
+    if !answer.holds.is_empty() {
+        println!(
+            "{}",
+            term::dim("It holds these, so it is never removed as a whole:")
+        );
+        for e in &answer.holds {
+            println!("  {e}");
+        }
+    }
+    Ok(())
+}
+
+/// The answer of `protect --check`, as `--json` prints it.
+#[derive(Debug, Serialize)]
+struct ProtectCheck {
+    /// The path as given.
+    path: String,
+    /// The full path as compared: variables expanded, real name, lower case.
+    resolved: String,
+    protected: bool,
+    /// The entry, as written, that covers it.
+    by: Option<String>,
+    /// Entries inside it, which keep it from being removed as a whole.
+    holds: Vec<String>,
+}
+
+/// Check `path` against `list`, with `%VAR%` expanded and a relative path
+/// taken from the current folder.
+fn protect_check(list: &clean::protect::Protected, path: &str) -> ProtectCheck {
+    let expanded = PathBuf::from(util::expand_env_vars(path));
+    let full = std::path::absolute(&expanded).unwrap_or(expanded);
+    let by = list.covered_by(&full).map(str::to_string);
+    ProtectCheck {
+        path: path.to_string(),
+        resolved: clean::protect::key_of(&full),
+        protected: by.is_some(),
+        by,
+        holds: list.inside(&full).into_iter().map(str::to_string).collect(),
     }
 }
 
@@ -2898,6 +3000,44 @@ mod tests {
             no_backup: false,
         };
         assert!(mcp_takes_no_run_flags(&plain).is_ok());
+    }
+
+    #[test]
+    fn a_protect_check_expands_variables_and_reads_relative_paths_from_here() {
+        let base = std::env::temp_dir().join("oxidize_protect_check_test");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join(r"keep\inner")).unwrap();
+        std::env::set_var("OXIDIZE_CHECK_TEST", &base);
+        let list = clean::protect::Protected::new([r"%OXIDIZE_CHECK_TEST%\keep".to_string()]);
+
+        let inside = protect_check(&list, r"%OXIDIZE_CHECK_TEST%\keep\inner");
+        assert!(inside.protected);
+        assert_eq!(inside.by.as_deref(), Some(r"%OXIDIZE_CHECK_TEST%\keep"));
+        assert_eq!(
+            inside.resolved,
+            clean::protect::key_of(&base.join(r"keep\inner"))
+        );
+        let beside = protect_check(&list, r"%OXIDIZE_CHECK_TEST%\keeper");
+        assert!(!beside.protected && beside.by.is_none());
+        let above = protect_check(&list, r"%OXIDIZE_CHECK_TEST%");
+        assert!(!above.protected);
+        assert_eq!(above.holds, [r"%OXIDIZE_CHECK_TEST%\keep"]);
+
+        // Relative to the current folder, as a shell would mean it.
+        let relative = std::env::current_dir()
+            .unwrap()
+            .join("keep")
+            .display()
+            .to_string();
+        let here = clean::protect::Protected::new([relative]);
+        assert!(protect_check(&here, r"keep\x").protected);
+        assert!(!protect_check(&here, "x").protected);
+
+        let v = serde_json::to_value(&inside).unwrap();
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["by", "holds", "path", "protected", "resolved"]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn program(name: &str, key: &str, uninstall: Option<&str>) -> Program {

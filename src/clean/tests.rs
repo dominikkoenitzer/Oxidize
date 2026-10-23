@@ -315,6 +315,50 @@ fn the_safe_set_is_chosen_unless_the_user_says_otherwise() {
 }
 
 #[test]
+fn the_summaries_add_up_per_category_and_count_what_the_list_kept() {
+    let pc = Pc::new("clean_summary");
+    pc.fill();
+    let tools = FakeTools::default();
+    let protected = Protected::new([pc.temp().join("tools").display().to_string()]);
+    let a = analyse_with(&pc, &protected, false, &[], &tools, &no_orphans);
+    let before = a.summary();
+    assert_eq!(before.categories.len(), a.findings.len());
+    for f in &a.findings {
+        let s = &before.categories[f.category.id()];
+        assert_eq!((s.bytes, s.count), (f.bytes, f.count), "{:?}", f.category);
+    }
+    assert_eq!(
+        before.bytes,
+        a.findings.iter().map(|f| f.bytes).sum::<u64>()
+    );
+    assert_eq!(before.categories["temp"].protected.count, 1);
+    assert_eq!(before.protected.count, 1);
+
+    let done = clean_with(&pc, &a, &a.default_choice(), &protected, false, &tools);
+    let after = cleaned_summary(&done);
+    let temp = done.iter().find(|d| d.category == Category::Temp).unwrap();
+    assert_eq!(
+        (
+            after.categories["temp"].bytes,
+            after.categories["temp"].count
+        ),
+        (temp.freed, temp.removed)
+    );
+    assert_eq!(after.bytes, done.iter().map(|c| c.freed).sum::<u64>());
+    // The protected folder stayed, and the run says so as the plan did.
+    assert_eq!(
+        after.categories["temp"].protected,
+        before.categories["temp"].protected
+    );
+    assert!(pc.temp().join(r"tools\helper.py").exists());
+    // Only what was chosen is in the run's summary.
+    assert_eq!(after.categories.len(), done.len());
+    let json = serde_json::to_value(&after).unwrap();
+    assert_eq!(json["protected"]["count"], 1);
+    assert!(json["categories"]["temp"]["bytes"].is_u64());
+}
+
+#[test]
 fn cleaning_the_safe_set_frees_what_was_counted_and_reports_the_rest() {
     use std::os::windows::fs::OpenOptionsExt;
     let pc = Pc::new("clean_safe");

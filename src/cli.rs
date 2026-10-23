@@ -63,6 +63,9 @@ pub enum Commands {
     /// --traces clears the lists of recently used files and programs
     /// instead.
     Clean(CleanArgs),
+    /// Show the folders and files `clean` never touches, or check a path
+    /// against them.
+    Protect(ProtectArgs),
     /// Serve Oxidize to an AI assistant over MCP on stdin and stdout.
     Mcp,
 }
@@ -84,6 +87,7 @@ impl Cli {
             Commands::Backups(args) => (args.delete.is_none() && !args.clear) || self.dry_run,
             Commands::Restore(_) => self.dry_run,
             Commands::Clean(_) => !self.yes || self.dry_run,
+            Commands::Protect(_) => true,
             Commands::Mcp => false,
         }
     }
@@ -288,6 +292,14 @@ impl CleanArgs {
         .map(|(_, c)| c)
         .collect()
     }
+}
+
+#[derive(Args, Debug)]
+pub struct ProtectArgs {
+    /// Say whether this path is protected: listed itself, or inside a
+    /// listed folder. %VAR% references are expanded.
+    #[arg(long, value_name = "PATH")]
+    pub check: Option<String>,
 }
 
 /// Which confidence levels a removal acts on. High is always included.
