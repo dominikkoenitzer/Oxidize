@@ -16,7 +16,7 @@ use crate::model::{Leftover, Package, Program, ScanReport, ScanTarget};
 use crate::orphans::{self, OrphanReport};
 use crate::packages::{PackageStore, RemovalOutcome, WindowsPackageStore};
 use crate::safety::{self, DeletionOutcome, SafetyContext};
-use crate::uninstall::{self, UninstallPlan};
+use crate::uninstall::{self, Ran, UninstallPlan};
 use crate::{registry, scanner, system};
 
 /// This PC, read only.
@@ -89,16 +89,14 @@ pub const UNINSTALLER_RUN: Duration = Duration::from_secs(30 * 60);
 pub const ENTRY_WAIT: Duration = Duration::from_secs(120);
 
 impl Remove for Remover {
-    fn uninstall(&self, plan: &UninstallPlan) -> Result<String> {
-        Ok(
-            match uninstall::run_for(plan, Stdio::null(), Stdio::null(), UNINSTALLER_RUN)? {
-                Some(status) => uninstall::describe_exit(status, plan.is_msi),
-                None => format!(
-                    "is still running after {} minutes; its leftovers stay until it has finished",
-                    UNINSTALLER_RUN.as_secs() / 60
-                ),
-            },
-        )
+    fn uninstall(&self, plan: &UninstallPlan) -> Result<Ran> {
+        let status = uninstall::run_for(plan, Stdio::null(), Stdio::null(), UNINSTALLER_RUN)?;
+        Ok(Ran::of(status, plan.is_msi, || {
+            format!(
+                "is still running after {} minutes; its leftovers stay until it has finished",
+                UNINSTALLER_RUN.as_secs() / 60
+            )
+        }))
     }
 
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool {
@@ -134,8 +132,9 @@ mod tests {
             source: "test".into(),
             unattended: true,
         };
-        let said = Remover.uninstall(&plan).unwrap();
-        assert!(!said.contains("still running"), "{said}");
+        let ran = Remover.uninstall(&plan).unwrap();
+        assert!(ran.ended, "{ran:?}");
+        assert!(!ran.said.contains("still running"), "{ran:?}");
         // `plan_removal` tells the user how long each wait is.
         let how = crate::mcp::HOW_IT_RUNS;
         assert!(how.contains("up to 30 minutes"), "{how}");

@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport, ScanTarget};
 use crate::safety::{DeletionOutcome, SafetyContext};
-use crate::uninstall::UninstallPlan;
+use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
 
 /// How long a program gets to close its windows before it is ended.
@@ -226,8 +226,8 @@ pub trait Pc {
     fn running(&self) -> Vec<Running>;
     /// Close these processes: their windows first, then end them.
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
-    /// Run the vendor's uninstaller; returns how it ended, in words.
-    fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String>;
+    /// Run the vendor's uninstaller; returns how it went.
+    fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<Ran>;
     /// Wait until the program is unregistered; true when it is.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove the items, with a backup unless told otherwise.
@@ -351,16 +351,17 @@ pub fn remove_completely(
 
     let mut installed = true;
     if out.vendor.runs() {
-        match pc.run_uninstaller(plan) {
-            Ok(how) => out.uninstaller = Some(how),
+        let ran = match pc.run_uninstaller(plan) {
+            Ok(ran) => ran,
             Err(e) => {
                 out.error = Some(format!("{e:#}"));
                 out.verdict.still_installed = pc.still_installed(program);
                 out.seconds = start.elapsed().as_secs_f64();
                 return out;
             }
-        }
-        installed = !pc.wait_until_gone(program, plan);
+        };
+        out.uninstaller = Some(ran.said.clone());
+        installed = !ran.gone(|| pc.wait_until_gone(program, plan));
         if installed {
             // The scan would list the live install; leave it alone.
             out.verdict.still_installed = true;
@@ -485,17 +486,16 @@ impl Pc for ThisPc {
         system::close_processes(procs, CLOSE_GRACE)
     }
 
-    fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<String> {
+    fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<Ran> {
         use std::process::Stdio;
         let status = if self.quiet {
             crate::uninstall::run_for(plan, Stdio::null(), Stdio::null(), VENDOR_WAIT)?
         } else {
             crate::uninstall::run_for(plan, Stdio::inherit(), Stdio::inherit(), VENDOR_WAIT)?
         };
-        Ok(match status {
-            Some(status) => crate::uninstall::describe_exit(status, plan.is_msi),
-            None => format!("was still running after {} s", VENDOR_WAIT.as_secs()),
-        })
+        Ok(Ran::of(status, plan.is_msi, || {
+            format!("was still running after {} s", VENDOR_WAIT.as_secs())
+        }))
     }
 
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool {
@@ -539,6 +539,8 @@ mod tests {
         stuck: Vec<String>,
         /// What the vendor's uninstaller takes with it.
         vendor_takes: Vec<String>,
+        /// The vendor's uninstaller is still running when the wait ends.
+        never_ends: bool,
         /// Items a scan finds only once the item at the path is gone.
         shows_once_gone: RefCell<Vec<(String, Leftover)>>,
         /// Backups made so far.
@@ -553,6 +555,7 @@ mod tests {
                 installed: RefCell::new(true),
                 stuck: Vec::new(),
                 vendor_takes: Vec::new(),
+                never_ends: false,
                 shows_once_gone: RefCell::new(Vec::new()),
                 backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
@@ -640,12 +643,21 @@ mod tests {
                 .collect()
         }
 
-        fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<String> {
+        fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<Ran> {
             self.calls.borrow_mut().push("uninstall".to_string());
             self.items
                 .borrow_mut()
                 .retain(|l| !self.vendor_takes.contains(&l.path));
-            Ok("finished".to_string())
+            if self.never_ends {
+                return Ok(Ran {
+                    said: "was still running after 60 s".to_string(),
+                    ended: false,
+                });
+            }
+            Ok(Ran {
+                said: "finished".to_string(),
+                ended: true,
+            })
         }
 
         fn wait_until_gone(&self, _program: &Program, _plan: &UninstallPlan) -> bool {
@@ -880,6 +892,23 @@ mod tests {
             ]
         );
         assert!(out.complete(), "{out:?}");
+    }
+
+    #[test]
+    fn an_uninstaller_still_running_keeps_its_leftovers() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.never_ends = true;
+        let p = program(Hive::CurrentUser);
+        let mut o = opts(Confidence::High);
+        o.use_uninstaller = true;
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &o);
+        assert_eq!(pc.calls(), ["scan true", "close 100", "uninstall"]);
+        assert!(out.removal.is_none(), "{out:?}");
+        assert!(out.verdict.still_installed);
+        assert_eq!(
+            out.uninstaller.as_deref(),
+            Some("was still running after 60 s")
+        );
     }
 
     #[test]
