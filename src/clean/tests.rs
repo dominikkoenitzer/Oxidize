@@ -16,6 +16,10 @@ struct FakeTools {
     delivery: Mutex<(usize, u64)>,
     /// The Delivery Optimization cache cannot be read once it is deleted.
     delivery_unreadable_after: Mutex<bool>,
+    /// What the Delivery Optimization cache still holds after its delete.
+    delivery_left: Mutex<(usize, u64)>,
+    /// The previous Windows that Disk Cleanup removes; with none it stays.
+    windows_old: Mutex<Option<PathBuf>>,
     /// What runs by the time the cleaning starts.
     running: Mutex<Vec<PathBuf>>,
 }
@@ -53,11 +57,14 @@ impl Tools for FakeTools {
     }
     fn delete_delivery_cache(&self) -> anyhow::Result<()> {
         self.call("delete_delivery_cache");
-        *self.delivery.lock().unwrap() = (0, 0);
+        *self.delivery.lock().unwrap() = *self.delivery_left.lock().unwrap();
         Ok(())
     }
     fn remove_windows_old(&self) -> anyhow::Result<()> {
         self.call("remove_windows_old");
+        if let Some(dir) = self.windows_old.lock().unwrap().as_ref() {
+            fs::remove_dir_all(dir).unwrap();
+        }
         Ok(())
     }
     fn free_bytes(&self, _path: &Path) -> Option<u64> {
@@ -638,6 +645,44 @@ fn a_delivery_cache_that_cannot_be_read_again_is_not_measured() {
         dopt.notes
     );
     assert!(!dopt.failed());
+}
+
+#[test]
+fn delivery_files_still_in_the_cache_are_not_reported_as_removed() {
+    let pc = Pc::new("delivery-left");
+    let tools = FakeTools::default();
+    *tools.delivery.lock().unwrap() = (4, 900);
+    *tools.delivery_left.lock().unwrap() = (1, 300);
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    let done = clean_with(
+        &pc,
+        &a,
+        &a.choice(&[Category::DeliveryOptimization], Confidence::High),
+        &Protected::default(),
+        true,
+        &tools,
+    );
+    assert_eq!((done[0].removed, done[0].freed), (3, 600));
+    let left = KeptReason::Failed("still there afterwards".to_string());
+    assert_eq!(kept(&done[0].kept, &left), (1, 300));
+}
+
+#[test]
+fn windows_old_counts_as_removed_only_once_it_is_gone() {
+    let pc = Pc::new("windows-old-left");
+    pc.fill();
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    let choice = a.choice(&[Category::WindowsOld], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), true, &tools);
+    assert_eq!(done[0].removed, 0);
+    let left = KeptReason::Failed("still there afterwards".to_string());
+    assert_eq!(kept(&done[0].kept, &left), (1, 9000));
+
+    *tools.windows_old.lock().unwrap() = Some(pc.root.join("Windows.old"));
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), true, &tools);
+    assert_eq!(done[0].removed, 1);
+    assert!(!done[0].failed());
 }
 
 #[test]
