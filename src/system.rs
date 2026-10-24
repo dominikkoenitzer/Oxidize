@@ -385,21 +385,37 @@ pub fn services() -> Vec<ServiceInfo> {
     out
 }
 
-/// Stop and delete a service. Needs elevation.
-pub fn delete_service(name: &str) -> Result<()> {
-    delete_service_with(name, Command::output)
+/// What removing services and tasks needs from the machine: console tools
+/// to run. Tests stand in for it.
+trait Console {
+    /// Start `cmd` with the process creation `flags` and collect its output.
+    fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output>;
 }
 
-/// `delete_service`, with `run` running each sc command.
-fn delete_service_with(
-    name: &str,
-    mut run: impl FnMut(&mut Command) -> io::Result<Output>,
-) -> Result<()> {
+/// The real machine.
+struct Machine;
+
+impl Console for Machine {
+    fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output> {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(flags).output()
+    }
+}
+
+/// Stop and delete a service. Needs elevation.
+pub fn delete_service(name: &str) -> Result<()> {
+    delete_service_with(name, &mut Machine)
+}
+
+/// `delete_service` on `console`.
+fn delete_service_with(name: &str, console: &mut impl Console) -> Result<()> {
     use windows::Win32::Globalization::CP_OEMCP;
     let sc = system32("sc.exe");
     // Stopping may fail because it is already stopped; that is fine.
-    let _ = run(Command::new(&sc).args(["stop", name]));
-    let out = run(Command::new(&sc).args(["delete", name])).context("running sc delete")?;
+    let _ = console.run(Command::new(&sc).args(["stop", name]), 0);
+    let out = console
+        .run(Command::new(&sc).args(["delete", name]), 0)
+        .context("running sc delete")?;
     match out.status.code() {
         // 1060: does not exist. 1072: already marked for deletion.
         Some(0) | Some(1060) | Some(1072) => Ok(()),
@@ -533,9 +549,16 @@ pub fn export_task(task: &TaskInfo, out: &Path) -> Result<()> {
 }
 
 pub fn delete_task(name: &str) -> Result<()> {
-    let out = Command::new(system32("schtasks.exe"))
-        .args(["/delete", "/tn", name, "/f"])
-        .output()
+    delete_task_with(name, &mut Machine)
+}
+
+/// `delete_task` on `console`.
+fn delete_task_with(name: &str, console: &mut impl Console) -> Result<()> {
+    let out = console
+        .run(
+            Command::new(system32("schtasks.exe")).args(["/delete", "/tn", name, "/f"]),
+            0,
+        )
         .context("running schtasks /delete")?;
     if out.status.success() {
         Ok(())
@@ -549,11 +572,19 @@ pub fn delete_task(name: &str) -> Result<()> {
 
 /// Re-create a task from an exported XML file.
 pub fn import_task(name: &str, xml: &Path) -> Result<()> {
-    let out = Command::new(system32("schtasks.exe"))
-        .args(["/create", "/tn", name, "/xml"])
-        .arg(xml)
-        .arg("/f")
-        .output()
+    import_task_with(name, xml, &mut Machine)
+}
+
+/// `import_task` on `console`.
+fn import_task_with(name: &str, xml: &Path, console: &mut impl Console) -> Result<()> {
+    let out = console
+        .run(
+            Command::new(system32("schtasks.exe"))
+                .args(["/create", "/tn", name, "/xml"])
+                .arg(xml)
+                .arg("/f"),
+            0,
+        )
         .context("running schtasks /create")?;
     if out.status.success() {
         Ok(())
@@ -1056,21 +1087,46 @@ mod tests {
         })
     }
 
+    /// A machine that answers each console tool from `results`, never
+    /// running one, and keeps each command line, program first, and the
+    /// flags it started with.
+    struct Fake {
+        results: std::vec::IntoIter<io::Result<Output>>,
+        ran: Vec<Vec<String>>,
+        flags: Vec<u32>,
+    }
+
+    impl Fake {
+        fn new(results: Vec<io::Result<Output>>) -> Self {
+            Fake {
+                results: results.into_iter(),
+                ran: Vec::new(),
+                flags: Vec::new(),
+            }
+        }
+    }
+
+    impl Console for Fake {
+        fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output> {
+            let mut line = vec![cmd.get_program().to_string_lossy().into_owned()];
+            line.extend(cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
+            self.ran.push(line);
+            self.flags.push(flags);
+            self.results
+                .next()
+                .expect("a tool ran more often than expected")
+        }
+    }
+
     /// Remove `name` with sc answering from `results`, never running it.
     /// Returns the outcome and each command line, program first.
     fn remove_service(
         name: &str,
         results: Vec<io::Result<Output>>,
     ) -> (Result<()>, Vec<Vec<String>>) {
-        let mut results = results.into_iter();
-        let mut ran = Vec::new();
-        let outcome = delete_service_with(name, |cmd| {
-            let mut line = vec![cmd.get_program().to_string_lossy().into_owned()];
-            line.extend(cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
-            ran.push(line);
-            results.next().expect("sc ran more often than expected")
-        });
-        (outcome, ran)
+        let mut fake = Fake::new(results);
+        let outcome = delete_service_with(name, &mut fake);
+        (outcome, fake.ran)
     }
 
     fn sc_line(args: &[&str]) -> Vec<String> {
