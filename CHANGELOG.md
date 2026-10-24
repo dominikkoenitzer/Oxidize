@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.9, 2026-10-24
+
+- `oxidize protect` prints the protected list, and `oxidize protect --check
+  <path>` says whether a path is kept out of every clean and which entry
+  keeps it. With `--json`, a clean plan and a clean run carry a `summary` of
+  bytes and items per category, with what the protected list kept.
+- A service Windows only marks for deletion is listed as going at the next
+  restart.
+- When Windows refuses to remove a service or a scheduled task, the result
+  says so in one sentence. What `sc` or `schtasks` printed goes to the
+  window's log, or to standard error on the command line. Both tools now
+  start without a console window.
+- Messages from `sc`, `schtasks`, DISM, PowerShell and installer removal
+  events are read in the code page they were written in, so accented text
+  comes through intact.
+- The window runs on eframe 0.37, with copy and paste still on the Windows
+  clipboard.
+
 ## 0.2.8, 2026-10-20
 
 - A removal never takes the folders Windows keeps for the user (Downloads,
