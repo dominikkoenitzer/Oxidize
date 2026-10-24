@@ -34,7 +34,7 @@ use crate::hunter::HunterMatch;
 use crate::model::{Confidence, Group, Leftover, Package, Program, ScanReport, ScanTarget};
 use crate::orphans::OrphanReport;
 use crate::safety::{self, DeletionOutcome, ItemStatus};
-use crate::uninstall::UninstallPlan;
+use crate::uninstall::{Ran, UninstallPlan};
 
 pub use machine::{Remover, ThisPc};
 
@@ -63,8 +63,8 @@ pub trait Inspect: Send + Sync {
 /// The one way the server changes anything: carrying out an approved plan.
 /// There is no removal without a backup here.
 pub trait Remove: Send + Sync {
-    /// Run a program's uninstaller and wait for it; says how it ended.
-    fn uninstall(&self, plan: &UninstallPlan) -> Result<String>;
+    /// Run a program's uninstaller and wait for it; says how it went.
+    fn uninstall(&self, plan: &UninstallPlan) -> Result<Ran>;
     /// Wait for the program to leave the Uninstall list; true once it has.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove a Store app; true once Windows no longer lists it.
@@ -652,9 +652,9 @@ fn apply_step(
                 out["uninstaller"] = json!(format!("not started, {reason}"));
                 Ok(true)
             } else {
-                r.uninstall(uninstaller).map(|described| {
-                    out["uninstaller"] = json!(described);
-                    r.wait_until_gone(program, uninstaller)
+                r.uninstall(uninstaller).map(|ran| {
+                    out["uninstaller"] = json!(ran.said);
+                    ran.gone(|| r.wait_until_gone(program, uninstaller))
                 })
             }
         }
@@ -1160,6 +1160,8 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         calls: Mutex<Vec<String>>,
+        /// The uninstaller is still running when the wait ends.
+        never_ends: bool,
     }
 
     impl Recorder {
@@ -1172,9 +1174,18 @@ mod tests {
     }
 
     impl Remove for Recorder {
-        fn uninstall(&self, plan: &UninstallPlan) -> Result<String> {
+        fn uninstall(&self, plan: &UninstallPlan) -> Result<Ran> {
             self.log(format!("uninstall {}", plan.display()));
-            Ok("exited with code 0".to_string())
+            if self.never_ends {
+                return Ok(Ran {
+                    said: "is still running after 30 minutes".to_string(),
+                    ended: false,
+                });
+            }
+            Ok(Ran {
+                said: "exited with code 0".to_string(),
+                ended: true,
+            })
         }
         fn wait_until_gone(&self, program: &Program, _plan: &UninstallPlan) -> bool {
             self.log(format!("wait {}", program.display_name));
@@ -1307,8 +1318,12 @@ mod tests {
         }
     }
 
-    fn server_on(mut pc: FakePc) -> (Server, Arc<Recorder>) {
-        let recorder = Arc::new(Recorder::default());
+    fn server_on(pc: FakePc) -> (Server, Arc<Recorder>) {
+        server_with(pc, Recorder::default())
+    }
+
+    fn server_with(mut pc: FakePc, recorder: Recorder) -> (Server, Arc<Recorder>) {
+        let recorder = Arc::new(recorder);
         pc.seen = Some(Arc::clone(&recorder));
         let remove: Arc<dyn Remove> = recorder.clone();
         (Server::new(Arc::new(pc), remove), recorder)
@@ -1699,6 +1714,32 @@ mod tests {
         // The machine key needed administrator rights and stayed.
         assert_eq!(step["nothing_left"], false, "{step}");
         assert_eq!(step["remaining"][0]["path"], r"HKLM\SOFTWARE\Game Service");
+    }
+
+    #[tokio::test]
+    async fn an_uninstaller_still_running_keeps_its_leftovers() {
+        let recorder = Recorder {
+            never_ends: true,
+            ..Recorder::default()
+        };
+        let (server, recorder) = server_with(pc(), recorder);
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call("plan_removal", json!({ "programs": ["Game Service"] }))
+            .await;
+        let id = plan_id(&plan);
+        let done = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        assert_eq!(
+            recorder.calls(),
+            ["close 400", r"uninstall C:\Apps\game-service\uninstall.exe"]
+        );
+        let step = &done["structuredContent"]["steps"][0];
+        assert_eq!(step["uninstaller"], "is still running after 30 minutes");
+        assert_eq!(step["still_installed"], true, "{step}");
+        assert_eq!(step["failed"], true, "{step}");
+        assert!(step.get("backup").is_none(), "{step}");
     }
 
     #[tokio::test]
