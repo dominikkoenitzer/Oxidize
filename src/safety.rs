@@ -767,13 +767,11 @@ mod tests {
             .filter(|(_, e)| system::same_path_entry(e, r"C:\Tool"))
             .map(|(i, e)| (i, e.to_string()))
             .collect();
-        let base = crate::backup::backups_base().unwrap();
         let mut session = BackupSession::new("Oxidize Path Order Test").unwrap();
+        let cleanup = crate::backup::TestCleanup(vec![session.root().to_path_buf()]);
         record_path_entries(&mut session, "PATH entry", Hive::CurrentUser, &matches).unwrap();
         let manifest = crate::backup::read_manifest(session.root()).unwrap();
-        let _ = std::fs::remove_dir_all(session.root());
-        let _ = std::fs::remove_dir(&base);
-        let _ = std::fs::remove_dir(base.parent().unwrap());
+        drop(cleanup);
 
         // Restore replays the manifest newest first.
         let mut parts: Vec<&str> = before
