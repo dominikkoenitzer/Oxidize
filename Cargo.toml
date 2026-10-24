@@ -43,6 +43,7 @@ tokio = { version = "1", features = ["io-std", "rt"] }
 # glow instead of the wgpu default: it survives VMs and remote desktop.
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
+    "clipboard",
     "default_fonts",
     "glow",
     "links",
