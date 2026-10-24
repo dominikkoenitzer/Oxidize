@@ -32,6 +32,8 @@ pub struct SafetyContext {
 #[derive(Debug, Clone)]
 pub enum ItemStatus {
     Removed,
+    /// A service Windows only marked for deletion: it goes at the next restart.
+    RemovedAfterRestart,
     AlreadyGone,
     Failed(String),
     /// A dry run: the item would be removed.
@@ -424,7 +426,11 @@ pub fn remove_leftovers_into(
     for item in items {
         outcome.attempted += 1;
         let status = match remove_one(item, session.as_mut(), &tasks) {
-            Ok(true) => {
+            Ok(ItemStatus::AlreadyGone) => {
+                outcome.skipped += 1;
+                ItemStatus::AlreadyGone
+            }
+            Ok(status) => {
                 outcome.deleted += 1;
                 if matches!(item.kind, LeftoverKind::File | LeftoverKind::Directory) {
                     removed_fs.push(PathBuf::from(&item.path));
@@ -434,11 +440,7 @@ pub fn remove_leftovers_into(
                         removed_keys.push((hive, subpath.to_string()));
                     }
                 }
-                ItemStatus::Removed
-            }
-            Ok(false) => {
-                outcome.skipped += 1;
-                ItemStatus::AlreadyGone
+                status
             }
             Err(e) => {
                 outcome.failed += 1;
@@ -515,12 +517,12 @@ fn empty_vendor_key(hive: crate::model::Hive, subpath: &str) -> Option<String> {
     registry::key_is_empty(hive, parent).then(|| parent.to_string())
 }
 
-/// `Ok(true)` removed, `Ok(false)` already gone.
+/// Remove one item and say what became of it.
 fn remove_one(
     item: &Leftover,
     session: Option<&mut BackupSession>,
     tasks: &[system::TaskInfo],
-) -> Result<bool> {
+) -> Result<ItemStatus> {
     match item.kind {
         LeftoverKind::RegistryKey => {
             let hive = item.hive.context("registry leftover missing hive")?;
@@ -529,14 +531,14 @@ fn remove_one(
                 .as_deref()
                 .context("registry leftover missing path")?;
             if registry::key_absent(hive, subpath) {
-                return Ok(false);
+                return Ok(ItemStatus::AlreadyGone);
             }
             if let Some(s) = session {
                 s.backup_registry_key(item.kind, &item.path, hive, subpath)
                     .context("backing up registry key")?;
             }
             registry::delete_key_tree(hive, subpath).context("deleting registry key")?;
-            Ok(true)
+            Ok(ItemStatus::Removed)
         }
         LeftoverKind::RegistryValue | LeftoverKind::FirewallRule => {
             let hive = item.hive.context("registry leftover missing hive")?;
@@ -549,7 +551,7 @@ fn remove_one(
                 .as_deref()
                 .context("value leftover missing name")?;
             if registry::value_absent(hive, subpath, value) {
-                return Ok(false);
+                return Ok(ItemStatus::AlreadyGone);
             }
             // Only the value is recorded, never the key around it. Exporting
             // the containing key would carry every other program in it, and a
@@ -561,12 +563,12 @@ fn remove_one(
                     .context("backing up registry value")?;
             }
             registry::delete_value(hive, subpath, value).context("deleting registry value")?;
-            Ok(true)
+            Ok(ItemStatus::Removed)
         }
         LeftoverKind::File | LeftoverKind::Directory => {
             let path = PathBuf::from(&item.path);
             if !path.exists() {
-                return Ok(false);
+                return Ok(ItemStatus::AlreadyGone);
             }
             if scanner::is_protected_path(&path) {
                 bail!("protected path");
@@ -578,7 +580,7 @@ fn remove_one(
                 }
                 None => crate::backup::remove_path(&path).context("deleting")?,
             }
-            Ok(true)
+            Ok(ItemStatus::Removed)
         }
         LeftoverKind::Service => {
             let name = item
@@ -590,7 +592,7 @@ fn remove_one(
                 .as_deref()
                 .context("service leftover missing key")?;
             if registry::key_absent(crate::model::Hive::LocalMachine, subpath) {
-                return Ok(false);
+                return Ok(ItemStatus::AlreadyGone);
             }
             if let Some(s) = session {
                 s.backup_registry_key(
@@ -601,19 +603,21 @@ fn remove_one(
                 )
                 .context("backing up service key")?;
             }
-            system::delete_service(name)?;
-            Ok(true)
+            Ok(match system::delete_service(name)? {
+                system::ServiceRemoval::Removed => ItemStatus::Removed,
+                system::ServiceRemoval::AfterRestart => ItemStatus::RemovedAfterRestart,
+            })
         }
         LeftoverKind::ScheduledTask => {
             let name = item.name.as_deref().context("task leftover missing name")?;
             let Some(task) = tasks.iter().find(|t| t.name.eq_ignore_ascii_case(name)) else {
-                return Ok(false);
+                return Ok(ItemStatus::AlreadyGone);
             };
             if let Some(s) = session {
                 s.backup_task(&item.path, task).context("backing up task")?;
             }
             system::delete_task(name)?;
-            Ok(true)
+            Ok(ItemStatus::Removed)
         }
         LeftoverKind::PathEntry => {
             let hive = item.hive.context("path leftover missing hive")?;
@@ -625,13 +629,13 @@ fn remove_one(
             // records each of them, not only the one that was flagged.
             let matches = system::matching_path_entries(hive, entry);
             if matches.is_empty() {
-                return Ok(false);
+                return Ok(ItemStatus::AlreadyGone);
             }
             if let Some(s) = session {
                 record_path_entries(s, &item.path, hive, &matches)?;
             }
             system::remove_path_entry(hive, entry)?;
-            Ok(true)
+            Ok(ItemStatus::Removed)
         }
     }
 }

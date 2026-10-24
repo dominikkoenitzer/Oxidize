@@ -1214,7 +1214,7 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
         Ok(outcome) => {
             for (item, bytes) in outcome.items.iter().zip(&sizes) {
                 match &item.status {
-                    ItemStatus::Removed => {
+                    ItemStatus::Removed | ItemStatus::RemovedAfterRestart => {
                         c.freed += bytes;
                         c.removed += 1;
                     }
