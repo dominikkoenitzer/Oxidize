@@ -985,9 +985,7 @@ pub fn close_processes(
     grace: std::time::Duration,
 ) -> Vec<crate::complete::Closed> {
     use crate::complete::{CloseHow, Closed};
-    use windows::Win32::Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, HWND, LPARAM, WAIT_OBJECT_0, WPARAM,
-    };
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
@@ -1049,21 +1047,7 @@ pub fn close_processes(
                 };
                 handles.push((p.pid, exe, h, ask.windows > 0));
             }
-            // It exited between the listing and now.
-            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => out.push(Closed {
-                pid: p.pid,
-                exe,
-                how: CloseHow::Closed,
-                error: None,
-                windowless: false,
-            }),
-            Err(e) => out.push(Closed {
-                pid: p.pid,
-                exe,
-                how: CloseHow::Failed,
-                error: Some(e.message()),
-                windowless: false,
-            }),
+            Err(e) => out.push(not_opened(p.pid, exe, &e)),
         }
     }
     let deadline = std::time::Instant::now() + grace;
@@ -1088,6 +1072,30 @@ pub fn close_processes(
         });
     }
     out
+}
+
+/// What became of a process that could not be opened. Windows refuses an
+/// id that no longer belongs to any process, so that one has closed.
+#[cfg(windows)]
+fn not_opened(pid: u32, exe: String, e: &windows::core::Error) -> crate::complete::Closed {
+    use crate::complete::{CloseHow, Closed};
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+    if e.code() == ERROR_INVALID_PARAMETER.to_hresult() {
+        return Closed {
+            pid,
+            exe,
+            how: CloseHow::Closed,
+            error: None,
+            windowless: false,
+        };
+    }
+    Closed {
+        pid,
+        exe,
+        how: CloseHow::Failed,
+        error: Some(e.message()),
+        windowless: false,
+    }
 }
 
 /// The same executable, whatever the case of the path.
@@ -1690,6 +1698,34 @@ mod tests {
             [r"schtasks /delete \Vendor\Updater ended with code 1: ERROR: Access is denied."]
         );
         assert!(take_tool_log().is_empty());
+    }
+
+    #[cfg(windows)]
+    fn windows_error(code: windows::Win32::Foundation::WIN32_ERROR) -> windows::core::Error {
+        windows::core::Error::from_hresult(code.to_hresult())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_process_gone_before_it_is_opened_counts_as_closed() {
+        use crate::complete::CloseHow;
+        use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+        let exe = r"C:\Example\player.exe";
+        let c = not_opened(100, exe.into(), &windows_error(ERROR_INVALID_PARAMETER));
+        assert_eq!((c.pid, c.exe.as_str()), (100, exe));
+        assert_eq!((c.how, c.error), (CloseHow::Closed, None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_process_that_cannot_be_opened_keeps_what_windows_said() {
+        use crate::complete::CloseHow;
+        use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+        let exe = r"C:\Example\player.exe";
+        let denied = windows_error(ERROR_ACCESS_DENIED);
+        let said = Some(denied.message());
+        let c = not_opened(100, exe.into(), &denied);
+        assert_eq!((c.how, c.error), (CloseHow::Failed, said));
     }
 
     #[test]
