@@ -140,9 +140,10 @@ pub fn select(
     out
 }
 
-/// Empty the chosen items: the item first, then its `$I` entry, so a failure
-/// never leaves an item Windows cannot show. Returns the bytes freed and the
-/// number of items that went.
+/// Empty the chosen items: the item first, then its `$I` entry, so an item
+/// that cannot go keeps its entry. An entry that cannot go after its item has
+/// gone stays behind and is reported as kept, with its bytes counted as freed.
+/// Returns the bytes freed and the number of items that went.
 pub fn delete(items: &[BinItem], protected: &Protected, kept: &mut Vec<Kept>) -> (u64, usize) {
     let mut freed = 0;
     let mut gone = 0;
