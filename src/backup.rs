@@ -354,6 +354,25 @@ pub fn backups_base() -> Result<PathBuf> {
         .join("backups"))
 }
 
+/// Removes a test's folders when it ends, passed or failed, and the run's folder once empty.
+#[cfg(test)]
+pub(crate) struct TestCleanup(pub Vec<PathBuf>);
+
+#[cfg(test)]
+impl Drop for TestCleanup {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            let _ = fs::remove_dir_all(path);
+        }
+        if let Ok(base) = backups_base() {
+            let _ = fs::remove_dir(&base);
+            if let Some(run) = base.parent() {
+                let _ = fs::remove_dir(run);
+            }
+        }
+    }
+}
+
 /// One existing backup folder.
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
@@ -805,6 +824,7 @@ mod tests {
         // numbering is checked on a stamp that is taken for certain.
         let taken = std::env::temp_dir().join("oxidize_taken_root_test");
         let _ = fs::remove_dir_all(&taken);
+        let mut cleanup = TestCleanup(vec![taken.clone()]);
         fs::create_dir_all(taken.join("2026-01-01 120000 X")).unwrap();
         assert_eq!(
             unused_root(&taken, "2026-01-01 120000 X"),
@@ -815,17 +835,12 @@ mod tests {
             unused_root(&taken, "2026-01-01 120000 X"),
             taken.join("2026-01-01 120000 X (3)")
         );
-        let _ = fs::remove_dir_all(&taken);
 
-        let base = backups_base().unwrap();
         let first = BackupSession::new("Oxidize Session Test").unwrap();
+        cleanup.0.push(first.root().to_path_buf());
         let second = BackupSession::new("Oxidize Session Test").unwrap();
+        cleanup.0.push(second.root().to_path_buf());
         assert_ne!(first.root(), second.root());
-        let _ = fs::remove_dir_all(first.root());
-        let _ = fs::remove_dir_all(second.root());
-        // Leave no empty backups folder behind on a machine that had none.
-        let _ = fs::remove_dir(&base);
-        let _ = fs::remove_dir(base.parent().unwrap());
     }
 
     /// A folder whose last file is held open without delete sharing: rename
@@ -890,10 +905,12 @@ mod tests {
 
     #[test]
     fn a_partial_quarantine_is_recorded_and_reported() {
-        let base = backups_base().unwrap();
         let root = std::env::temp_dir().join("oxidize_partial_quarantine_test");
+        // Declared before the held file, so it is closed when the guard runs.
+        let mut cleanup = TestCleanup(vec![root.clone()]);
         let (src, held) = folder_with_a_locked_file(&root);
         let mut session = BackupSession::new("Oxidize Partial Test").unwrap();
+        cleanup.0.push(session.root().to_path_buf());
 
         let err = session
             .quarantine(LeftoverKind::Directory, &src)
@@ -911,10 +928,6 @@ mod tests {
         }
 
         drop(held);
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(session.root());
-        let _ = fs::remove_dir(&base);
-        let _ = fs::remove_dir(base.parent().unwrap());
     }
 
     #[test]

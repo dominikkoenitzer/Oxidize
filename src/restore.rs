@@ -344,12 +344,11 @@ mod tests {
             .unwrap()
     }
 
-    fn cleanup(session: &BackupSession, root: &Path) {
-        let base = backup::backups_base().unwrap();
-        let _ = fs::remove_dir_all(session.root());
-        let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir(&base);
-        let _ = fs::remove_dir(base.parent().unwrap());
+    /// The fixtures go first, so a junction left in the backup points at nothing.
+    fn cleanup(session: &BackupSession, fixtures: &[&Path]) -> backup::TestCleanup {
+        let mut folders: Vec<_> = fixtures.iter().map(|f| f.to_path_buf()).collect();
+        folders.push(session.root().to_path_buf());
+        backup::TestCleanup(folders)
     }
 
     /// Where the backup keeps its copy of `origin`.
@@ -459,6 +458,7 @@ mod tests {
     fn a_registry_export_planted_in_a_backup_is_never_imported() {
         let root = fixture("reg_planted");
         let session = BackupSession::new("Oxidize Planted Export Test").unwrap();
+        let _cleanup = cleanup(&session, &[&root]);
         let recorded = r"HKEY_CURRENT_USER\SOFTWARE\Example Vendor";
         let target = format!(r"Software\OxidizePlantedExportTest{}", std::process::id());
         let file = session.root().join("registry").join("forged.reg");
@@ -476,13 +476,13 @@ mod tests {
         let imported = !registry::key_absent(Hive::CurrentUser, &target);
         let _ = registry::delete_key_tree(Hive::CurrentUser, &target);
         assert!(!imported, "the planted key was written");
-        cleanup(&session, &root);
     }
 
     #[test]
     fn a_copy_is_never_put_back_into_a_protected_folder() {
         let root = fixture("protected_place");
         let session = BackupSession::new("Oxidize Protected Place Test").unwrap();
+        let _cleanup = cleanup(&session, &[&root]);
         // A copy laid out as if it came from the temp folder itself, which
         // is one of the folders Windows keeps.
         let temp = std::env::temp_dir();
@@ -502,7 +502,6 @@ mod tests {
             "{err}"
         );
         assert!(from.exists());
-        cleanup(&session, &root);
     }
 
     #[test]
@@ -511,6 +510,7 @@ mod tests {
         let outside = fixture("planted_target");
         fs::write(outside.join("x.txt"), "not the backup's").unwrap();
         let session = BackupSession::new("Oxidize Planted Junction Test").unwrap();
+        let _cleanup = cleanup(&session, &[&outside, &root]);
         // `files\...\link` is a junction to a folder outside the backup; the
         // entry names a file "inside" it and its proper origin.
         let home = root.join("link");
@@ -530,9 +530,6 @@ mod tests {
             "not the backup's"
         );
         assert!(!home.join("x.txt").exists());
-        let _ = fs::remove_dir(&link);
-        let _ = fs::remove_dir_all(&outside);
-        cleanup(&session, &root);
     }
 
     #[test]
@@ -543,6 +540,7 @@ mod tests {
         let file = root.join("settings.ini");
         fs::write(&file, "x=1").unwrap();
         let mut session = BackupSession::new("Oxidize Prune Link Test").unwrap();
+        let _cleanup = cleanup(&session, &[&outside, &root]);
         session.quarantine(LeftoverKind::File, &file).unwrap();
         let link = session.root().join("files").join("link");
         junction(&link, &outside);
@@ -551,9 +549,6 @@ mod tests {
         assert!(items.iter().all(|i| i.result.is_ok()));
         // The empty folder behind the junction is not the backup's.
         assert!(outside.join("keep").is_dir());
-        let _ = fs::remove_dir(&link);
-        let _ = fs::remove_dir_all(&outside);
-        cleanup(&session, &root);
     }
 
     #[test]
@@ -562,6 +557,7 @@ mod tests {
         let file = root.join("settings.ini");
         fs::write(&file, "x=1").unwrap();
         let mut session = BackupSession::new("Oxidize Restored Test").unwrap();
+        let _cleanup = cleanup(&session, &[&root]);
         session.quarantine(LeftoverKind::File, &file).unwrap();
         assert!(listed(&session).restored.is_none());
 
@@ -580,7 +576,6 @@ mod tests {
         // The folders the copy sat in went with it; the manifest stays.
         assert!(!session.root().join("files").exists());
         assert!(session.root().join(backup::MANIFEST).exists());
-        cleanup(&session, &root);
     }
 
     #[test]
@@ -615,6 +610,7 @@ mod tests {
         let file = root.join("settings.ini");
         fs::write(&file, "x=1").unwrap();
         let mut session = BackupSession::new("Oxidize Outside Test").unwrap();
+        let _cleanup = cleanup(&session, &[&root]);
         session.quarantine(LeftoverKind::File, &file).unwrap();
 
         // Entries a hand-edited manifest could hold: a copy taken from
@@ -685,7 +681,6 @@ mod tests {
         assert!(own_copy.exists());
         assert!(!elsewhere.exists());
         assert!(listed(&session).restored.is_none());
-        cleanup(&session, &root);
     }
 
     #[test]
@@ -695,6 +690,7 @@ mod tests {
         fs::write(&a, "a").unwrap();
         fs::write(&b, "b").unwrap();
         let mut session = BackupSession::new("Oxidize Partial Restore Test").unwrap();
+        let _cleanup = cleanup(&session, &[&root]);
         session.quarantine(LeftoverKind::File, &a).unwrap();
         session.quarantine(LeftoverKind::File, &b).unwrap();
         // Something new sits where b was, so b cannot go back, and the dry
@@ -707,6 +703,5 @@ mod tests {
         assert!(listed(&session).restored.is_none());
         // The copy that could not go back is still there to try again.
         assert!(session.root().join("files").exists());
-        cleanup(&session, &root);
     }
 }
