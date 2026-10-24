@@ -292,7 +292,7 @@ impl Finding {
     pub fn actionable(&self) -> bool {
         match &self.work {
             Work::None => false,
-            Work::Tool => true,
+            Work::Tool(_) => true,
             _ => self.count > 0,
         }
     }
@@ -321,8 +321,9 @@ enum Work {
     None,
     Files(Vec<(Vec<Candidate>, Rule)>),
     Bin(Vec<BinItem>),
-    /// A Windows tool does the work.
-    Tool,
+    /// A Windows tool does the work, and the folder it removes, if any, is
+    /// checked afterwards.
+    Tool(Option<PathBuf>),
     /// The chosen folders of `Finding::folders`.
     Folders,
 }
@@ -734,7 +735,7 @@ fn component_store(opts: &Options) -> Finding {
             }
             f.notes
                 .push("the space freed is measured on the drive afterwards".into());
-            f.work = Work::Tool;
+            f.work = Work::Tool(None);
         }
         Err(e) => f.keep(KeptReason::Failed(format!("{e:#}")), 0, 0),
     }
@@ -749,7 +750,7 @@ fn delivery_optimization(opts: &Options) -> Finding {
                 f.count = count;
                 f.bytes = bytes;
                 if count > 0 {
-                    f.work = Work::Tool;
+                    f.work = Work::Tool(None);
                 }
             } else if count > 0 {
                 f.needs_admin = true;
@@ -778,7 +779,7 @@ fn windows_old(places: &Places, opts: &Options) -> Finding {
     if opts.elevated {
         f.bytes = bytes;
         f.count = 1;
-        f.work = Work::Tool;
+        f.work = Work::Tool(Some(dir.clone()));
     } else {
         f.needs_admin = true;
         f.keep(KeptReason::NeedsAdmin, 1, bytes);
@@ -1052,7 +1053,7 @@ pub fn clean(analysis: &Analysis, choice: &Choice, opts: &CleanOptions) -> Vec<C
                 c.freed = freed;
                 c.removed = gone;
             }
-            Work::Tool => run_tool(f, &mut c, opts),
+            Work::Tool(dir) => run_tool(f, dir.as_deref(), &mut c, opts),
             Work::Folders => clean_folders(f, choice, &mut c, opts),
         }
         // What the analysis left out stays too, and is reported with what
@@ -1065,7 +1066,7 @@ pub fn clean(analysis: &Analysis, choice: &Choice, opts: &CleanOptions) -> Vec<C
     out
 }
 
-fn run_tool(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
+fn run_tool(f: &Finding, dir: Option<&Path>, c: &mut Cleaned, opts: &CleanOptions) {
     if !opts.elevated {
         c.keep(KeptReason::NeedsAdmin, f.count, f.bytes);
         return;
@@ -1104,9 +1105,20 @@ fn run_tool(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
             if let (Some(b), Some(a)) = (before, free()) {
                 c.freed = a.saturating_sub(b);
             }
-            c.removed = f.count;
             c.notes
                 .push("measured as the change in free space on the drive".to_string());
+            let gone = |d: &Path| {
+                std::fs::symlink_metadata(d)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            };
+            match dir {
+                Some(d) if !gone(d) => c.keep(
+                    KeptReason::Failed("still there afterwards".to_string()),
+                    f.count,
+                    f.bytes.saturating_sub(c.freed),
+                ),
+                _ => c.removed = f.count,
+            }
         }
     }
 }
