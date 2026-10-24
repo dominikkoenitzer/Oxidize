@@ -390,10 +390,12 @@ pub fn services() -> Vec<ServiceInfo> {
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// What removing services and tasks needs from the machine: console tools
-/// to run. Tests stand in for it.
+/// to run and a pause between checks. Tests stand in for it.
 trait Console {
     /// Start `cmd` with the process creation `flags` and collect its output.
     fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output>;
+    /// Wait a moment before looking again.
+    fn pause(&mut self);
 }
 
 /// The real machine.
@@ -404,15 +406,33 @@ impl Console for Machine {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(flags).output()
     }
+
+    fn pause(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
 }
 
+/// What became of a service `delete_service` removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRemoval {
+    /// It is gone.
+    Removed,
+    /// Windows only marked it for deletion, as it still runs or something
+    /// holds it open. It goes at the next restart.
+    AfterRestart,
+}
+
+/// How often removal looks for a deleted service to be gone, a pause apart:
+/// a service that was stopping gets about five seconds to finish.
+const SERVICE_GONE_CHECKS: usize = 20;
+
 /// Stop and delete a service. Needs elevation.
-pub fn delete_service(name: &str) -> Result<()> {
+pub fn delete_service(name: &str) -> Result<ServiceRemoval> {
     delete_service_with(name, &mut Machine)
 }
 
 /// `delete_service` on `console`.
-fn delete_service_with(name: &str, console: &mut impl Console) -> Result<()> {
+fn delete_service_with(name: &str, console: &mut impl Console) -> Result<ServiceRemoval> {
     use windows::Win32::Globalization::CP_OEMCP;
     let sc = system32("sc.exe");
     // Stopping may fail because it is already stopped; that is fine.
@@ -421,8 +441,22 @@ fn delete_service_with(name: &str, console: &mut impl Console) -> Result<()> {
         .run(Command::new(&sc).args(["delete", name]), CREATE_NO_WINDOW)
         .context("running sc delete")?;
     match out.status.code() {
-        // 1060: does not exist. 1072: already marked for deletion.
-        Some(0) | Some(1060) | Some(1072) => Ok(()),
+        // 1060: does not exist.
+        Some(1060) => Ok(ServiceRemoval::Removed),
+        // Windows deletes the service once it has stopped and nothing holds
+        // it open; until then it is only marked (1072: marked before).
+        Some(0) | Some(1072) => {
+            for check in 0..SERVICE_GONE_CHECKS {
+                if check > 0 {
+                    console.pause();
+                }
+                let query = console.run(Command::new(&sc).args(["query", name]), CREATE_NO_WINDOW);
+                if query.is_ok_and(|q| q.status.code() == Some(1060)) {
+                    return Ok(ServiceRemoval::Removed);
+                }
+            }
+            Ok(ServiceRemoval::AfterRestart)
+        }
         // sc writes to a pipe in the OEM code page, whatever the console uses.
         Some(code) => bail!(
             "sc delete failed with code {code}: {}",
@@ -1098,6 +1132,7 @@ mod tests {
         results: std::vec::IntoIter<io::Result<Output>>,
         ran: Vec<Vec<String>>,
         flags: Vec<u32>,
+        pauses: usize,
     }
 
     impl Fake {
@@ -1106,6 +1141,7 @@ mod tests {
                 results: results.into_iter(),
                 ran: Vec::new(),
                 flags: Vec::new(),
+                pauses: 0,
             }
         }
     }
@@ -1120,6 +1156,10 @@ mod tests {
                 .next()
                 .expect("a tool ran more often than expected")
         }
+
+        fn pause(&mut self) {
+            self.pauses += 1;
+        }
     }
 
     /// Remove `name` with sc answering from `results`, never running it.
@@ -1127,10 +1167,23 @@ mod tests {
     fn remove_service(
         name: &str,
         results: Vec<io::Result<Output>>,
-    ) -> (Result<()>, Vec<Vec<String>>) {
+    ) -> (Result<ServiceRemoval>, Vec<Vec<String>>) {
         let mut fake = Fake::new(results);
         let outcome = delete_service_with(name, &mut fake);
         (outcome, fake.ran)
+    }
+
+    /// What sc query prints for a service that is no longer there.
+    fn no_such_service() -> io::Result<Output> {
+        sc_exited(1060, b"[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\r\n\r\nThe specified service does not exist as an installed service.\r\n\r\n")
+    }
+
+    /// What sc query prints for a service that still runs.
+    fn still_running() -> io::Result<Output> {
+        sc_exited(
+            0,
+            b"\r\nSERVICE_NAME: Svc\r\n        STATE              : 4  RUNNING\r\n",
+        )
     }
 
     fn sc_line(args: &[&str]) -> Vec<String> {
@@ -1148,15 +1201,59 @@ mod tests {
             vec![
                 sc_exited(0, stop_pending),
                 sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+                no_such_service(),
             ],
         );
-        outcome.unwrap();
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
         assert_eq!(
             ran,
-            [sc_line(&["stop", "Svc"]), sc_line(&["delete", "Svc"])]
+            [
+                sc_line(&["stop", "Svc"]),
+                sc_line(&["delete", "Svc"]),
+                sc_line(&["query", "Svc"])
+            ]
         );
         assert!(Path::new(&ran[0][0]).is_absolute(), "{}", ran[0][0]);
         assert!(ran[0][0].to_lowercase().ends_with(r"\system32\sc.exe"));
+    }
+
+    #[test]
+    fn a_stopping_service_counts_as_removed_once_it_is_gone() {
+        let mut fake = Fake::new(vec![
+            sc_exited(0, b""),
+            sc_exited(0, b""),
+            still_running(),
+            still_running(),
+            no_such_service(),
+        ]);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
+        assert_eq!(fake.ran.len(), 5);
+        assert_eq!(fake.pauses, 2);
+    }
+
+    #[test]
+    fn a_service_that_will_not_stop_goes_after_a_restart() {
+        let cannot_stop = b"[SC] ControlService FAILED 1052:\r\n\r\nThe requested control is not valid for this service.\r\n\r\n";
+        let mut results = vec![
+            sc_exited(1052, cannot_stop),
+            sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+        ];
+        results.extend((0..SERVICE_GONE_CHECKS).map(|_| still_running()));
+        let mut fake = Fake::new(results);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::AfterRestart);
+        assert_eq!(fake.ran.len(), 2 + SERVICE_GONE_CHECKS);
+        assert_eq!(fake.pauses, SERVICE_GONE_CHECKS - 1);
+    }
+
+    #[test]
+    fn a_service_already_marked_for_deletion_goes_after_a_restart() {
+        let marked = b"[SC] DeleteService FAILED 1072:\r\n\r\nThe specified service has been marked for deletion.\r\n\r\n";
+        let mut results = vec![sc_exited(0, b""), sc_exited(1072, marked)];
+        results.extend((0..SERVICE_GONE_CHECKS).map(|_| still_running()));
+        let (outcome, _) = remove_service("Going", results);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::AfterRestart);
     }
 
     #[test]
@@ -1168,10 +1265,11 @@ mod tests {
             vec![
                 sc_exited(1062, not_started),
                 sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+                no_such_service(),
             ],
         );
-        outcome.unwrap();
-        assert_eq!(ran.len(), 2);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
+        assert_eq!(ran.len(), 3);
     }
 
     #[test]
@@ -1183,9 +1281,13 @@ mod tests {
         ] {
             let (outcome, ran) = remove_service(
                 "Svc",
-                vec![stop, sc_exited(0, b"[SC] DeleteService SUCCESS\r\n")],
+                vec![
+                    stop,
+                    sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+                    no_such_service(),
+                ],
             );
-            outcome.unwrap();
+            assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
             assert_eq!(ran[1], sc_line(&["delete", "Svc"]));
         }
     }
@@ -1198,29 +1300,32 @@ mod tests {
             r#"Ends with a quote""#,
             " padded ",
         ] {
-            let (outcome, ran) = remove_service(name, vec![sc_exited(0, b""), sc_exited(0, b"")]);
+            let (outcome, ran) = remove_service(
+                name,
+                vec![sc_exited(0, b""), sc_exited(0, b""), no_such_service()],
+            );
             outcome.unwrap();
             assert_eq!(
                 ran,
-                [sc_line(&["stop", name]), sc_line(&["delete", name])],
+                [
+                    sc_line(&["stop", name]),
+                    sc_line(&["delete", name]),
+                    sc_line(&["query", name])
+                ],
                 "{name}"
             );
         }
     }
 
     #[test]
-    fn a_missing_service_or_one_already_marked_counts_as_removed() {
+    fn a_missing_service_counts_as_removed() {
         let missing = b"[SC] OpenService FAILED 1060:\r\n\r\nThe specified service does not exist as an installed service.\r\n\r\n";
-        let marked = b"[SC] DeleteService FAILED 1072:\r\n\r\nThe specified service has been marked for deletion.\r\n\r\n";
-        remove_service(
+        let (outcome, ran) = remove_service(
             "Gone",
             vec![sc_exited(1060, missing), sc_exited(1060, missing)],
-        )
-        .0
-        .unwrap();
-        remove_service("Going", vec![sc_exited(0, b""), sc_exited(1072, marked)])
-            .0
-            .unwrap();
+        );
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
+        assert_eq!(ran.len(), 2);
     }
 
     #[test]
@@ -1250,13 +1355,21 @@ mod tests {
     #[test]
     fn every_console_tool_starts_without_a_window() {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let mut fake = Fake::new((0..4).map(|_| sc_exited(0, b"")).collect());
-        delete_service_with("Svc", &mut fake).unwrap();
-        delete_task_with(r"\Vendor\Updater", &mut fake).unwrap();
-        import_task_with(r"\Vendor\Updater", Path::new(r"C:\b\t.xml"), &mut fake).unwrap();
-        assert_eq!(fake.ran.len(), fake.flags.len());
-        for (line, flags) in fake.ran.iter().zip(&fake.flags) {
-            assert_eq!(*flags, CREATE_NO_WINDOW, "{line:?}");
+        let mut service = Fake::new(vec![
+            sc_exited(0, b""),
+            sc_exited(0, b""),
+            no_such_service(),
+        ]);
+        delete_service_with("Svc", &mut service).unwrap();
+        let mut task = Fake::new(vec![sc_exited(0, b"")]);
+        delete_task_with(r"\Vendor\Updater", &mut task).unwrap();
+        let mut import = Fake::new(vec![sc_exited(0, b"")]);
+        import_task_with(r"\Vendor\Updater", Path::new(r"C:\b\t.xml"), &mut import).unwrap();
+        for fake in [service, task, import] {
+            assert_eq!(fake.ran.len(), fake.flags.len());
+            for (line, flags) in fake.ran.iter().zip(&fake.flags) {
+                assert_eq!(*flags, CREATE_NO_WINDOW, "{line:?}");
+            }
         }
     }
 

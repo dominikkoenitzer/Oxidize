@@ -108,7 +108,7 @@ Enum values, exactly as printed:
 }
 ```
 
-- `status` is `"removed"`, `"gone"`, `"failed"`, or `"would_remove"` in a dry run; `error` is set when it failed.
+- `status` is `"removed"`, `"removed_after_restart"` for a service Windows only marked for deletion, `"gone"`, `"failed"`, or `"would_remove"` in a dry run; `error` is set when it failed. `removed` counts both kinds of removal.
 - `backup` is the backup name for `oxidize restore`, or null with `--no-backup`.
 - In a dry run, `items` lists every item that would go, `attempted` and `already_gone` both hold their number, `removed` and `failed` are 0 and `backup` is null.
 - Declined, which is every run with `--json` and without `-y`: all counts 0, `backup` null, `items` empty, exit code 5.

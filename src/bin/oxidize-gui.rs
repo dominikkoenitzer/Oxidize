@@ -992,6 +992,9 @@ fn removal_log(outcome: &DeletionOutcome, dry_run: bool) -> Vec<String> {
     for item in &outcome.items {
         match &item.status {
             ItemStatus::Removed => lines.push(format!("removed {}", item.path)),
+            ItemStatus::RemovedAfterRestart => {
+                lines.push(format!("removed {} after a restart", item.path))
+            }
             ItemStatus::AlreadyGone => lines.push(format!("already gone {}", item.path)),
             ItemStatus::Failed(e) => lines.push(format!("failed {}: {e}", item.path)),
             ItemStatus::WouldRemove => lines.push(format!("would remove {}", item.path)),
