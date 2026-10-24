@@ -412,10 +412,13 @@ fn delete_service_with(
     }
 }
 
-/// `bytes` as a console tool wrote them to a pipe in `code_page`.
-fn code_page_text(bytes: &[u8], code_page: u32) -> String {
+/// `bytes` as a console tool wrote them to a pipe in `code_page`, or in UTF-16 after its byte order mark.
+pub(crate) fn code_page_text(bytes: &[u8], code_page: u32) -> String {
     use windows::Win32::Globalization::{MultiByteToWideChar, MULTI_BYTE_TO_WIDE_CHAR_FLAGS};
     let flags = MULTI_BYTE_TO_WIDE_CHAR_FLAGS(0);
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        return decode_utf16_or_utf8(bytes);
+    }
     if bytes.is_empty() || i32::try_from(bytes.len()).is_err() {
         return String::from_utf8_lossy(bytes).into_owned();
     }
@@ -539,7 +542,7 @@ pub fn delete_task(name: &str) -> Result<()> {
     } else {
         bail!(
             "schtasks /delete failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            schtasks_text(&out.stderr, console_page()).trim()
         )
     }
 }
@@ -557,9 +560,27 @@ pub fn import_task(name: &str, xml: &Path) -> Result<()> {
     } else {
         bail!(
             "schtasks /create failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            schtasks_text(&out.stderr, console_page()).trim()
         )
     }
+}
+
+/// The output code page of this process's console, 0 without one.
+fn console_page() -> u32 {
+    // SAFETY: takes no arguments and only reads console state.
+    unsafe { windows::Win32::System::Console::GetConsoleOutputCP() }
+}
+
+/// What schtasks printed to a pipe while this process's console was at `console_page`.
+fn schtasks_text(bytes: &[u8], console_page: u32) -> String {
+    use windows::Win32::Globalization::CP_OEMCP;
+    // schtasks writes its console's code page; without ours it gets a new one at the OEM page.
+    let page = if console_page == 0 {
+        CP_OEMCP
+    } else {
+        console_page
+    };
+    code_page_text(bytes, page)
 }
 
 // PATH
@@ -1193,6 +1214,31 @@ mod tests {
             )
         );
         assert!(!message.contains(char::REPLACEMENT_CHARACTER), "{message}");
+    }
+
+    #[test]
+    fn text_with_a_utf16_byte_order_mark_is_read_as_utf16() {
+        let wide: Vec<u8> = [0xFF, 0xFE]
+            .into_iter()
+            .chain("Accès refusé.".encode_utf16().flat_map(u16::to_le_bytes))
+            .collect();
+        assert_eq!(code_page_text(&wide, 850), "Accès refusé.");
+        assert_eq!(code_page_text(&wide, 1252), "Accès refusé.");
+        assert_eq!(
+            code_page_text(b"Acc\xe8s refus\xe9.", 1252),
+            "Accès refusé."
+        );
+    }
+
+    #[test]
+    fn schtasks_errors_are_read_in_the_console_code_page() {
+        assert_eq!(schtasks_text(b"Acc\x8as refus\x82.", 850), "Accès refusé.");
+        assert_eq!(schtasks_text(b"Acc\xe8s refus\xe9.", 1252), "Accès refusé.");
+        // Without a console schtasks gets a new one, which starts at the OEM code page.
+        let oem = unsafe { windows::Win32::Globalization::GetOEMCP() };
+        let text = schtasks_text(b"Acc\x8as refus\x82.", 0);
+        assert_eq!(text, code_page_text(b"Acc\x8as refus\x82.", oem));
+        assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
     }
 
     #[test]
