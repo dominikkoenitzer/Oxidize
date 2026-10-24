@@ -654,6 +654,8 @@ fn only_a_high_match_to_a_removed_program_is_chosen_and_it_comes_back() {
         &tools,
     );
     let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
     assert_eq!((o.removed, o.freed), (1, 120));
     assert!(!exact.path.exists());
     assert!(loose.path.exists() && other.path.exists() && kept_folder.path.exists());
@@ -665,9 +667,6 @@ fn only_a_high_match_to_a_removed_program_is_chosen_and_it_comes_back() {
     assert!(restored.iter().all(|r| r.result.is_ok()));
     assert_eq!(fs::read(exact.path.join("data.bin")).unwrap().len(), 120);
     crate::backup::delete_backup(&info).unwrap();
-    let base = crate::backup::backups_base().unwrap();
-    let _ = fs::remove_dir(&base);
-    let _ = fs::remove_dir(base.parent().unwrap());
 }
 
 #[test]
