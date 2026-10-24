@@ -2723,9 +2723,9 @@ fn item_line(item: &ItemOutcome) -> String {
         ItemStatus::Removed => format!("  {}  {}", term::green("removed"), item.path),
         ItemStatus::RemovedAfterRestart => format!(
             "  {}  {}  {}",
-            term::green("removed"),
+            term::green("marked "),
             item.path,
-            term::dim("after a restart")
+            term::dim("goes at the next restart")
         ),
         ItemStatus::AlreadyGone => format!("  {}  {}", term::dim("gone   "), item.path),
         ItemStatus::Failed(e) => format!(
@@ -4144,14 +4144,14 @@ mod tests {
     }
 
     #[test]
-    fn a_service_removed_after_a_restart_says_so() {
+    fn a_service_only_marked_for_deletion_goes_at_the_next_restart() {
         let item = ItemOutcome {
             path: "Vendor Update Service".to_string(),
             kind: LeftoverKind::Service,
             status: ItemStatus::RemovedAfterRestart,
         };
         assert!(item_line(&item).contains("Vendor Update Service"));
-        assert!(item_line(&item).contains("after a restart"));
+        assert!(item_line(&item).contains("goes at the next restart"));
         let outcome = DeletionOutcome {
             attempted: 1,
             deleted: 1,
