@@ -179,6 +179,37 @@ pub fn run_for(
     }
 }
 
+/// How a run of the vendor's uninstaller went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ran {
+    /// How it ended, or that it was still running, in words.
+    pub said: String,
+    /// False when it was still running at the end of the wait.
+    pub ended: bool,
+}
+
+impl Ran {
+    /// What `run_for` found; `running` says it was still running.
+    pub fn of(status: Option<ExitStatus>, is_msi: bool, running: impl FnOnce() -> String) -> Ran {
+        match status {
+            Some(status) => Ran {
+                said: describe_exit(status, is_msi),
+                ended: true,
+            },
+            None => Ran {
+                said: running(),
+                ended: false,
+            },
+        }
+    }
+
+    /// Whether the program is gone, asking `gone` only once the uninstaller
+    /// has ended: one still running is not done, whatever the registry says.
+    pub fn gone(&self, gone: impl FnOnce() -> bool) -> bool {
+        self.ended && gone()
+    }
+}
+
 /// Is the program's Uninstall key still there?
 pub fn still_installed(program: &Program) -> bool {
     registry::key_exists(program.source.hive, &program.uninstall_subpath())
@@ -274,6 +305,20 @@ mod tests {
             is_windows_installer: false,
             is_system_component: false,
         }
+    }
+
+    #[test]
+    fn a_program_is_gone_only_once_its_uninstaller_has_ended() {
+        use std::os::windows::process::ExitStatusExt;
+        let running = Ran::of(None, false, || "was still running after 60 s".into());
+        assert_eq!(running.said, "was still running after 60 s");
+        assert!(!running.ended);
+        assert!(!running.gone(|| panic!("the entry is not looked at")));
+
+        let ended = Ran::of(Some(ExitStatus::from_raw(0)), false, String::new);
+        assert_eq!(ended.said, "finished");
+        assert!(ended.gone(|| true));
+        assert!(!ended.gone(|| false));
     }
 
     #[test]
