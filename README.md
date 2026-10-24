@@ -345,6 +345,7 @@ a category that did not clean fully exits with 4. Both carry a `summary` to
 compare runs by: `bytes`, `count` and `protected` (the `count` and `bytes`
 the protected list kept), in total and per category id under `categories`.
 Before a cleaning it counts what each category holds, after it what went.
+A protected folder is never entered, so it counts as one item of 0 bytes.
 `oxidize clean --traces --json` prints `traces`, one entry per trace with `trace`, `count`, `bytes`,
 `count_known`, `kept` and `notes`, and the totals `count` and `bytes`; with
 `--yes` the entries are in `cleared`. A jump list kept for its pinned items
