@@ -692,6 +692,28 @@ fn installer_removal_events_name_the_products_that_went() {
 }
 
 #[test]
+fn installer_removal_events_keep_accented_names() {
+    // Without /uni:true wevtutil writes the ANSI code page, which cannot hold every name.
+    assert!(
+        INSTALLER_EVENTS.contains(&"/uni:true"),
+        "{INSTALLER_EVENTS:?}"
+    );
+    let xml = "<Event><EventData><Data>Bürotext Éditeur</Data><Data>3.0</Data>\
+        <Data>1031</Data><Data>0</Data><Data>Zürcher Werkstatt</Data></EventData></Event>";
+    let wide: Vec<u8> = [0xFF, 0xFE]
+        .into_iter()
+        .chain(xml.encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    assert_eq!(
+        parse_installer_removals(&installer_events_text(&wide)),
+        [(
+            "Bürotext Éditeur".to_string(),
+            Some("Zürcher Werkstatt".to_string())
+        )]
+    );
+}
+
+#[test]
 fn the_json_of_an_analysis_names_categories_and_reasons() {
     let pc = Pc::new("json");
     pc.fill();

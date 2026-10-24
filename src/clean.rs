@@ -964,17 +964,21 @@ pub fn removed_programs(installed: &[Program]) -> Vec<(String, Option<String>)> 
     out
 }
 
+/// The wevtutil query for the last 300 removals Windows Installer logged.
+const INSTALLER_EVENTS: &[&str] = &[
+    "qe",
+    "Application",
+    "/q:*[System[Provider[@Name='MsiInstaller'] and (EventID=1034)]]",
+    "/f:xml",
+    "/c:300",
+    "/rd:true",
+    "/uni:true",
+];
+
 /// Products Windows Installer reports as removed, newest first.
 fn installer_removals() -> Vec<(String, Option<String>)> {
     let mut cmd = std::process::Command::new(crate::system::system32("wevtutil.exe"));
-    cmd.args([
-        "qe",
-        "Application",
-        "/q:*[System[Provider[@Name='MsiInstaller'] and (EventID=1034)]]",
-        "/f:xml",
-        "/c:300",
-        "/rd:true",
-    ]);
+    cmd.args(INSTALLER_EVENTS);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -983,7 +987,13 @@ fn installer_removals() -> Vec<(String, Option<String>)> {
     let Ok(out) = cmd.stdin(std::process::Stdio::null()).output() else {
         return Vec::new();
     };
-    parse_installer_removals(&String::from_utf8_lossy(&out.stdout))
+    parse_installer_removals(&installer_events_text(&out.stdout))
+}
+
+/// What the `INSTALLER_EVENTS` query printed to a pipe.
+fn installer_events_text(bytes: &[u8]) -> String {
+    // UTF-16 with a byte order mark; the ANSI code page is what wevtutil writes without /uni.
+    crate::system::code_page_text(bytes, ::windows::Win32::Globalization::CP_ACP)
 }
 
 /// Product name and manufacturer from each 1034 event that reports
