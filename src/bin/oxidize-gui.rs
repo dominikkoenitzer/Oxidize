@@ -908,7 +908,7 @@ impl OxidizeApp {
         let idle = !self.busy();
         let frame =
             egui::Frame::popup(&ctx.style_of(ctx.theme())).inner_margin(egui::Margin::same(20));
-        let modal = egui::Modal::new(egui::Id::new("confirm"))
+        let modal = egui::Modal::new(egui::Id::unique("confirm"))
             .frame(frame)
             .show(ctx, |ui| {
                 let t = Tint::for_ui(ui);
@@ -1621,7 +1621,7 @@ impl OxidizeApp {
                 }
                 clicked
             });
-            self.table_view = (out.state.offset.y, out.inner_rect.height());
+            self.table_view = (out.state.clamped_offset().y, out.inner_rect.height());
             if let Some(i) = out.inner {
                 let id = self.programs[i].id().to_string();
                 self.select(&id);
@@ -1642,10 +1642,10 @@ impl OxidizeApp {
             } else {
                 cell
             };
-            let id = ui.id().with(("sort", col.column.title()));
+            let id = ui.scope_id().with(("sort", col.column.title()));
             let response = ui.interact(hit, id, egui::Sense::click());
             response.widget_info(|| {
-                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, col.column.title())
+                egui::WidgetInfo::labeled(egui::Role::Button, true, col.column.title())
             });
             let active = self.sort.column == col.column;
             let color = if active || response.hovered() {
@@ -1695,12 +1695,7 @@ impl OxidizeApp {
             egui::Sense::click(),
         );
         response.widget_info(|| {
-            egui::WidgetInfo::selected(
-                egui::WidgetType::SelectableLabel,
-                true,
-                selected,
-                &program.display_name,
-            )
+            egui::WidgetInfo::selected(egui::Role::Button, true, selected, &program.display_name)
         });
         if !ui.is_rect_visible(rect) {
             return response.clicked();
@@ -2184,7 +2179,7 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
             .layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), color);
     let size = galley.size() + egui::vec2(16.0, 6.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
     if ui.is_rect_visible(rect) {
         ui.painter()
             .rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.16));
@@ -2200,9 +2195,7 @@ fn tab_label(ui: &mut egui::Ui, t: &Tint, open: bool, label: &str) -> egui::Resp
     let galley = ui.painter().layout_no_wrap(label.to_string(), font, t.text);
     let size = egui::vec2(galley.size().x + 8.0, 28.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, open, label)
-    });
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, open, label));
     if ui.is_rect_visible(rect) {
         let color = if open || response.hovered() {
             t.text
@@ -2247,9 +2240,7 @@ fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) 
     let galley = ui.painter().layout_job(job);
     let size = egui::vec2(galley.size().x + 22.0, 26.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
-    });
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
     if ui.is_rect_visible(rect) {
         let fill = if selected {
             t.button_active
