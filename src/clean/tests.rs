@@ -14,6 +14,8 @@ use super::*;
 struct FakeTools {
     calls: Mutex<Vec<&'static str>>,
     delivery: Mutex<(usize, u64)>,
+    /// What the Delivery Optimization cache still holds after its delete.
+    delivery_left: Mutex<(usize, u64)>,
     /// What runs by the time the cleaning starts.
     running: Mutex<Vec<PathBuf>>,
 }
@@ -46,7 +48,7 @@ impl Tools for FakeTools {
     }
     fn delete_delivery_cache(&self) -> anyhow::Result<()> {
         self.call("delete_delivery_cache");
-        *self.delivery.lock().unwrap() = (0, 0);
+        *self.delivery.lock().unwrap() = *self.delivery_left.lock().unwrap();
         Ok(())
     }
     fn remove_windows_old(&self) -> anyhow::Result<()> {
@@ -560,6 +562,26 @@ fn windows_tools_run_only_when_chosen_and_elevated() {
         .find(|d| d.category == Category::DeliveryOptimization)
         .unwrap();
     assert_eq!(dopt.freed, 900);
+}
+
+#[test]
+fn delivery_files_still_in_the_cache_are_not_reported_as_removed() {
+    let pc = Pc::new("delivery-left");
+    let tools = FakeTools::default();
+    *tools.delivery.lock().unwrap() = (4, 900);
+    *tools.delivery_left.lock().unwrap() = (1, 300);
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    let done = clean_with(
+        &pc,
+        &a,
+        &a.choice(&[Category::DeliveryOptimization], Confidence::High),
+        &Protected::default(),
+        true,
+        &tools,
+    );
+    assert_eq!((done[0].removed, done[0].freed), (3, 600));
+    let left = KeptReason::Failed("still there afterwards".to_string());
+    assert_eq!(kept(&done[0].kept, &left), (1, 300));
 }
 
 #[test]
