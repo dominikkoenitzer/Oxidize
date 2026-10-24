@@ -198,16 +198,12 @@
     }
   },
   "new": {
-    "version": "0.2.8",
+    "version": "0.2.9",
     "items": [
-      "A removal never takes the folders Windows keeps for you (Downloads, Saved Games, the cloud folder, the desktops and the rest), wherever they really are, and a folder in Downloads or on a desktop that a removal empties stays.",
-      "Clean up walks a temp folder only when it really is one: a profile, a drive or a folder Windows keeps is left alone, with a note saying why. It asks again right before it cleans whether a browser runs.",
-      "Restore puts a copy back only from its own backup and only to where it came from, and imports a registry export only into the key it was taken from.",
-      "A registry path with an empty part, or a key every program shares, is never deleted.",
-      "A file named like the program's but somewhere else, or anything in an install folder whose name says nothing about the program, counts at Medium only.",
-      "A working autostart with spaces in its path is no longer taken for a dangling one, and a file on a drive that is not plugged in counts as there.",
-      "<code>oxidize mcp</code> refuses <code>--dry-run</code>, <code>--yes</code> and <code>--no-backup</code>, and waits up to 30 minutes for an uninstaller to finish.",
-      "The window runs one thing at a time, waits for running work before it closes, and shows an undone cleaning as freeing nothing."
+      "<code>oxidize protect --check</code> says whether a path is kept out of every clean and which entry of the protected list keeps it.",
+      "A clean plan and a clean run in JSON carry a summary of what each category holds and what the protected list kept, to compare runs by.",
+      "A service Windows only marks for deletion is listed as going at the next restart, and a removal Windows refuses says so in one sentence.",
+      "Messages from Windows tools come through with their accents intact, and <code>sc</code> and <code>schtasks</code> start without a console window."
     ]
   },
   "requirements": [
