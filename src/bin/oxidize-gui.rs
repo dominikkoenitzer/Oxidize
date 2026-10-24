@@ -3995,8 +3995,17 @@ mod tests {
 
     #[test]
     fn the_main_executable_is_found_one_level_down_when_the_folder_has_none() {
-        let root = std::env::temp_dir().join("oxidize_icon_main_exe_test");
+        /// Removes the folder when the test ends, passed or failed.
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("oxidize_icon_main_exe_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
+        let _cleanup = Cleanup(root.clone());
         let write = |rel: &str, len: usize| {
             let path = rel
                 .split('/')
@@ -4020,7 +4029,6 @@ mod tests {
         // An executable in the folder itself wins over the ones below it.
         let own = write("player.exe", 10);
         assert_eq!(find_main_exe(&root, &tokens), Some(own));
-        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
