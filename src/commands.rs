@@ -3713,14 +3713,23 @@ mod tests {
         }
     }
 
-    fn local_appdata(tag: &str) -> PathBuf {
+    /// A stand-in LocalAppData, removed when the test ends, passed or failed.
+    struct LocalAppData(PathBuf);
+
+    impl Drop for LocalAppData {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn local_appdata(tag: &str) -> LocalAppData {
         let dir = std::env::temp_dir().join(format!(
             "oxidize_store_uninstall_{tag}_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Packages")).unwrap();
-        dir
+        LocalAppData(dir)
     }
 
     fn notes_and_paint() -> Vec<Package> {
@@ -3846,12 +3855,12 @@ mod tests {
     fn a_removed_app_leads_to_its_leftovers() {
         let local = local_appdata("leftovers");
         let notes = package("Vendor.Notes", "Notes");
-        let folder = local.join("Packages").join(&notes.family_name);
+        let folder = local.0.join("Packages").join(&notes.family_name);
         std::fs::create_dir_all(folder.join("LocalState")).unwrap();
         std::fs::write(folder.join("LocalState").join("notes.db"), b"data").unwrap();
         let mut store = FakePackageStore::new(notes_and_paint());
         store.provisioned = vec![notes.family_name.clone()];
-        let env = fake_env(&store, Some(local.clone()));
+        let env = fake_env(&store, Some(local.0.clone()));
 
         let run = run_package(
             &env,
@@ -3873,19 +3882,18 @@ mod tests {
         assert_eq!(run.json["may_come_back"], true);
         assert_eq!(run.leftovers(false), "2 leftovers kept");
         assert!(folder.exists(), "--keep leaves the folder");
-        let _ = std::fs::remove_dir_all(&local);
     }
 
     #[test]
     fn the_data_folder_goes_through_the_leftover_removal() {
         let local = local_appdata("removal");
         let notes = package("Vendor.Notes", "Notes");
-        let folder = local.join("Packages").join(&notes.family_name);
+        let folder = local.0.join("Packages").join(&notes.family_name);
         std::fs::create_dir_all(folder.join("LocalState")).unwrap();
         let store = FakePackageStore::new(notes_and_paint());
         let env = StoreEnv {
             scan_by_name: |_| Vec::new(),
-            ..fake_env(&store, Some(local.clone()))
+            ..fake_env(&store, Some(local.0.clone()))
         };
         // High only, and no backup so the test leaves nothing behind.
         let run = run_package(
@@ -3904,7 +3912,6 @@ mod tests {
             folder.display().to_string()
         );
         assert!(!run.failed(false));
-        let _ = std::fs::remove_dir_all(&local);
     }
 
     #[test]
