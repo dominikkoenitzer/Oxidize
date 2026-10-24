@@ -140,9 +140,10 @@ pub fn select(
     out
 }
 
-/// Empty the chosen items: the item first, then its `$I` entry, so a failure
-/// never leaves an item Windows cannot show. Returns the bytes freed and the
-/// number of items that went.
+/// Empty the chosen items: the item first, then its `$I` entry, so an item
+/// that cannot go keeps its entry. An entry that cannot go after its item has
+/// gone stays behind and is reported as kept, with its bytes counted as freed.
+/// Returns the bytes freed and the number of items that went.
 pub fn delete(items: &[BinItem], protected: &Protected, kept: &mut Vec<Kept>) -> (u64, usize) {
     let mut freed = 0;
     let mut gone = 0;
@@ -158,20 +159,27 @@ pub fn delete(items: &[BinItem], protected: &Protected, kept: &mut Vec<Kept>) ->
                 Err(_) => Ok(()),
             };
             if let Err(e) = result {
-                let reason = match e.raw_os_error() {
-                    Some(32) | Some(33) => KeptReason::InUse,
-                    _ => KeptReason::AccessDenied,
-                };
-                super::files::add(kept, reason, 1, item.bytes);
+                super::files::add(kept, reason_of(&e), 1, item.bytes);
                 continue;
             }
         }
-        if fs::remove_file(&item.info).is_ok() || !item.info.exists() {
-            freed += item.bytes;
-            gone += 1;
+        freed += item.bytes;
+        match fs::remove_file(&item.info) {
+            Err(e) if item.info.exists() => {
+                // Its space is free, but the bin still lists it.
+                super::files::add(kept, reason_of(&e), 1, 0);
+            }
+            _ => gone += 1,
         }
     }
     (freed, gone)
+}
+
+fn reason_of(e: &std::io::Error) -> KeptReason {
+    match e.raw_os_error() {
+        Some(32) | Some(33) => KeptReason::InUse,
+        _ => KeptReason::AccessDenied,
+    }
 }
 
 /// `X:\$Recycle.Bin\<sid>` on every fixed drive that has one.
@@ -358,6 +366,34 @@ pub(crate) mod tests {
         ] {
             assert!(bin.join(stays).exists(), "{stays}");
         }
+        let _ = fs::remove_dir_all(&bin);
+    }
+
+    #[test]
+    fn an_item_whose_entry_cannot_go_is_reported_as_kept() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let bin = fixture("bin_entry_held");
+        recycled(&bin, "AAAAAA.txt", 300, 45, r"C:\Docs\old.txt");
+        let chosen = items(&bin);
+        // Open without sharing, so deleting the entry fails.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(bin.join("$IAAAAAA.txt"))
+            .unwrap();
+        let mut kept = Vec::new();
+        let done = delete(&chosen, &Protected::default(), &mut kept);
+        drop(held);
+        assert!(!bin.join("$RAAAAAA.txt").exists());
+        assert_eq!(done, (300, 0));
+        assert_eq!(
+            kept,
+            [Kept {
+                reason: KeptReason::InUse,
+                count: 1,
+                bytes: 0
+            }]
+        );
         let _ = fs::remove_dir_all(&bin);
     }
 
