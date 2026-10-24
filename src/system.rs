@@ -415,7 +415,20 @@ impl Console for Machine {
 
     fn log(&mut self, line: &str) {
         eprintln!("{line}");
+        TOOL_LOG
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(line.to_string());
     }
+}
+
+/// What console tools said since `take_tool_log` last ran. The window app
+/// shows it in its log, as its standard error goes nowhere.
+static TOOL_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// The lines console tools left for the log since the last call.
+pub fn take_tool_log() -> Vec<String> {
+    std::mem::take(&mut *TOOL_LOG.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// What became of a service `delete_service` removed.
@@ -1547,6 +1560,17 @@ mod tests {
             )]
         );
         assert!(!fake.logged[0].contains(char::REPLACEMENT_CHARACTER));
+    }
+
+    #[test]
+    fn the_window_app_can_take_what_the_tools_said() {
+        Machine
+            .log(r"schtasks /delete \Vendor\Updater ended with code 1: ERROR: Access is denied.");
+        assert_eq!(
+            take_tool_log(),
+            [r"schtasks /delete \Vendor\Updater ended with code 1: ERROR: Access is denied."]
+        );
+        assert!(take_tool_log().is_empty());
     }
 
     #[test]
