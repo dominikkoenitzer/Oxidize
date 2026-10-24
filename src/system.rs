@@ -385,30 +385,137 @@ pub fn services() -> Vec<ServiceInfo> {
     out
 }
 
-/// Stop and delete a service. Needs elevation.
-pub fn delete_service(name: &str) -> Result<()> {
-    delete_service_with(name, Command::output)
+/// Console tools start without a console window. The window app is a GUI
+/// program, so each run would otherwise flash one.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// What removing services and tasks needs from the machine: console tools
+/// to run, a pause between checks and a log. Tests stand in for it.
+trait Console {
+    /// Start `cmd` with the process creation `flags` and collect its output.
+    fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output>;
+    /// Wait a moment before looking again.
+    fn pause(&mut self);
+    /// Keep one line of what a tool said for the log.
+    fn log(&mut self, line: &str);
 }
 
-/// `delete_service`, with `run` running each sc command.
-fn delete_service_with(
-    name: &str,
-    mut run: impl FnMut(&mut Command) -> io::Result<Output>,
-) -> Result<()> {
+/// The real machine.
+struct Machine;
+
+impl Console for Machine {
+    fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output> {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(flags).output()
+    }
+
+    fn pause(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+
+    fn log(&mut self, line: &str) {
+        eprintln!("{line}");
+    }
+}
+
+/// What became of a service `delete_service` removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRemoval {
+    /// It is gone.
+    Removed,
+    /// Windows only marked it for deletion, as it still runs or something
+    /// holds it open. It goes at the next restart.
+    AfterRestart,
+}
+
+/// How often removal looks for a deleted service to be gone, a pause apart:
+/// a service that was stopping gets about five seconds to finish.
+const SERVICE_GONE_CHECKS: usize = 20;
+
+/// Stop and delete a service. Needs elevation.
+pub fn delete_service(name: &str) -> Result<ServiceRemoval> {
+    delete_service_with(name, &mut Machine)
+}
+
+/// `delete_service` on `console`.
+fn delete_service_with(name: &str, console: &mut impl Console) -> Result<ServiceRemoval> {
     use windows::Win32::Globalization::CP_OEMCP;
     let sc = system32("sc.exe");
     // Stopping may fail because it is already stopped; that is fine.
-    let _ = run(Command::new(&sc).args(["stop", name]));
-    let out = run(Command::new(&sc).args(["delete", name])).context("running sc delete")?;
+    let _ = console.run(Command::new(&sc).args(["stop", name]), CREATE_NO_WINDOW);
+    const FAILED: &str = "Windows could not remove the service.";
+    let out = match console.run(Command::new(&sc).args(["delete", name]), CREATE_NO_WINDOW) {
+        Ok(out) => out,
+        Err(e) => {
+            console.log(&format!("sc delete {name} could not start: {e}"));
+            bail!(FAILED)
+        }
+    };
     match out.status.code() {
-        // 1060: does not exist. 1072: already marked for deletion.
-        Some(0) | Some(1060) | Some(1072) => Ok(()),
-        // sc writes to a pipe in the OEM code page, whatever the console uses.
-        Some(code) => bail!(
-            "sc delete failed with code {code}: {}",
-            code_page_text(&out.stdout, CP_OEMCP).trim()
-        ),
-        None => bail!("sc delete was terminated"),
+        // 1060: does not exist.
+        Some(1060) => Ok(ServiceRemoval::Removed),
+        // Windows deletes the service once it has stopped and nothing holds
+        // it open; until then it is only marked (1072: marked before).
+        Some(0) | Some(1072) => {
+            for check in 0..SERVICE_GONE_CHECKS {
+                if check > 0 {
+                    console.pause();
+                }
+                let query = console.run(Command::new(&sc).args(["query", name]), CREATE_NO_WINDOW);
+                if query.is_ok_and(|q| q.status.code() == Some(1060)) {
+                    return Ok(ServiceRemoval::Removed);
+                }
+            }
+            Ok(ServiceRemoval::AfterRestart)
+        }
+        Some(code) => {
+            // sc writes to a pipe in the OEM code page, whatever the console uses.
+            let said = one_line(&code_page_text(&out.stdout, CP_OEMCP));
+            console.log(&format!("sc delete {name} ended with code {code}: {said}"));
+            if code == 5 {
+                bail!("Removing the service needs administrator rights.")
+            }
+            bail!(FAILED)
+        }
+        None => {
+            console.log(&format!("sc delete {name} was terminated"));
+            bail!(FAILED)
+        }
+    }
+}
+
+/// `text` on one line, each run of white space as one space.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Run the console tool `cmd`, called `what` in the log. When it cannot
+/// start or ends with an error, the log gets what it wrote to stderr and
+/// the error is the plain sentence `failed`.
+fn run_tool(
+    console: &mut impl Console,
+    cmd: &mut Command,
+    what: &str,
+    failed: &'static str,
+) -> Result<()> {
+    use windows::Win32::Globalization::CP_OEMCP;
+    match console.run(cmd, CREATE_NO_WINDOW) {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let ended = match out.status.code() {
+                Some(code) => format!("ended with code {code}"),
+                None => "was terminated".to_string(),
+            };
+            // Without a window the tool gets a console of its own, which
+            // starts at the OEM code page whatever this process's console uses.
+            let said = one_line(&code_page_text(&out.stderr, CP_OEMCP));
+            console.log(&format!("{what} {ended}: {said}"));
+            bail!(failed)
+        }
+        Err(e) => {
+            console.log(&format!("{what} could not start: {e}"));
+            bail!(failed)
+        }
     }
 }
 
@@ -533,54 +640,35 @@ pub fn export_task(task: &TaskInfo, out: &Path) -> Result<()> {
 }
 
 pub fn delete_task(name: &str) -> Result<()> {
-    let out = Command::new(system32("schtasks.exe"))
-        .args(["/delete", "/tn", name, "/f"])
-        .output()
-        .context("running schtasks /delete")?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "schtasks /delete failed: {}",
-            schtasks_text(&out.stderr, console_page()).trim()
-        )
-    }
+    delete_task_with(name, &mut Machine)
+}
+
+/// `delete_task` on `console`.
+fn delete_task_with(name: &str, console: &mut impl Console) -> Result<()> {
+    run_tool(
+        console,
+        Command::new(system32("schtasks.exe")).args(["/delete", "/tn", name, "/f"]),
+        &format!("schtasks /delete {name}"),
+        "Windows could not remove the scheduled task.",
+    )
 }
 
 /// Re-create a task from an exported XML file.
 pub fn import_task(name: &str, xml: &Path) -> Result<()> {
-    let out = Command::new(system32("schtasks.exe"))
-        .args(["/create", "/tn", name, "/xml"])
-        .arg(xml)
-        .arg("/f")
-        .output()
-        .context("running schtasks /create")?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        bail!(
-            "schtasks /create failed: {}",
-            schtasks_text(&out.stderr, console_page()).trim()
-        )
-    }
+    import_task_with(name, xml, &mut Machine)
 }
 
-/// The output code page of this process's console, 0 without one.
-fn console_page() -> u32 {
-    // SAFETY: takes no arguments and only reads console state.
-    unsafe { windows::Win32::System::Console::GetConsoleOutputCP() }
-}
-
-/// What schtasks printed to a pipe while this process's console was at `console_page`.
-fn schtasks_text(bytes: &[u8], console_page: u32) -> String {
-    use windows::Win32::Globalization::CP_OEMCP;
-    // schtasks writes its console's code page; without ours it gets a new one at the OEM page.
-    let page = if console_page == 0 {
-        CP_OEMCP
-    } else {
-        console_page
-    };
-    code_page_text(bytes, page)
+/// `import_task` on `console`.
+fn import_task_with(name: &str, xml: &Path, console: &mut impl Console) -> Result<()> {
+    run_tool(
+        console,
+        Command::new(system32("schtasks.exe"))
+            .args(["/create", "/tn", name, "/xml"])
+            .arg(xml)
+            .arg("/f"),
+        &format!("schtasks /create {name}"),
+        "Windows could not put the scheduled task back.",
+    )
 }
 
 // PATH
@@ -1056,21 +1144,81 @@ mod tests {
         })
     }
 
+    /// A tool that exits with `code` and writes `stderr`, as schtasks does.
+    fn tool_failed(code: u32, stderr: &[u8]) -> io::Result<Output> {
+        use std::os::windows::process::ExitStatusExt;
+        Ok(Output {
+            status: std::process::ExitStatus::from_raw(code),
+            stdout: Vec::new(),
+            stderr: stderr.to_vec(),
+        })
+    }
+
+    /// A machine that answers each console tool from `results`, never
+    /// running one, and keeps each command line, program first, the flags
+    /// it started with and what went to the log.
+    struct Fake {
+        results: std::vec::IntoIter<io::Result<Output>>,
+        ran: Vec<Vec<String>>,
+        flags: Vec<u32>,
+        pauses: usize,
+        logged: Vec<String>,
+    }
+
+    impl Fake {
+        fn new(results: Vec<io::Result<Output>>) -> Self {
+            Fake {
+                results: results.into_iter(),
+                ran: Vec::new(),
+                flags: Vec::new(),
+                pauses: 0,
+                logged: Vec::new(),
+            }
+        }
+    }
+
+    impl Console for Fake {
+        fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output> {
+            let mut line = vec![cmd.get_program().to_string_lossy().into_owned()];
+            line.extend(cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
+            self.ran.push(line);
+            self.flags.push(flags);
+            self.results
+                .next()
+                .expect("a tool ran more often than expected")
+        }
+
+        fn pause(&mut self) {
+            self.pauses += 1;
+        }
+
+        fn log(&mut self, line: &str) {
+            self.logged.push(line.to_string());
+        }
+    }
+
     /// Remove `name` with sc answering from `results`, never running it.
     /// Returns the outcome and each command line, program first.
     fn remove_service(
         name: &str,
         results: Vec<io::Result<Output>>,
-    ) -> (Result<()>, Vec<Vec<String>>) {
-        let mut results = results.into_iter();
-        let mut ran = Vec::new();
-        let outcome = delete_service_with(name, |cmd| {
-            let mut line = vec![cmd.get_program().to_string_lossy().into_owned()];
-            line.extend(cmd.get_args().map(|a| a.to_string_lossy().into_owned()));
-            ran.push(line);
-            results.next().expect("sc ran more often than expected")
-        });
-        (outcome, ran)
+    ) -> (Result<ServiceRemoval>, Vec<Vec<String>>) {
+        let mut fake = Fake::new(results);
+        let outcome = delete_service_with(name, &mut fake);
+        (outcome, fake.ran)
+    }
+
+    /// What sc query prints for a service that is no longer there.
+    fn no_such_service() -> io::Result<Output> {
+        sc_exited(1060, b"[SC] EnumQueryServicesStatus:OpenService FAILED 1060:\r\n\r\nThe specified service does not exist as an installed service.\r\n\r\n")
+    }
+
+    /// What sc query prints for a service that still runs.
+    fn still_running() -> io::Result<Output> {
+        sc_exited(
+            0,
+            b"\r\nSERVICE_NAME: Svc\r\n        STATE              : 4  RUNNING\r\n",
+        )
     }
 
     fn sc_line(args: &[&str]) -> Vec<String> {
@@ -1088,15 +1236,59 @@ mod tests {
             vec![
                 sc_exited(0, stop_pending),
                 sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+                no_such_service(),
             ],
         );
-        outcome.unwrap();
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
         assert_eq!(
             ran,
-            [sc_line(&["stop", "Svc"]), sc_line(&["delete", "Svc"])]
+            [
+                sc_line(&["stop", "Svc"]),
+                sc_line(&["delete", "Svc"]),
+                sc_line(&["query", "Svc"])
+            ]
         );
         assert!(Path::new(&ran[0][0]).is_absolute(), "{}", ran[0][0]);
         assert!(ran[0][0].to_lowercase().ends_with(r"\system32\sc.exe"));
+    }
+
+    #[test]
+    fn a_stopping_service_counts_as_removed_once_it_is_gone() {
+        let mut fake = Fake::new(vec![
+            sc_exited(0, b""),
+            sc_exited(0, b""),
+            still_running(),
+            still_running(),
+            no_such_service(),
+        ]);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
+        assert_eq!(fake.ran.len(), 5);
+        assert_eq!(fake.pauses, 2);
+    }
+
+    #[test]
+    fn a_service_that_will_not_stop_goes_after_a_restart() {
+        let cannot_stop = b"[SC] ControlService FAILED 1052:\r\n\r\nThe requested control is not valid for this service.\r\n\r\n";
+        let mut results = vec![
+            sc_exited(1052, cannot_stop),
+            sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+        ];
+        results.extend((0..SERVICE_GONE_CHECKS).map(|_| still_running()));
+        let mut fake = Fake::new(results);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::AfterRestart);
+        assert_eq!(fake.ran.len(), 2 + SERVICE_GONE_CHECKS);
+        assert_eq!(fake.pauses, SERVICE_GONE_CHECKS - 1);
+    }
+
+    #[test]
+    fn a_service_already_marked_for_deletion_goes_after_a_restart() {
+        let marked = b"[SC] DeleteService FAILED 1072:\r\n\r\nThe specified service has been marked for deletion.\r\n\r\n";
+        let mut results = vec![sc_exited(0, b""), sc_exited(1072, marked)];
+        results.extend((0..SERVICE_GONE_CHECKS).map(|_| still_running()));
+        let (outcome, _) = remove_service("Going", results);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::AfterRestart);
     }
 
     #[test]
@@ -1108,10 +1300,11 @@ mod tests {
             vec![
                 sc_exited(1062, not_started),
                 sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+                no_such_service(),
             ],
         );
-        outcome.unwrap();
-        assert_eq!(ran.len(), 2);
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
+        assert_eq!(ran.len(), 3);
     }
 
     #[test]
@@ -1123,9 +1316,13 @@ mod tests {
         ] {
             let (outcome, ran) = remove_service(
                 "Svc",
-                vec![stop, sc_exited(0, b"[SC] DeleteService SUCCESS\r\n")],
+                vec![
+                    stop,
+                    sc_exited(0, b"[SC] DeleteService SUCCESS\r\n"),
+                    no_such_service(),
+                ],
             );
-            outcome.unwrap();
+            assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
             assert_eq!(ran[1], sc_line(&["delete", "Svc"]));
         }
     }
@@ -1138,53 +1335,160 @@ mod tests {
             r#"Ends with a quote""#,
             " padded ",
         ] {
-            let (outcome, ran) = remove_service(name, vec![sc_exited(0, b""), sc_exited(0, b"")]);
+            let (outcome, ran) = remove_service(
+                name,
+                vec![sc_exited(0, b""), sc_exited(0, b""), no_such_service()],
+            );
             outcome.unwrap();
             assert_eq!(
                 ran,
-                [sc_line(&["stop", name]), sc_line(&["delete", name])],
+                [
+                    sc_line(&["stop", name]),
+                    sc_line(&["delete", name]),
+                    sc_line(&["query", name])
+                ],
                 "{name}"
             );
         }
     }
 
     #[test]
-    fn a_missing_service_or_one_already_marked_counts_as_removed() {
+    fn a_missing_service_counts_as_removed() {
         let missing = b"[SC] OpenService FAILED 1060:\r\n\r\nThe specified service does not exist as an installed service.\r\n\r\n";
-        let marked = b"[SC] DeleteService FAILED 1072:\r\n\r\nThe specified service has been marked for deletion.\r\n\r\n";
-        remove_service(
+        let (outcome, ran) = remove_service(
             "Gone",
             vec![sc_exited(1060, missing), sc_exited(1060, missing)],
-        )
-        .0
-        .unwrap();
-        remove_service("Going", vec![sc_exited(0, b""), sc_exited(1072, marked)])
-            .0
-            .unwrap();
-    }
-
-    #[test]
-    fn access_denied_is_an_error_that_says_what_sc_printed() {
-        let denied = b"[SC] OpenService FAILED 5:\r\n\r\nAccess is denied.\r\n\r\n";
-        let (outcome, ran) =
-            remove_service("Svc", vec![sc_exited(5, denied), sc_exited(5, denied)]);
-        assert_eq!(
-            outcome.unwrap_err().to_string(),
-            "sc delete failed with code 5: [SC] OpenService FAILED 5:\r\n\r\nAccess is denied."
         );
+        assert_eq!(outcome.unwrap(), ServiceRemoval::Removed);
         assert_eq!(ran.len(), 2);
     }
 
     #[test]
-    fn sc_that_cannot_start_is_an_error() {
-        let (outcome, _) = remove_service(
-            "Svc",
-            vec![
-                Err(io::Error::from(io::ErrorKind::NotFound)),
-                Err(io::Error::from(io::ErrorKind::NotFound)),
-            ],
+    fn access_denied_is_one_plain_sentence_and_sc_output_goes_to_the_log() {
+        let denied = b"[SC] OpenService FAILED 5:\r\n\r\nAccess is denied.\r\n\r\n";
+        let mut fake = Fake::new(vec![sc_exited(5, denied), sc_exited(5, denied)]);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Removing the service needs administrator rights."
         );
-        assert_eq!(outcome.unwrap_err().to_string(), "running sc delete");
+        assert_eq!(fake.ran.len(), 2);
+        assert_eq!(
+            fake.logged,
+            ["sc delete Svc ended with code 5: [SC] OpenService FAILED 5: Access is denied."]
+        );
+    }
+
+    #[test]
+    fn any_other_sc_failure_is_one_plain_sentence() {
+        let invalid = b"[SC] DeleteService FAILED 87:\r\n\r\nThe parameter is incorrect.\r\n\r\n";
+        let mut fake = Fake::new(vec![sc_exited(0, b""), sc_exited(87, invalid)]);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Windows could not remove the service."
+        );
+        assert_eq!(
+            fake.logged,
+            ["sc delete Svc ended with code 87: [SC] DeleteService FAILED 87: The parameter is incorrect."]
+        );
+    }
+
+    #[test]
+    fn sc_that_cannot_start_is_one_plain_sentence() {
+        let mut fake = Fake::new(vec![
+            Err(io::Error::from(io::ErrorKind::NotFound)),
+            Err(io::Error::from(io::ErrorKind::NotFound)),
+        ]);
+        let outcome = delete_service_with("Svc", &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Windows could not remove the service."
+        );
+        assert_eq!(fake.logged.len(), 1);
+        assert!(
+            fake.logged[0].starts_with("sc delete Svc could not start: "),
+            "{:?}",
+            fake.logged
+        );
+    }
+
+    #[test]
+    fn a_task_that_cannot_be_removed_is_one_plain_sentence() {
+        let task = r"\Vendor\Updater";
+        let mut fake = Fake::new(vec![tool_failed(1, b"ERROR: Access is denied.\r\n")]);
+        let outcome = delete_task_with(task, &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Windows could not remove the scheduled task."
+        );
+        assert_eq!(
+            fake.logged,
+            [r"schtasks /delete \Vendor\Updater ended with code 1: ERROR: Access is denied."]
+        );
+        let mut fake = Fake::new(vec![Err(io::Error::from(io::ErrorKind::NotFound))]);
+        let outcome = delete_task_with(task, &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Windows could not remove the scheduled task."
+        );
+        assert!(
+            fake.logged[0].starts_with(r"schtasks /delete \Vendor\Updater could not start: "),
+            "{:?}",
+            fake.logged
+        );
+    }
+
+    #[test]
+    fn a_task_that_cannot_be_put_back_is_one_plain_sentence() {
+        let task = r"\Vendor\Updater";
+        let xml = Path::new(r"C:\b\t.xml");
+        let malformed =
+            b"ERROR: The task XML is malformed.\r\n(1,2)::ERROR: incorrect document syntax\r\n";
+        let mut fake = Fake::new(vec![tool_failed(1, malformed)]);
+        let outcome = import_task_with(task, xml, &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Windows could not put the scheduled task back."
+        );
+        assert_eq!(
+            fake.logged,
+            [
+                r"schtasks /create \Vendor\Updater ended with code 1: ERROR: The task XML is malformed. (1,2)::ERROR: incorrect document syntax"
+            ]
+        );
+        let mut fake = Fake::new(vec![Err(io::Error::from(io::ErrorKind::NotFound))]);
+        let outcome = import_task_with(task, xml, &mut fake);
+        assert_eq!(
+            format!("{:#}", outcome.unwrap_err()),
+            "Windows could not put the scheduled task back."
+        );
+        assert!(
+            fake.logged[0].starts_with(r"schtasks /create \Vendor\Updater could not start: "),
+            "{:?}",
+            fake.logged
+        );
+    }
+
+    #[test]
+    fn every_console_tool_starts_without_a_window() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut service = Fake::new(vec![
+            sc_exited(0, b""),
+            sc_exited(0, b""),
+            no_such_service(),
+        ]);
+        delete_service_with("Svc", &mut service).unwrap();
+        let mut task = Fake::new(vec![sc_exited(0, b"")]);
+        delete_task_with(r"\Vendor\Updater", &mut task).unwrap();
+        let mut import = Fake::new(vec![sc_exited(0, b"")]);
+        import_task_with(r"\Vendor\Updater", Path::new(r"C:\b\t.xml"), &mut import).unwrap();
+        for fake in [service, task, import] {
+            assert_eq!(fake.ran.len(), fake.flags.len());
+            for (line, flags) in fake.ran.iter().zip(&fake.flags) {
+                assert_eq!(*flags, CREATE_NO_WINDOW, "{line:?}");
+            }
+        }
     }
 
     #[test]
@@ -1201,19 +1505,19 @@ mod tests {
     }
 
     #[test]
-    fn a_failure_reads_what_sc_printed_in_the_oem_code_page() {
+    fn the_log_reads_what_sc_printed_in_the_oem_code_page() {
         let denied = b"[SC] OpenService FAILED 5:\r\n\r\nAcc\x8as refus\x82.\r\n\r\n";
-        let (outcome, _) = remove_service("Svc", vec![sc_exited(5, denied), sc_exited(5, denied)]);
+        let mut fake = Fake::new(vec![sc_exited(5, denied), sc_exited(5, denied)]);
+        delete_service_with("Svc", &mut fake).unwrap_err();
         let oem = unsafe { windows::Win32::Globalization::GetOEMCP() };
-        let message = outcome.unwrap_err().to_string();
         assert_eq!(
-            message,
-            format!(
-                "sc delete failed with code 5: [SC] OpenService FAILED 5:\r\n\r\n{}",
+            fake.logged,
+            [format!(
+                "sc delete Svc ended with code 5: [SC] OpenService FAILED 5: {}",
                 code_page_text(b"Acc\x8as refus\x82.", oem)
-            )
+            )]
         );
-        assert!(!message.contains(char::REPLACEMENT_CHARACTER), "{message}");
+        assert!(!fake.logged[0].contains(char::REPLACEMENT_CHARACTER));
     }
 
     #[test]
@@ -1231,14 +1535,18 @@ mod tests {
     }
 
     #[test]
-    fn schtasks_errors_are_read_in_the_console_code_page() {
-        assert_eq!(schtasks_text(b"Acc\x8as refus\x82.", 850), "Accès refusé.");
-        assert_eq!(schtasks_text(b"Acc\xe8s refus\xe9.", 1252), "Accès refusé.");
-        // Without a console schtasks gets a new one, which starts at the OEM code page.
+    fn the_log_reads_what_schtasks_printed_in_the_oem_code_page() {
+        let mut fake = Fake::new(vec![tool_failed(1, b"ERREUR: Acc\x8as refus\x82.\r\n")]);
+        delete_task_with(r"\Vendor\Updater", &mut fake).unwrap_err();
         let oem = unsafe { windows::Win32::Globalization::GetOEMCP() };
-        let text = schtasks_text(b"Acc\x8as refus\x82.", 0);
-        assert_eq!(text, code_page_text(b"Acc\x8as refus\x82.", oem));
-        assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
+        assert_eq!(
+            fake.logged,
+            [format!(
+                r"schtasks /delete \Vendor\Updater ended with code 1: {}",
+                code_page_text(b"ERREUR: Acc\x8as refus\x82.", oem)
+            )]
+        );
+        assert!(!fake.logged[0].contains(char::REPLACEMENT_CHARACTER));
     }
 
     #[test]
