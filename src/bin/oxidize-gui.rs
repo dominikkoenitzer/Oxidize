@@ -629,13 +629,15 @@ impl OxidizeApp {
                     return false;
                 }
                 // The result on screen no longer holds, if it was this
-                // backup's. Undoing a cleaning leaves a removal's own undo.
-                if self
-                    .complete
-                    .as_ref()
-                    .and_then(|c| c.outcome.removal.as_ref())
-                    .and_then(|r| r.backup_name.as_deref())
-                    == Some(name)
+                // backup's. Undoing a cleaning leaves a removal's own undo,
+                // and what failed stays in the backup for Undo to try again.
+                if failed == 0
+                    && self
+                        .complete
+                        .as_ref()
+                        .and_then(|c| c.outcome.removal.as_ref())
+                        .and_then(|r| r.backup_name.as_deref())
+                        == Some(name)
                 {
                     self.complete = None;
                 }
@@ -3778,7 +3780,7 @@ mod tests {
     }
 
     #[test]
-    fn undo_logs_each_item_and_clears_the_result() {
+    fn undo_logs_each_item_and_clears_the_result_once_all_is_back() {
         let program = example_program();
         let mut app = app();
         app.selected = Some(program.id().to_string());
@@ -3795,7 +3797,8 @@ mod tests {
             },
         ];
         assert!(app.on_restored("example-player-1", Ok(items), false));
-        assert!(app.complete.is_none());
+        // What failed waits in the backup, so Undo is offered again.
+        assert_eq!(app.undo_backup(), Some("example-player-1"));
         assert_eq!(
             app.status,
             "Restored 1 items from example-player-1, 1 failed"
@@ -3804,6 +3807,13 @@ mod tests {
             .log
             .iter()
             .any(|l| l == r"failed HKCU\Software\Example Studio: access denied"));
+
+        let rest = vec![RestoreItem {
+            path: "Example Studio".to_string(),
+            result: Ok(()),
+        }];
+        assert!(app.on_restored("example-player-1", Ok(rest), false));
+        assert!(app.complete.is_none());
 
         // A backup that cannot be found changes nothing and keeps the result.
         app.on_completed(example_program(), finished(Some("example-player-1")), false);
