@@ -1088,9 +1088,17 @@ fn run_tool(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
     }
     match f.category {
         Category::DeliveryOptimization => {
-            let left = opts.tools.delivery_cache().map(|(_, b)| b).unwrap_or(0);
-            c.freed = f.bytes.saturating_sub(left);
-            c.removed = f.count;
+            let (count, bytes) = opts.tools.delivery_cache().unwrap_or((0, 0));
+            let left = count.min(f.count);
+            c.freed = f.bytes.saturating_sub(bytes);
+            c.removed = f.count - left;
+            if left > 0 {
+                c.keep(
+                    KeptReason::Failed("still there afterwards".to_string()),
+                    left,
+                    bytes.min(f.bytes),
+                );
+            }
         }
         _ => {
             if let (Some(b), Some(a)) = (before, free()) {
