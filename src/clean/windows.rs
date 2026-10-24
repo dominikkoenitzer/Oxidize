@@ -141,12 +141,12 @@ fn run(exe: String, args: &[&str]) -> Result<String> {
         .stdin(std::process::Stdio::null())
         .output()
         .with_context(|| format!("starting {exe}"))?;
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let text = tool_text(&out.stdout);
     // 3010: done, a restart finishes it.
     match out.status.code() {
         Some(0) | Some(3010) => Ok(text),
         code => {
-            let err = String::from_utf8_lossy(&out.stderr);
+            let err = tool_text(&out.stderr);
             let detail = last_line(&err)
                 .or_else(|| last_line(&text))
                 .unwrap_or_default();
@@ -160,6 +160,12 @@ fn run(exe: String, args: &[&str]) -> Result<String> {
             }
         }
     }
+}
+
+/// What a tool started by `run` printed to a pipe.
+fn tool_text(bytes: &[u8]) -> String {
+    // DISM writes the OEM code page; PowerShell writes its new console's page, which starts there.
+    system::code_page_text(bytes, windows::Win32::Globalization::CP_OEMCP)
 }
 
 fn last_line(text: &str) -> Option<String> {
@@ -287,6 +293,18 @@ The operation completed successfully.
         );
         assert_eq!(parse_delivery_status("0 0"), Some((0, 0)));
         assert_eq!(parse_delivery_status("error"), None);
+    }
+
+    #[test]
+    fn tool_output_is_read_in_the_oem_code_page() {
+        let oem = unsafe { windows::Win32::Globalization::GetOEMCP() };
+        let text = tool_text(b"Error: 5\r\n\r\nAcc\x8as refus\x82.\r\n");
+        assert_eq!(
+            text,
+            system::code_page_text(b"Error: 5\r\n\r\nAcc\x8as refus\x82.\r\n", oem)
+        );
+        assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
+        assert_eq!(tool_text(b"14 2254147166\r\n"), "14 2254147166\r\n");
     }
 
     #[test]
