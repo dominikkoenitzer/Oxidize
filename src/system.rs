@@ -385,6 +385,10 @@ pub fn services() -> Vec<ServiceInfo> {
     out
 }
 
+/// Console tools start without a console window. The window app is a GUI
+/// program, so each run would otherwise flash one.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// What removing services and tasks needs from the machine: console tools
 /// to run. Tests stand in for it.
 trait Console {
@@ -412,9 +416,9 @@ fn delete_service_with(name: &str, console: &mut impl Console) -> Result<()> {
     use windows::Win32::Globalization::CP_OEMCP;
     let sc = system32("sc.exe");
     // Stopping may fail because it is already stopped; that is fine.
-    let _ = console.run(Command::new(&sc).args(["stop", name]), 0);
+    let _ = console.run(Command::new(&sc).args(["stop", name]), CREATE_NO_WINDOW);
     let out = console
-        .run(Command::new(&sc).args(["delete", name]), 0)
+        .run(Command::new(&sc).args(["delete", name]), CREATE_NO_WINDOW)
         .context("running sc delete")?;
     match out.status.code() {
         // 1060: does not exist. 1072: already marked for deletion.
@@ -557,7 +561,7 @@ fn delete_task_with(name: &str, console: &mut impl Console) -> Result<()> {
     let out = console
         .run(
             Command::new(system32("schtasks.exe")).args(["/delete", "/tn", name, "/f"]),
-            0,
+            CREATE_NO_WINDOW,
         )
         .context("running schtasks /delete")?;
     if out.status.success() {
@@ -583,7 +587,7 @@ fn import_task_with(name: &str, xml: &Path, console: &mut impl Console) -> Resul
                 .args(["/create", "/tn", name, "/xml"])
                 .arg(xml)
                 .arg("/f"),
-            0,
+            CREATE_NO_WINDOW,
         )
         .context("running schtasks /create")?;
     if out.status.success() {
@@ -1241,6 +1245,19 @@ mod tests {
             ],
         );
         assert_eq!(outcome.unwrap_err().to_string(), "running sc delete");
+    }
+
+    #[test]
+    fn every_console_tool_starts_without_a_window() {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut fake = Fake::new((0..4).map(|_| sc_exited(0, b"")).collect());
+        delete_service_with("Svc", &mut fake).unwrap();
+        delete_task_with(r"\Vendor\Updater", &mut fake).unwrap();
+        import_task_with(r"\Vendor\Updater", Path::new(r"C:\b\t.xml"), &mut fake).unwrap();
+        assert_eq!(fake.ran.len(), fake.flags.len());
+        for (line, flags) in fake.ran.iter().zip(&fake.flags) {
+            assert_eq!(*flags, CREATE_NO_WINDOW, "{line:?}");
+        }
     }
 
     #[test]
