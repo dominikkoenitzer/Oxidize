@@ -20,7 +20,7 @@ use oxidize::complete::{self, CloseHow, Outcome, VendorStep};
 use oxidize::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport};
 use oxidize::restore::RestoreItem;
 use oxidize::safety::{self, DeletionOutcome, ItemStatus, SafetyContext};
-use oxidize::{backup, clean, registry, restore, scanner, uninstall, util};
+use oxidize::{backup, clean, registry, restore, scanner, system, uninstall, util};
 
 // The tab lives beside this file, not in src/bin, where Cargo would take it
 // for a program of its own.
@@ -553,8 +553,10 @@ impl OxidizeApp {
     /// Take in a finished complete removal. True when the program list
     /// should be read again because something changed.
     fn on_completed(&mut self, program: Program, outcome: Outcome, dry_run: bool) -> bool {
-        self.log
-            .extend(complete_log(&program.display_name, &outcome, dry_run));
+        self.log.extend(with_tool_lines(
+            complete_log(&program.display_name, &outcome, dry_run),
+            system::take_tool_log(),
+        ));
         self.status = complete_status(&program.display_name, &outcome, dry_run);
         self.job_done();
         if !dry_run {
@@ -591,6 +593,7 @@ impl OxidizeApp {
                         }
                     }
                 }
+                self.log.extend(system::take_tool_log());
                 let mut line = format!("Restored {restored} items from {name}");
                 if failed > 0 {
                     line.push_str(&format!(", {failed} failed"));
@@ -613,6 +616,7 @@ impl OxidizeApp {
                 true
             }
             Err(e) => {
+                self.log.extend(system::take_tool_log());
                 self.log.push(format!("ERROR: Undo failed: {e}"));
                 self.status = format!("Undo failed: {e}");
                 false
@@ -723,7 +727,8 @@ impl OxidizeApp {
                 Msg::Removed(outcome) => {
                     // As the removal ran, not as the setting reads now.
                     let dry_run = outcome.dry_run;
-                    let lines = removal_log(&outcome, dry_run);
+                    let lines =
+                        with_tool_lines(removal_log(&outcome, dry_run), system::take_tool_log());
                     let line = lines.last().cloned().unwrap_or_default();
                     self.log.extend(lines);
                     if let Some(name) = &outcome.backup_name {
@@ -785,6 +790,7 @@ impl OxidizeApp {
                 Msg::Error(e) => {
                     // A cleaning that stopped is no longer under way.
                     self.cleanup.cleaning = false;
+                    self.log.extend(system::take_tool_log());
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
                     self.job_done();
@@ -984,6 +990,14 @@ fn running_processes(n: usize) -> String {
     } else {
         format!("{n} running processes")
     }
+}
+
+/// `lines` with what console tools `said` put in before the last line, the
+/// summary.
+fn with_tool_lines(mut lines: Vec<String>, said: Vec<String>) -> Vec<String> {
+    let at = lines.len().saturating_sub(1);
+    lines.splice(at..at, said);
+    lines
 }
 
 /// The log lines for one removal: each item, then a summary line last.
@@ -3710,6 +3724,27 @@ mod tests {
             None,
             "only for the program it belongs to"
         );
+    }
+
+    #[test]
+    fn what_the_tools_said_comes_before_the_summary() {
+        let said =
+            vec![r"sc delete Svc ended with code 87: [SC] DeleteService FAILED 87".to_string()];
+        assert_eq!(
+            with_tool_lines(
+                vec![
+                    "failed Svc: Windows could not remove the service.".to_string(),
+                    "Removed 0 of 1".to_string()
+                ],
+                said.clone()
+            ),
+            [
+                "failed Svc: Windows could not remove the service.",
+                r"sc delete Svc ended with code 87: [SC] DeleteService FAILED 87",
+                "Removed 0 of 1",
+            ]
+        );
+        assert_eq!(with_tool_lines(Vec::new(), said.clone()), said);
     }
 
     #[test]
