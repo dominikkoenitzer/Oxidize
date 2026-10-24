@@ -1239,7 +1239,7 @@ impl complete::Pc for CliPc<'_> {
         system::close_processes(procs, complete::CLOSE_GRACE)
     }
 
-    fn run_uninstaller(&self, plan: &uninstall::UninstallPlan) -> Result<String> {
+    fn run_uninstaller(&self, plan: &uninstall::UninstallPlan) -> Result<uninstall::Ran> {
         use std::process::Stdio;
         // Someone clicking through it gets all the time they need; one that
         // runs on its own is not waited for longer than the flow allows.
@@ -1252,14 +1252,13 @@ impl complete::Pc for CliPc<'_> {
         } else {
             uninstall::run_for(plan, Stdio::inherit(), Stdio::inherit(), self.wait)?
         };
-        let described = match status {
-            Some(status) => uninstall::describe_exit(status, plan.is_msi),
-            None => format!("was still running after {} s", self.wait.as_secs()),
-        };
+        let ran = uninstall::Ran::of(status, plan.is_msi, || {
+            format!("was still running after {} s", self.wait.as_secs())
+        });
         if !self.g.json {
-            println!("Uninstaller {described}.");
+            println!("Uninstaller {}.", ran.said);
         }
-        Ok(described)
+        Ok(ran)
     }
 
     fn wait_until_gone(&self, program: &Program, plan: &uninstall::UninstallPlan) -> bool {
@@ -1385,26 +1384,29 @@ fn run_uninstall_keep(
         json_out["still_installed"] = json!(false);
     } else {
         // With --json our output is the result; the uninstaller gets none.
-        let described = if g.json {
+        let ran = if g.json {
             let null = std::process::Stdio::null;
-            match uninstall::run_for(plan, null(), null(), complete::VENDOR_WAIT)? {
-                Some(status) => uninstall::describe_exit(status, plan.is_msi),
-                None => format!(
+            let status = uninstall::run_for(plan, null(), null(), complete::VENDOR_WAIT)?;
+            uninstall::Ran::of(status, plan.is_msi, || {
+                format!(
                     "was still running after {} s",
                     complete::VENDOR_WAIT.as_secs()
-                ),
-            }
+                )
+            })
         } else {
-            uninstall::describe_exit(uninstall::run(plan)?, plan.is_msi)
+            uninstall::Ran {
+                said: uninstall::describe_exit(uninstall::run(plan)?, plan.is_msi),
+                ended: true,
+            }
         };
         if !g.json {
-            println!("Uninstaller {described}.");
+            println!("Uninstaller {}.", ran.said);
         }
         if uninstall::still_installed(program) && !plan.is_msi && !g.json {
             println!("{}", term::dim("waiting for the uninstaller to finish"));
         }
-        gone = uninstall::wait_for_completion(program, plan, Duration::from_secs(120));
-        json_out["uninstaller"] = json!(described);
+        gone = ran.gone(|| uninstall::wait_for_completion(program, plan, Duration::from_secs(120)));
+        json_out["uninstaller"] = json!(ran.said);
         json_out["still_installed"] = json!(!gone);
         if !g.json {
             if gone {
