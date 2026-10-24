@@ -118,7 +118,7 @@ Store apps: `oxidize list --store --json` lists them with `"kind": "store"`. An 
 4. Report `cleaned`: per category `freed`, `removed` and `kept`. Folders of removed programs go into a backup; give the user `backup` and `oxidize restore "<backup>"`. Everything else that was cleaned does not come back.
 5. The component store and the Delivery Optimization cache need administrator rights, and so do Windows' own temp folder and dumps. Use `--elevate` with `--yes --json` as described above. A DISM cleanup can take several minutes.
 
-Folders and files listed in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line, are never cleaned. Add a folder there when the user wants one kept.
+Folders and files listed in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line, are never cleaned. Add a folder there when the user wants one kept. To know whether a folder is kept, run `oxidize protect --check "<path>" --json` and read `protected` and `by`; never decide it by searching the file's text.
 
 ### Undo a removal
 

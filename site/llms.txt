@@ -9,7 +9,7 @@ oxidize uninstall <program> --yes removes a program completely in one command an
 Leftovers it looks for: registry keys and values, folders under Program Files, ProgramData, AppData, the Start Menu, Startup and the Desktop, services, scheduled tasks, firewall rules, PATH entries, link and file types, shortcuts and temp folders.
 Every removal is backed up to %LOCALAPPDATA%\Oxidize\backups first unless --no-backup is given, and oxidize restore puts it back.
 Windows' own folders are never removed.
-oxidize clean shows what temporary files, crash dumps, browser caches, the Recycle Bin, Windows' component store and folders of removed programs hold, counted from the files, and what stays and why; --yes cleans the safe set or the categories named. Browser caches never include cookies, history, sessions or logins, and folders listed in %LOCALAPPDATA%\Oxidize\protected.txt are never cleaned.
+oxidize clean shows what temporary files, crash dumps, browser caches, the Recycle Bin, Windows' component store and folders of removed programs hold, counted from the files, and what stays and why; --yes cleans the safe set or the categories named. Browser caches never include cookies, history, sessions or logins, and folders listed in %LOCALAPPDATA%\Oxidize\protected.txt are never cleaned. oxidize protect --check <path> says whether a path is on that list or inside a folder that is.
 
 ## Download
 

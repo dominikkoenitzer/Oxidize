@@ -36,6 +36,7 @@ oxidize backups                  what earlier removals backed up
 oxidize restore <backup>         put a backup back
 oxidize clean                    temp files, crash dumps, caches, folders of removed programs
 oxidize clean --traces           recent items, jump lists, histories: a clean slate
+oxidize protect --check <path>   is this path kept out of every clean
 oxidize mcp                      let an AI assistant use Oxidize
 ```
 
@@ -108,6 +109,9 @@ temporary files, dumps, caches and Recycle Bin items do not come back.
 Folders you list in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line,
 are never cleaned, with everything in them, temp folders included. `%TEMP%`
 and other variables work in the list, and the Clean up tab edits it.
+`oxidize protect` prints the list, and `oxidize protect --check <path>` says
+whether that path is on it or inside a folder that is, and which entry
+covers it.
 
 Oxidize never cleans the registry, prefetch files, `WinSxS` or
 `C:\Windows\Installer` directly, cookies, passwords or history, and it does
@@ -337,11 +341,20 @@ has a `kind`, `program` or `store`.
 `unreadable`, `needs_admin`, `running`, `failed`), the `reason` in words, a
 `count` and `bytes`. With `--yes` it prints `cleaned`, one entry per category
 with `freed`, `removed`, `kept`, `backup` and `notes`, and the total `freed`;
-a category that did not clean fully exits with 4. `oxidize clean --traces
---json` prints `traces`, one entry per trace with `trace`, `count`, `bytes`,
+a category that did not clean fully exits with 4. Both carry a `summary` to
+compare runs by: `bytes`, `count` and `protected` (the `count` and `bytes`
+the protected list kept), in total and per category id under `categories`.
+Before a cleaning it counts what each category holds, after it what went.
+`oxidize clean --traces --json` prints `traces`, one entry per trace with `trace`, `count`, `bytes`,
 `count_known`, `kept` and `notes`, and the totals `count` and `bytes`; with
 `--yes` the entries are in `cleared`. A jump list kept for its pinned items
 has the code `pinned`.
+
+`oxidize protect --check <path> --json` prints `path` as given, `resolved`
+(the full path as compared: variables expanded, its real name, lower case),
+`protected`, `by` (the entry as written that covers it, or `null`) and
+`holds`, the entries inside it, which keep it from being removed as a whole.
+Without `--check` it prints the list's `file` and its `entries`.
 
 ### What gets checked
 
