@@ -553,12 +553,7 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
         egui::Sense::click(),
     );
     response.widget_info(|| {
-        egui::WidgetInfo::selected(
-            egui::WidgetType::SelectableLabel,
-            true,
-            focused,
-            f.category.title(),
-        )
+        egui::WidgetInfo::selected(egui::Role::Button, true, focused, f.category.title())
     });
     if response.clicked() {
         state.focus = Some(f.category);
