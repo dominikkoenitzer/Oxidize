@@ -91,6 +91,30 @@ impl Protected {
         self.keys.iter().any(|k| key == k || under(key, k))
     }
 
+    /// The entry, as written, that covers `path`: the path itself or the
+    /// nearest protected folder it is in. None when nothing listed covers it.
+    pub fn covered_by(&self, path: &Path) -> Option<&str> {
+        let p = key_of(path);
+        self.keys
+            .iter()
+            .zip(&self.entries)
+            .filter(|(k, _)| p == **k || under(&p, k))
+            .max_by_key(|(k, _)| k.len())
+            .map(|(_, e)| e.as_str())
+    }
+
+    /// The entries, as written, that lie inside `path`. The rest of such a
+    /// folder is cleaned, but it is never removed as a whole.
+    pub fn inside(&self, path: &Path) -> Vec<&str> {
+        let p = key_of(path);
+        self.keys
+            .iter()
+            .zip(&self.entries)
+            .filter(|(k, _)| under(k, &p))
+            .map(|(_, e)| e.as_str())
+            .collect()
+    }
+
     /// Does `path` hold something protected, itself included? Such a folder
     /// is never removed as a whole.
     pub fn touches(&self, path: &Path) -> bool {
@@ -230,6 +254,39 @@ mod tests {
         // The folder above holds it, so it is never removed whole.
         assert!(p.touches(Path::new(r"C:\Work")));
         assert!(!p.touches(Path::new(r"C:\Other")));
+    }
+
+    #[test]
+    fn a_check_names_the_entry_that_covers_a_path_and_no_look_alike() {
+        // A folder is not protected because others that start like it are.
+        let p = Protected::new([
+            r"C:\T\wt-tools".to_string(),
+            r"C:\T\wt.old".to_string(),
+            r"C:\T\pw".to_string(),
+            r"C:\T\pw\cache".to_string(),
+        ]);
+        assert_eq!(p.covered_by(Path::new(r"C:\T\wt")), None);
+        assert_eq!(p.covered_by(Path::new(r"C:\T\wt\repo\node_modules")), None);
+        assert_eq!(p.covered_by(Path::new(r"C:\T\pwx")), None);
+        assert_eq!(
+            p.covered_by(Path::new(r"c:/t/WT-tools/a")),
+            Some(r"C:\T\wt-tools")
+        );
+        // The nearest folder answers, not the first one listed.
+        assert_eq!(
+            p.covered_by(Path::new(r"C:\T\pw\cache\x")),
+            Some(r"C:\T\pw\cache")
+        );
+        assert_eq!(
+            p.covered_by(Path::new(r"C:\T\pw\launch.mjs")),
+            Some(r"C:\T\pw")
+        );
+        assert_eq!(p.inside(Path::new(r"C:\T")).len(), 4);
+        assert_eq!(p.inside(Path::new(r"C:\T\pw")), [r"C:\T\pw\cache"]);
+        assert!(p.inside(Path::new(r"C:\T\wt")).is_empty());
+        assert!(Protected::default()
+            .covered_by(Path::new(r"C:\T"))
+            .is_none());
     }
 
     #[test]
