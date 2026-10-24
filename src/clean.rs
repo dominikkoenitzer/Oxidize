@@ -18,6 +18,7 @@ pub mod temp_root;
 pub mod traces;
 pub mod windows;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -397,6 +398,73 @@ impl Analysis {
             })
             .sum()
     }
+
+    /// What each category holds, as totals to compare between runs.
+    pub fn summary(&self) -> Summary {
+        summarise(
+            self.findings
+                .iter()
+                .map(|f| (f.category, f.bytes, f.count, f.kept.as_slice())),
+        )
+    }
+}
+
+/// What a cleaning freed, as totals to compare between runs.
+pub fn cleaned_summary(done: &[Cleaned]) -> Summary {
+    summarise(
+        done.iter()
+            .map(|c| (c.category, c.freed, c.removed, c.kept.as_slice())),
+    )
+}
+
+/// Totals a script can compare between runs: bytes and count, before a
+/// cleaning what would go and after it what went, and what the protected
+/// list kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Summary {
+    pub bytes: u64,
+    pub count: usize,
+    pub protected: Tally,
+    /// The same per category, by its id.
+    pub categories: BTreeMap<&'static str, CategorySummary>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct CategorySummary {
+    pub bytes: u64,
+    pub count: usize,
+    pub protected: Tally,
+}
+
+/// A count of items and their bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Tally {
+    pub count: usize,
+    pub bytes: u64,
+}
+
+fn summarise<'a>(rows: impl Iterator<Item = (Category, u64, usize, &'a [Kept])>) -> Summary {
+    let mut sum = Summary::default();
+    for (category, bytes, count, kept) in rows {
+        let mut protected = Tally::default();
+        for k in kept.iter().filter(|k| k.reason == KeptReason::Protected) {
+            protected.count += k.count;
+            protected.bytes += k.bytes;
+        }
+        sum.bytes += bytes;
+        sum.count += count;
+        sum.protected.count += protected.count;
+        sum.protected.bytes += protected.bytes;
+        sum.categories.insert(
+            category.id(),
+            CategorySummary {
+                bytes,
+                count,
+                protected,
+            },
+        );
+    }
+    sum
 }
 
 /// What the user chose to clean.
