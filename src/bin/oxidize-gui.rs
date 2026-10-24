@@ -4537,4 +4537,13 @@ mod tests {
         assert_eq!(count(0, "program", "programs"), "0 programs");
         assert_eq!(count(20, "program", "programs"), "20 programs");
     }
+
+    #[test]
+    fn copy_and_paste_reach_the_windows_clipboard() {
+        // Without eframe's clipboard feature, Ctrl+C and Ctrl+V stay inside the window.
+        let manifest = include_str!("../../Cargo.toml");
+        let eframe = &manifest[manifest.find("\neframe = ").unwrap()..];
+        let features = &eframe[..eframe.find("] }").unwrap()];
+        assert!(features.contains("\"clipboard\""), "{features}");
+    }
 }
