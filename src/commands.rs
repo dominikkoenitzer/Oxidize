@@ -2721,6 +2721,12 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
 fn item_line(item: &ItemOutcome) -> String {
     match &item.status {
         ItemStatus::Removed => format!("  {}  {}", term::green("removed"), item.path),
+        ItemStatus::RemovedAfterRestart => format!(
+            "  {}  {}  {}",
+            term::green("removed"),
+            item.path,
+            term::dim("after a restart")
+        ),
         ItemStatus::AlreadyGone => format!("  {}  {}", term::dim("gone   "), item.path),
         ItemStatus::Failed(e) => format!(
             "  {}  {}  {}",
@@ -2793,6 +2799,7 @@ pub(crate) fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Val
                 "path": i.path,
                 "status": match &i.status {
                     ItemStatus::Removed => "removed",
+                    ItemStatus::RemovedAfterRestart => "removed_after_restart",
                     ItemStatus::AlreadyGone => "gone",
                     ItemStatus::Failed(_) => "failed",
                     ItemStatus::WouldRemove => "would_remove",
@@ -4134,6 +4141,26 @@ mod tests {
         assert_eq!(json["attempted"], selected.len());
         assert_eq!(json["already_gone"], 0);
         assert_eq!(json["removed"], 0);
+    }
+
+    #[test]
+    fn a_service_removed_after_a_restart_says_so() {
+        let item = ItemOutcome {
+            path: "Vendor Update Service".to_string(),
+            kind: LeftoverKind::Service,
+            status: ItemStatus::RemovedAfterRestart,
+        };
+        assert!(item_line(&item).contains("Vendor Update Service"));
+        assert!(item_line(&item).contains("after a restart"));
+        let outcome = DeletionOutcome {
+            attempted: 1,
+            deleted: 1,
+            items: vec![item],
+            ..Default::default()
+        };
+        let json = removal_json(&Some(outcome));
+        assert_eq!(json["items"][0]["status"], "removed_after_restart");
+        assert_eq!(json["removed"], 1);
     }
 
     #[test]
