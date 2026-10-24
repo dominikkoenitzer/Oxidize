@@ -89,6 +89,7 @@ enum Msg {
     Restored {
         backup: String,
         result: Result<Vec<RestoreItem>, String>,
+        dry_run: bool,
     },
     /// An extracted program icon (raw RGBA), keyed by the program's id.
     Icon {
@@ -204,6 +205,16 @@ struct OxidizeApp {
     // Channel to receive worker results.
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
+
+    /// What Undo runs on its worker thread; a test puts a stand-in here.
+    restore_backup: fn(&str, bool) -> Result<Vec<RestoreItem>, String>,
+}
+
+/// Finds the backup by name and puts it back, or only checks it in a dry run.
+fn restore_backup(name: &str, dry_run: bool) -> Result<Vec<RestoreItem>, String> {
+    backup::find_backup(name)
+        .and_then(|info| restore::restore(&info, dry_run))
+        .map_err(|e| format!("{e:#}"))
 }
 
 impl OxidizeApp {
@@ -241,6 +252,7 @@ impl OxidizeApp {
             confirm: None,
             tx,
             rx,
+            restore_backup,
         }
     }
 
@@ -444,13 +456,13 @@ impl OxidizeApp {
         let line = format!("Restoring {name}...");
         self.log.push(line.clone());
         self.status = line;
+        let (restore_backup, dry_run) = (self.restore_backup, self.dry_run);
         self.spawn(ctx, move || {
-            let result = backup::find_backup(&name)
-                .and_then(|info| restore::restore(&info, false))
-                .map_err(|e| format!("{e:#}"));
+            let result = restore_backup(&name, dry_run);
             Msg::Restored {
                 backup: name,
                 result,
+                dry_run,
             }
         });
     }
@@ -575,7 +587,12 @@ impl OxidizeApp {
 
     /// Take in a finished undo. True when the program list should be read
     /// again.
-    fn on_restored(&mut self, name: &str, result: Result<Vec<RestoreItem>, String>) -> bool {
+    fn on_restored(
+        &mut self,
+        name: &str,
+        result: Result<Vec<RestoreItem>, String>,
+        dry_run: bool,
+    ) -> bool {
         self.job_done();
         match result {
             Ok(items) => {
@@ -585,7 +602,8 @@ impl OxidizeApp {
                     match &item.result {
                         Ok(()) => {
                             restored += 1;
-                            self.log.push(format!("restored {}", item.path));
+                            let done = if dry_run { "would restore" } else { "restored" };
+                            self.log.push(format!("{done} {}", item.path));
                         }
                         Err(e) => {
                             failed += 1;
@@ -594,14 +612,22 @@ impl OxidizeApp {
                     }
                 }
                 self.log.extend(system::take_tool_log());
-                let mut line = format!("Restored {restored} items from {name}");
+                let mut line = if dry_run {
+                    format!("dry run: {restored} items from {name} would be restored")
+                } else {
+                    format!("Restored {restored} items from {name}")
+                };
                 if failed > 0 {
                     line.push_str(&format!(", {failed} failed"));
-                } else {
+                } else if !dry_run {
                     self.cleanup.restored(name);
                 }
                 self.log.push(line.clone());
                 self.status = line;
+                // A dry run changed nothing, so the result on screen and the list still hold.
+                if dry_run {
+                    return false;
+                }
                 // The result on screen no longer holds, if it was this
                 // backup's. Undoing a cleaning leaves a removal's own undo.
                 if self
@@ -763,8 +789,12 @@ impl OxidizeApp {
                         self.reload_programs(ctx);
                     }
                 }
-                Msg::Restored { backup, result } => {
-                    if self.on_restored(&backup, result) {
+                Msg::Restored {
+                    backup,
+                    result,
+                    dry_run,
+                } => {
+                    if self.on_restored(&backup, result, dry_run) {
                         self.reload_programs(ctx);
                     }
                 }
@@ -3561,10 +3591,10 @@ mod tests {
             path: "a folder".to_string(),
             result: Ok(()),
         }]);
-        app.on_restored("Oxidize clean", restored.clone());
+        app.on_restored("Oxidize clean", restored.clone(), false);
         assert_eq!(app.undo_backup(), Some("example-player-1"));
 
-        app.on_restored("example-player-1", restored);
+        app.on_restored("example-player-1", restored, false);
         assert_eq!(app.undo_backup(), None);
     }
 
@@ -3764,7 +3794,7 @@ mod tests {
                 result: Err("access denied".to_string()),
             },
         ];
-        assert!(app.on_restored("example-player-1", Ok(items)));
+        assert!(app.on_restored("example-player-1", Ok(items), false));
         assert!(app.complete.is_none());
         assert_eq!(
             app.status,
@@ -3777,8 +3807,49 @@ mod tests {
 
         // A backup that cannot be found changes nothing and keeps the result.
         app.on_completed(example_program(), finished(Some("example-player-1")), false);
-        assert!(!app.on_restored("example-player-1", Err("no backup named that".to_string())));
+        assert!(!app.on_restored(
+            "example-player-1",
+            Err("no backup named that".to_string()),
+            false
+        ));
         assert!(app.undo_backup().is_some());
+    }
+
+    #[test]
+    fn undo_in_a_dry_run_puts_nothing_back() {
+        static ASKED: std::sync::Mutex<Vec<bool>> = std::sync::Mutex::new(Vec::new());
+        fn stand_in(_: &str, dry_run: bool) -> Result<Vec<RestoreItem>, String> {
+            ASKED.lock().unwrap().push(dry_run);
+            Ok(vec![RestoreItem {
+                path: r"D:\Games\ExamplePlayer".to_string(),
+                result: Ok(()),
+            }])
+        }
+        let program = example_program();
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.restore_backup = stand_in;
+        app.dry_run = true;
+        app.selected = Some(program.id().to_string());
+        app.on_completed(program, finished(Some("example-player-1")), false);
+
+        app.act(&ctx, Action::Undo("example-player-1".to_string()));
+        let start = std::time::Instant::now();
+        while app.busy() && start.elapsed() < std::time::Duration::from_secs(60) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            app.drain_messages(&ctx);
+        }
+
+        assert_eq!(*ASKED.lock().unwrap(), [true]);
+        assert_eq!(
+            app.status,
+            "dry run: 1 items from example-player-1 would be restored"
+        );
+        assert!(app
+            .log
+            .iter()
+            .any(|l| l == r"would restore D:\Games\ExamplePlayer"));
+        assert_eq!(app.undo_backup(), Some("example-player-1"));
     }
 
     #[test]
