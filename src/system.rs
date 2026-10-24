@@ -390,7 +390,7 @@ pub fn services() -> Vec<ServiceInfo> {
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// What removing services and tasks needs from the machine: console tools
-/// to run and a pause between checks. Tests stand in for it.
+/// to run, a pause between checks and a log. Tests stand in for it.
 trait Console {
     /// Start `cmd` with the process creation `flags` and collect its output.
     fn run(&mut self, cmd: &mut Command, flags: u32) -> io::Result<Output>;
