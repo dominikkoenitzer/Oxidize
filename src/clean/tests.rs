@@ -14,6 +14,8 @@ use super::*;
 struct FakeTools {
     calls: Mutex<Vec<&'static str>>,
     delivery: Mutex<(usize, u64)>,
+    /// The Delivery Optimization cache cannot be read once it is deleted.
+    delivery_unreadable_after: Mutex<bool>,
     /// What runs by the time the cleaning starts.
     running: Mutex<Vec<PathBuf>>,
 }
@@ -42,6 +44,11 @@ impl Tools for FakeTools {
     }
     fn delivery_cache(&self) -> anyhow::Result<(usize, u64)> {
         self.call("delivery_cache");
+        if *self.delivery_unreadable_after.lock().unwrap()
+            && self.calls().contains(&"delete_delivery_cache")
+        {
+            anyhow::bail!("the cache could not be read");
+        }
         Ok(*self.delivery.lock().unwrap())
     }
     fn delete_delivery_cache(&self) -> anyhow::Result<()> {
@@ -604,6 +611,33 @@ fn windows_tools_run_only_when_chosen_and_elevated() {
         .find(|d| d.category == Category::DeliveryOptimization)
         .unwrap();
     assert_eq!(dopt.freed, 900);
+}
+
+#[test]
+fn a_delivery_cache_that_cannot_be_read_again_is_not_measured() {
+    let pc = Pc::new("delivery_unread");
+    let tools = FakeTools::default();
+    *tools.delivery.lock().unwrap() = (4, 900);
+    *tools.delivery_unreadable_after.lock().unwrap() = true;
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    let done = clean_with(
+        &pc,
+        &a,
+        &a.choice(&[Category::DeliveryOptimization], Confidence::High),
+        &Protected::default(),
+        true,
+        &tools,
+    );
+    assert!(tools.calls().contains(&"delete_delivery_cache"));
+    let dopt = &done[0];
+    assert_eq!(dopt.category, Category::DeliveryOptimization);
+    assert_eq!((dopt.freed, dopt.removed), (0, 0));
+    assert!(
+        dopt.notes.iter().any(|n| n.starts_with("not measured")),
+        "{:?}",
+        dopt.notes
+    );
+    assert!(!dopt.failed());
 }
 
 #[test]

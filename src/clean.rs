@@ -1165,11 +1165,16 @@ fn run_tool(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
         return;
     }
     match f.category {
-        Category::DeliveryOptimization => {
-            let left = opts.tools.delivery_cache().map(|(_, b)| b).unwrap_or(0);
-            c.freed = f.bytes.saturating_sub(left);
-            c.removed = f.count;
-        }
+        Category::DeliveryOptimization => match opts.tools.delivery_cache() {
+            Ok((_, left)) => {
+                c.freed = f.bytes.saturating_sub(left);
+                c.removed = f.count;
+            }
+            // Without what is left, neither the bytes nor the files that went are known.
+            Err(_) => c
+                .notes
+                .push("not measured, as the cache could not be read again".to_string()),
+        },
         _ => {
             if let (Some(b), Some(a)) = (before, free()) {
                 c.freed = a.saturating_sub(b);
