@@ -1009,6 +1009,7 @@ pub fn close_processes(
         true.into()
     }
 
+    let mut log = |line: &str| Machine.log(line);
     let mut out = Vec::new();
     let mut handles = Vec::new();
     for p in procs {
@@ -1047,7 +1048,7 @@ pub fn close_processes(
                 };
                 handles.push((p.pid, exe, h, ask.windows > 0));
             }
-            Err(e) => out.push(not_opened(p.pid, exe, &e)),
+            Err(e) => out.push(not_opened(p.pid, exe, &e, &mut log)),
         }
     }
     let deadline = std::time::Instant::now() + grace;
@@ -1075,9 +1076,15 @@ pub fn close_processes(
 }
 
 /// What became of a process that could not be opened. Windows refuses an
-/// id that no longer belongs to any process, so that one has closed.
+/// id that no longer belongs to any process, so that one has closed. Any
+/// other refusal is one plain sentence, and what Windows said goes to the log.
 #[cfg(windows)]
-fn not_opened(pid: u32, exe: String, e: &windows::core::Error) -> crate::complete::Closed {
+fn not_opened(
+    pid: u32,
+    exe: String,
+    e: &windows::core::Error,
+    log: &mut impl FnMut(&str),
+) -> crate::complete::Closed {
     use crate::complete::{CloseHow, Closed};
     use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
     if e.code() == ERROR_INVALID_PARAMETER.to_hresult() {
@@ -1089,11 +1096,16 @@ fn not_opened(pid: u32, exe: String, e: &windows::core::Error) -> crate::complet
             windowless: false,
         };
     }
+    log(&format!(
+        "OpenProcess {exe} (process {pid}) failed with {:#010x}: {}",
+        e.code().0 as u32,
+        e.message()
+    ));
     Closed {
         pid,
         exe,
         how: CloseHow::Failed,
-        error: Some(e.message()),
+        error: Some("Windows refused access to it.".to_string()),
         windowless: false,
     }
 }
@@ -1711,21 +1723,43 @@ mod tests {
         use crate::complete::CloseHow;
         use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
         let exe = r"C:\Example\player.exe";
-        let c = not_opened(100, exe.into(), &windows_error(ERROR_INVALID_PARAMETER));
+        let mut logged = Vec::new();
+        let c = not_opened(
+            100,
+            exe.into(),
+            &windows_error(ERROR_INVALID_PARAMETER),
+            &mut |line: &str| logged.push(line.to_string()),
+        );
         assert_eq!((c.pid, c.exe.as_str()), (100, exe));
         assert_eq!((c.how, c.error), (CloseHow::Closed, None));
+        assert!(logged.is_empty(), "{logged:?}");
     }
 
     #[cfg(windows)]
     #[test]
-    fn a_process_that_cannot_be_opened_keeps_what_windows_said() {
+    fn a_process_that_cannot_be_opened_is_one_plain_sentence_and_windows_text_goes_to_the_log() {
         use crate::complete::CloseHow;
         use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
         let exe = r"C:\Example\player.exe";
         let denied = windows_error(ERROR_ACCESS_DENIED);
-        let said = Some(denied.message());
-        let c = not_opened(100, exe.into(), &denied);
-        assert_eq!((c.how, c.error), (CloseHow::Failed, said));
+        let said = denied.message();
+        let mut logged = Vec::new();
+        let c = not_opened(100, exe.into(), &denied, &mut |line: &str| {
+            logged.push(line.to_string())
+        });
+        assert_eq!(
+            (c.how, c.error),
+            (
+                CloseHow::Failed,
+                Some("Windows refused access to it.".to_string())
+            )
+        );
+        assert_eq!(
+            logged,
+            [format!(
+                r"OpenProcess C:\Example\player.exe (process 100) failed with 0x80070005: {said}"
+            )]
+        );
     }
 
     #[test]
