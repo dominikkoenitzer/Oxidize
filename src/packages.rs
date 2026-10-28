@@ -408,6 +408,7 @@ fn word_count(name: &str) -> usize {
 pub fn scan_target(package: &Package) -> ScanTarget {
     let mut target = scanner::name_target(&package.display_name, package.publisher.as_deref());
     target.lone_words_match = false;
+    target.package_family = Some(package.family_name.clone());
     let product = package
         .name
         .split_once('.')

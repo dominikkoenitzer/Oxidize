@@ -12,7 +12,8 @@ use std::sync::OnceLock;
 use std::thread;
 
 use crate::model::{
-    Confidence, Hive, Leftover, LeftoverKind, Program, RegistrySource, ScanReport, ScanTarget,
+    Confidence, Hive, Leftover, LeftoverKind, Package, Program, RegistrySource, ScanReport,
+    ScanTarget,
 };
 use crate::registry;
 use crate::system;
@@ -156,6 +157,7 @@ pub struct Snapshot {
     services: OnceLock<Vec<system::ServiceInfo>>,
     tasks: OnceLock<Vec<system::TaskInfo>>,
     roots: OnceLock<Vec<PathBuf>>,
+    store_apps: OnceLock<Vec<Package>>,
 }
 
 impl Snapshot {
@@ -169,6 +171,12 @@ impl Snapshot {
         let snap = Self::default();
         let _ = snap.programs.set(programs);
         snap
+    }
+
+    /// Start from the Store apps already read.
+    pub fn with_store_apps(self, apps: Vec<Package>) -> Self {
+        let _ = self.store_apps.set(apps);
+        self
     }
 
     /// Every registered program, system components included.
@@ -190,13 +198,24 @@ impl Snapshot {
         self.roots.get_or_init(fs_roots)
     }
 
-    /// Read the programs, and the services and tasks if asked, at the same
-    /// time.
+    /// The Store apps registered for this user. A vendor with a Store app
+    /// installed still uses its folders and keys.
+    pub fn store_apps(&self) -> &[Package] {
+        self.store_apps.get_or_init(read_store_apps)
+    }
+
+    /// Read the programs and Store apps, and the services and tasks if
+    /// asked, at the same time.
     fn prefetch(&self, services_and_tasks: bool) {
         thread::scope(|s| {
             if self.programs.get().is_none() {
                 s.spawn(|| {
                     self.programs();
+                });
+            }
+            if self.store_apps.get().is_none() {
+                s.spawn(|| {
+                    self.store_apps();
                 });
             }
             if services_and_tasks {
@@ -209,6 +228,37 @@ impl Snapshot {
             }
         });
     }
+}
+
+/// The Store apps registered for this user; none when Windows cannot list
+/// them. Tests see only the apps they give.
+#[cfg(not(test))]
+fn read_store_apps() -> Vec<Package> {
+    use crate::packages::PackageStore;
+    crate::packages::WindowsPackageStore
+        .list()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+fn read_store_apps() -> Vec<Package> {
+    Vec::new()
+}
+
+/// The Store apps that speak for their vendor, the target itself left out.
+/// A sparse package only gives a program its identity, and that program is
+/// counted with the programs.
+fn other_store_apps<'a>(
+    target: &'a ScanTarget,
+    apps: &'a [Package],
+) -> impl Iterator<Item = &'a Package> {
+    apps.iter().filter(move |a| {
+        !a.is_sparse
+            && target
+                .package_family
+                .as_deref()
+                .is_none_or(|own| !a.family_name.eq_ignore_ascii_case(own))
+    })
 }
 
 /// Capture a registered program's identity.
@@ -305,7 +355,8 @@ fn build_target_from(
     let roots = install_roots();
     target.brand = derive_brand(program, target.install_location.as_deref(), &roots);
     if let Some(brand) = target.brand.clone() {
-        target.brand_alone = !others_carry(&brand, Some(&own), snap.programs());
+        target.brand_alone = !others_carry(&brand, Some(&own), snap.programs())
+            && !other_store_apps(&target, snap.store_apps()).any(|a| app_carries(a, &brand));
         if let Some(loc) = target.install_location.clone() {
             let mut others = other_program_paths(Some(&own), snap.programs());
             others.extend(other_installs.iter().cloned());
@@ -532,6 +583,20 @@ fn others_carry(brand: &str, own: Option<&(String, RegistrySource)>, programs: &
             .flatten()
             .any(|s| carries_brand(s, brand))
         })
+}
+
+/// Does a Store app carry the brand: in its name, identity, publisher or
+/// install folder?
+fn app_carries(app: &Package, brand: &str) -> bool {
+    [
+        Some(&app.display_name),
+        Some(&app.name),
+        app.publisher.as_ref(),
+        app.installed_path.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|s| carries_brand(s, brand))
 }
 
 /// The install folders, uninstallers and icons of every other program.
@@ -894,6 +959,7 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         name_tokens,
         publisher_tokens,
         registry: None,
+        package_family: None,
         exact_names: Vec::new(),
         lone_words_match: true,
         brand: None,
@@ -969,6 +1035,11 @@ fn vendor_is_shared(target: &ScanTarget, snap: &Snapshot) -> bool {
                 .as_deref()
                 .map(|pubr| significant_tokens(pubr) == target.publisher_tokens)
                 .unwrap_or(false)
+        })
+        || other_store_apps(target, snap.store_apps()).any(|a| {
+            a.publisher
+                .as_deref()
+                .is_some_and(|pubr| significant_tokens(pubr) == target.publisher_tokens)
         })
 }
 
@@ -1162,9 +1233,9 @@ fn company_words(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// Does no other installed program come from this program's publisher?
-/// Programs without a publisher say nothing either way.
-fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
+/// Does no other installed program or Store app come from this program's
+/// publisher? Programs without a publisher say nothing either way.
+fn vendor_alone(target: &ScanTarget, programs: &[Program], apps: &[Package]) -> bool {
     let Some(publisher) = target.publisher.as_deref() else {
         return false;
     };
@@ -1182,6 +1253,11 @@ fn vendor_alone(target: &ScanTarget, programs: &[Program]) -> bool {
         })
         .any(|p| {
             p.publisher
+                .as_deref()
+                .is_some_and(|pubr| may_be_same_vendor(pubr, publisher))
+        })
+        && !other_store_apps(target, apps).any(|a| {
+            a.publisher
                 .as_deref()
                 .is_some_and(|pubr| may_be_same_vendor(pubr, publisher))
         })
@@ -2349,7 +2425,13 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
     let mut shortcuts = Vec::new();
     let (handlers_out, shortcuts_out) = (&mut handlers, &mut shortcuts);
     let phases: Vec<Job<Vec<Leftover>>> = vec![
-        Box::new(move || scan_registry(target, installed, vendor_alone(target, snap.programs()))),
+        Box::new(move || {
+            scan_registry(
+                target,
+                installed,
+                vendor_alone(target, snap.programs(), snap.store_apps()),
+            )
+        }),
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
         Box::new(move || {
@@ -2390,7 +2472,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         .filter(|l| l.kind == LeftoverKind::File && l.confidence == Confidence::High)
         .map(|l| PathBuf::from(&l.path))
         .collect();
-    let alone = vendor_alone(target, snap.programs());
+    let alone = vendor_alone(target, snap.programs(), snap.store_apps());
     items.extend(records::scan_windows_records(
         target,
         &removed,
@@ -2415,6 +2497,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
 mod tests {
     use super::*;
     use crate::model::RegistryView;
+    use crate::packages::fake::package;
 
     #[test]
     fn a_folder_from_the_environment_is_a_full_path_or_none() {
@@ -2476,14 +2559,18 @@ mod tests {
             Some("Example Studio Inc."),
         );
         let other = listed("Other Tool", "other-tool", Some("Other Vendor"));
-        assert!(vendor_alone(&t, &[own.clone(), other.clone()]));
+        assert!(vendor_alone(&t, &[own.clone(), other.clone()], &[]));
 
         let sibling = listed(
             "Example Editor",
             "example-editor",
             Some("Example Studio Inc"),
         );
-        assert!(!vendor_alone(&t, &[own.clone(), other.clone(), sibling]));
+        assert!(!vendor_alone(
+            &t,
+            &[own.clone(), other.clone(), sibling],
+            &[]
+        ));
         // Written another way, still the same vendor.
         for publisher in [
             "ExampleStudio",
@@ -2492,14 +2579,14 @@ mod tests {
         ] {
             let sibling = listed("Example Editor", "example-editor", Some(publisher));
             assert!(
-                !vendor_alone(&t, &[own.clone(), other.clone(), sibling]),
+                !vendor_alone(&t, &[own.clone(), other.clone(), sibling], &[]),
                 "{publisher}"
             );
         }
 
         // No publisher, no claim.
         let bare = name_target("Example Player", None);
-        assert!(!vendor_alone(&bare, &[]));
+        assert!(!vendor_alone(&bare, &[], &[]));
     }
 
     #[test]
@@ -2518,8 +2605,41 @@ mod tests {
             "quillmark-armory",
             Some("Quillmark Systems Inc."),
         );
-        assert!(vendor_alone(&t, std::slice::from_ref(&own)));
-        assert!(!vendor_alone(&t, &[own, sibling]));
+        assert!(vendor_alone(&t, std::slice::from_ref(&own), &[]));
+        assert!(!vendor_alone(&t, &[own, sibling], &[]));
+    }
+
+    #[test]
+    fn a_store_app_of_the_vendor_keeps_the_vendors_key() {
+        // The vendor's Store app still reads the vendor's key once the
+        // classic program is gone.
+        let mut t = name_target("Example Player", Some("Example Studio Inc."));
+        t.registry = Some((
+            "example-player".to_string(),
+            RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+        ));
+        let own = listed(
+            "Example Player",
+            "example-player",
+            Some("Example Studio Inc."),
+        );
+        let programs = std::slice::from_ref(&own);
+        let mut app = package("ExampleStudio.Sync", "Example Sync");
+        app.publisher = Some("Example Studio Inc.".to_string());
+        assert!(!vendor_alone(&t, programs, std::slice::from_ref(&app)));
+
+        let mut other = package("Other.Tool", "Other Tool");
+        other.publisher = Some("Other Vendor".to_string());
+        assert!(vendor_alone(&t, programs, &[other]));
+
+        // A sparse package only gives a program its identity.
+        let mut sparse = app.clone();
+        sparse.is_sparse = true;
+        assert!(vendor_alone(&t, programs, &[sparse]));
+
+        // The target's own package is no other app of the vendor's.
+        t.package_family = Some(app.family_name.to_uppercase());
+        assert!(vendor_alone(&t, programs, &[app]));
     }
 
     #[test]
@@ -3788,6 +3908,35 @@ mod tests {
             derive_brand(&game, None, &install_roots()).as_deref(),
             Some("tidewater")
         );
+    }
+
+    #[test]
+    fn a_store_app_of_the_vendor_keeps_the_vendors_folders() {
+        let target = |apps: Vec<Package>| {
+            let snap = Snapshot::with_programs(vec![player()]).with_store_apps(apps);
+            build_target_from(&player(), Some(player_loc()), &[], &[], &snap)
+        };
+        let mut other = package("Other.Tool", "Other Tool");
+        other.publisher = Some("Other Vendor".to_string());
+        let t = target(vec![other]);
+        assert!(t.brand_alone);
+        assert!(is_brand_name("Brightway", &t));
+
+        let mut studio = package("Brightway.Studio", "Brightway Studio");
+        studio.publisher = Some("Brightway Corporation".to_string());
+        let t = target(vec![studio]);
+        assert_eq!(t.brand.as_deref(), Some("brightway"));
+        assert!(!t.brand_alone);
+        assert_eq!(t.vendor_dir, None);
+        for name in ["Brightway", "Brightway Corporation"] {
+            assert!(!is_brand_name(name, &t), "{name}");
+        }
+
+        // Only its identity carries the brand: still the vendor's.
+        let mut sync = package("Brightway.Sync", "Sync");
+        sync.publisher = None;
+        sync.installed_path = None;
+        assert!(!target(vec![sync]).brand_alone);
     }
 
     #[test]
