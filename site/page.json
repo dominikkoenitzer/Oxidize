@@ -198,12 +198,13 @@
     }
   },
   "new": {
-    "version": "0.2.9",
+    "version": "0.2.10",
     "items": [
-      "<code>oxidize protect --check</code> says whether a path is kept out of every clean and which entry of the protected list keeps it.",
-      "A clean plan and a clean run in JSON carry a summary of what each category holds and what the protected list kept, to compare runs by.",
-      "A service Windows only marks for deletion is listed as going at the next restart, and a removal Windows refuses says so in one sentence.",
-      "Messages from Windows tools come through with their accents intact, and <code>sc</code> and <code>schtasks</code> start without a console window."
+      "Before a Store app is removed, what runs from its folder is closed the way a program's processes are, and a helper with no window is named when it is ended.",
+      "The vendor's key and folders stay while a Store app of the same vendor is installed.",
+      "Leftovers are kept while a program's uninstaller is still running.",
+      "A clean counts as freed only what is really gone, for Windows.old, Delivery Optimization files and Recycle Bin items alike.",
+      "In the window, Undo stays a dry run when dry run is on, and stays available after a restore where some items failed."
     ]
   },
   "requirements": [
