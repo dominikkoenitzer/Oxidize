@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.10, 2026-10-28
+
+- Before a Store app is removed, whatever runs from its install folder is
+  closed the way a program's processes are: its windows are asked to close
+  first. A helper with no window is ended and named. A dry run lists what
+  it would close, and nothing is closed for an app that may not go.
+- The vendor's key and folders stay while a Store app of the same vendor is
+  installed, so removing the vendor's program first no longer takes what the
+  app still uses. When Windows cannot list the Store apps, no vendor counts
+  as alone.
+- Leftovers are kept while a program's uninstaller is still running when
+  the wait ends, whatever the registry already says.
+- In the window, Undo stays a dry run when dry run is on, and Undo stays
+  available after a restore where some items failed.
+- A clean counts what it really freed: Windows.old only once the folder is
+  gone, Delivery Optimization files only when the cache could be read and
+  the file is gone afterwards, and a Recycle Bin item whose entry stays as
+  kept.
+
 ## 0.2.9, 2026-10-24
 
 - `oxidize protect` prints the protected list, and `oxidize protect --check
