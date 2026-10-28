@@ -25,12 +25,15 @@ It names no author and does not link to this repository.
   - `/download/cli.sha256`
   - `/download/zip.sha256`
 - `llms.txt` describes the app for AI assistants.
-- `skill/oxidize/` is the assistant skill, and `skill/oxidize.zip` is that folder zipped. Rebuild the zip
-  after an edit, from this folder:
+- `skill/oxidize/` is the assistant skill, and `skill/oxidize.zip` is that folder zipped. After an edit,
+  stage the folder and rebuild the zip from the repository root:
 
   ```
-  python -c "import shutil; shutil.make_archive('skill/oxidize', 'zip', 'skill', 'oxidize')"
+  git add site/skill/oxidize
+  powershell -ExecutionPolicy Bypass -File scripts\skill-zip.ps1
   ```
+
+  CI and the release check that the zip holds exactly the folder, byte for byte, and fail when it does not.
 
 Vercel deploys this folder whenever a push to main changes it. `.vercelignore` keeps this README,
 `build.py` and `page.json` off the site.
