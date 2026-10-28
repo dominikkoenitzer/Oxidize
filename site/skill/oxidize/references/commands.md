@@ -57,7 +57,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 - Some of Windows' records of a removed file, such as the history of a shortcut, only show once the file is gone. New high-confidence items in the second scan go without another question in one more pass, into the same backup, and a last scan follows. There is never a third pass.
 - The last scan ends the run with `Nothing left.` or a list of what is still there and why. Items below the chosen level are counted as kept.
 - `--dry-run`: lists every process it would close and every item it would remove, and says whether the uninstaller would run. Nothing is closed, started or removed.
-- A Store app guarded as `protected` in `list` is refused. Removing a Store app cannot be backed up; its leftovers found afterwards are. Nothing is closed before a Store app is removed.
+- A Store app guarded as `protected` in `list` is refused. Removing a Store app cannot be backed up; its leftovers found afterwards are. What runs from the app's install folder is closed first, as for a program; a helper with no window is ended at once and named in `would_end` (dry run) or with `"windowless": true` in `closed`.
 
 ## scan
 
