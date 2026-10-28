@@ -157,7 +157,7 @@ pub struct Snapshot {
     services: OnceLock<Vec<system::ServiceInfo>>,
     tasks: OnceLock<Vec<system::TaskInfo>>,
     roots: OnceLock<Vec<PathBuf>>,
-    store_apps: OnceLock<Vec<Package>>,
+    store_apps: OnceLock<Option<Vec<Package>>>,
 }
 
 impl Snapshot {
@@ -175,7 +175,14 @@ impl Snapshot {
 
     /// Start from the Store apps already read.
     pub fn with_store_apps(self, apps: Vec<Package>) -> Self {
-        let _ = self.store_apps.set(apps);
+        let _ = self.store_apps.set(Some(apps));
+        self
+    }
+
+    /// Start from a Store app listing that failed.
+    #[cfg(test)]
+    fn with_unlisted_store_apps(self) -> Self {
+        let _ = self.store_apps.set(None);
         self
     }
 
@@ -198,10 +205,11 @@ impl Snapshot {
         self.roots.get_or_init(fs_roots)
     }
 
-    /// The Store apps registered for this user. A vendor with a Store app
-    /// installed still uses its folders and keys.
-    pub fn store_apps(&self) -> &[Package] {
-        self.store_apps.get_or_init(read_store_apps)
+    /// The Store apps registered for this user, or None when Windows could
+    /// not list them. A vendor with a Store app installed still uses its
+    /// folders and keys, so with no list no vendor counts as alone.
+    pub fn store_apps(&self) -> Option<&[Package]> {
+        self.store_apps.get_or_init(read_store_apps).as_deref()
     }
 
     /// Read the programs and Store apps, and the services and tasks if
@@ -230,19 +238,17 @@ impl Snapshot {
     }
 }
 
-/// The Store apps registered for this user; none when Windows cannot list
+/// The Store apps registered for this user; None when Windows cannot list
 /// them. Tests see only the apps they give.
 #[cfg(not(test))]
-fn read_store_apps() -> Vec<Package> {
+fn read_store_apps() -> Option<Vec<Package>> {
     use crate::packages::PackageStore;
-    crate::packages::WindowsPackageStore
-        .list()
-        .unwrap_or_default()
+    crate::packages::WindowsPackageStore.list().ok()
 }
 
 #[cfg(test)]
-fn read_store_apps() -> Vec<Package> {
-    Vec::new()
+fn read_store_apps() -> Option<Vec<Package>> {
+    Some(Vec::new())
 }
 
 /// The Store apps that speak for their vendor, the target itself left out.
@@ -356,7 +362,9 @@ fn build_target_from(
     target.brand = derive_brand(program, target.install_location.as_deref(), &roots);
     if let Some(brand) = target.brand.clone() {
         target.brand_alone = !others_carry(&brand, Some(&own), snap.programs())
-            && !other_store_apps(&target, snap.store_apps()).any(|a| app_carries(a, &brand));
+            && snap.store_apps().is_some_and(|apps| {
+                !other_store_apps(&target, apps).any(|a| app_carries(a, &brand))
+            });
         if let Some(loc) = target.install_location.clone() {
             let mut others = other_program_paths(Some(&own), snap.programs());
             others.extend(other_installs.iter().cloned());
@@ -1036,10 +1044,12 @@ fn vendor_is_shared(target: &ScanTarget, snap: &Snapshot) -> bool {
                 .map(|pubr| significant_tokens(pubr) == target.publisher_tokens)
                 .unwrap_or(false)
         })
-        || other_store_apps(target, snap.store_apps()).any(|a| {
-            a.publisher
-                .as_deref()
-                .is_some_and(|pubr| significant_tokens(pubr) == target.publisher_tokens)
+        || snap.store_apps().is_none_or(|apps| {
+            other_store_apps(target, apps).any(|a| {
+                a.publisher
+                    .as_deref()
+                    .is_some_and(|pubr| significant_tokens(pubr) == target.publisher_tokens)
+            })
         })
 }
 
@@ -1261,6 +1271,13 @@ fn vendor_alone(target: &ScanTarget, programs: &[Program], apps: &[Package]) -> 
                 .as_deref()
                 .is_some_and(|pubr| may_be_same_vendor(pubr, publisher))
         })
+}
+
+/// [`vendor_alone`] on what `snap` read; never alone when the Store apps
+/// could not be listed.
+fn vendor_alone_in(target: &ScanTarget, snap: &Snapshot) -> bool {
+    snap.store_apps()
+        .is_some_and(|apps| vendor_alone(target, snap.programs(), apps))
 }
 
 /// [`same_vendor`] read loosely: one name the start of the other at any
@@ -2425,13 +2442,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
     let mut shortcuts = Vec::new();
     let (handlers_out, shortcuts_out) = (&mut handlers, &mut shortcuts);
     let phases: Vec<Job<Vec<Leftover>>> = vec![
-        Box::new(move || {
-            scan_registry(
-                target,
-                installed,
-                vendor_alone(target, snap.programs(), snap.store_apps()),
-            )
-        }),
+        Box::new(move || scan_registry(target, installed, vendor_alone_in(target, snap))),
         Box::new(move || scan_filesystem(target, snap)),
         Box::new(move || scan_system(target, snap)),
         Box::new(move || {
@@ -2472,7 +2483,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         .filter(|l| l.kind == LeftoverKind::File && l.confidence == Confidence::High)
         .map(|l| PathBuf::from(&l.path))
         .collect();
-    let alone = vendor_alone(target, snap.programs(), snap.store_apps());
+    let alone = vendor_alone_in(target, snap);
     items.extend(records::scan_windows_records(
         target,
         &removed,
@@ -3936,7 +3947,27 @@ mod tests {
         let mut sync = package("Brightway.Sync", "Sync");
         sync.publisher = None;
         sync.installed_path = None;
-        assert!(!target(vec![sync]).brand_alone);
+        assert!(!target(vec![sync.clone()]).brand_alone);
+
+        // A sparse package is a program's identity, counted with the programs.
+        let mut sparse = sync;
+        sparse.is_sparse = true;
+        assert!(target(vec![sparse]).brand_alone);
+    }
+
+    #[test]
+    fn with_no_store_app_list_the_vendor_is_never_alone() {
+        let snap = Snapshot::with_programs(vec![player()]).with_unlisted_store_apps();
+        let t = build_target_from(&player(), Some(player_loc()), &[], &[], &snap);
+        assert_eq!(t.brand.as_deref(), Some("brightway"));
+        assert!(!t.brand_alone);
+        assert_eq!(t.vendor_dir, None);
+        assert!(!vendor_alone_in(&t, &snap));
+
+        let listed = Snapshot::with_programs(vec![player()]).with_store_apps(Vec::new());
+        let t = build_target_from(&player(), Some(player_loc()), &[], &[], &listed);
+        assert!(t.brand_alone);
+        assert!(vendor_alone_in(&t, &listed));
     }
 
     #[test]
