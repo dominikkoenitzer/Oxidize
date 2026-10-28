@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport, ScanTarget};
+use crate::model::{
+    Confidence, Hive, Leftover, LeftoverKind, Package, Program, ScanReport, ScanTarget,
+};
 use crate::safety::{DeletionOutcome, SafetyContext};
 use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
@@ -36,7 +38,8 @@ pub struct Running {
 pub enum CloseHow {
     /// It closed its windows and exited by itself.
     Closed,
-    /// It was still running after the grace period and was ended.
+    /// It was still running after the grace period, or had no window to be
+    /// asked through, and was ended.
     Ended,
     /// It could not be ended, usually for want of administrator rights.
     Failed,
@@ -49,6 +52,10 @@ pub struct Closed {
     pub how: CloseHow,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// It had no window, so it could not be asked and was ended at once: a
+    /// helper running in the background.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub windowless: bool,
 }
 
 /// The folders a program's processes may run from: its install folder and
@@ -83,6 +90,25 @@ pub fn processes_in(running: &[Running], dirs: &[PathBuf], own_pid: u32) -> Vec<
         .filter(|p| dirs.iter().any(|d| system::path_under(&p.exe, d)))
         .cloned()
         .collect()
+}
+
+/// The processes running from a Store app's install folder. Only a folder
+/// named after the package counts, so a sparse package pointing at a
+/// program's folder, or a protected folder, never picks anything.
+pub fn app_processes(running: &[Running], app: &Package, own_pid: u32) -> Vec<Running> {
+    let dirs: Vec<PathBuf> = app
+        .installed_path
+        .iter()
+        .map(PathBuf::from)
+        .filter(|d| {
+            d.is_absolute()
+                && !scanner::is_protected_path(d)
+                && d.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.to_lowercase().starts_with(&app.name.to_lowercase()))
+        })
+        .collect();
+    processes_in(running, &dirs, own_pid)
 }
 
 /// Whether the vendor's uninstaller runs, and why.
@@ -531,6 +557,53 @@ mod tests {
     use crate::model::{RegistrySource, RegistryView};
     use std::cell::RefCell;
 
+    #[test]
+    fn only_what_runs_from_the_apps_own_folder_is_picked() {
+        let apps = r"C:\Program Files\WindowsApps";
+        let mut app = crate::packages::fake::package("Vendor.Notes", "Notes");
+        app.installed_path = Some(format!(r"{apps}\Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe"));
+        let running: Vec<Running> = [
+            (100, r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe\Notes.exe"),
+            (
+                101,
+                r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe\sync\Sync.exe",
+            ),
+            (102, r"Vendor.NotesPro_2.0.0.0_x64__8wekyb3d8bbwe\Notes.exe"),
+            (
+                103,
+                r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe.old\Notes.exe",
+            ),
+            (104, r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe\Notes.exe"),
+        ]
+        .into_iter()
+        .map(|(pid, exe)| Running {
+            pid,
+            exe: PathBuf::from(format!(r"{apps}\{exe}")),
+        })
+        .collect();
+        let pids = |app: &Package| -> Vec<u32> {
+            app_processes(&running, app, 104)
+                .iter()
+                .map(|p| p.pid)
+                .collect()
+        };
+        // Its own processes, not a sibling package's, a look-alike folder's
+        // or this process itself.
+        assert_eq!(pids(&app), [100, 101]);
+
+        let mut elsewhere = app.clone();
+        for path in [
+            None,
+            Some(r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe".to_string()),
+            // A sparse package points at its program's folder.
+            Some(r"C:\Program Files\Notes Editor".to_string()),
+            Some(apps.to_string()),
+        ] {
+            elsewhere.installed_path = path.clone();
+            assert!(pids(&elsewhere).is_empty(), "{path:?}");
+        }
+    }
+
     /// A PC in memory: the footprint shrinks by what was removed.
     struct FakePc {
         items: RefCell<Vec<Leftover>>,
@@ -639,6 +712,7 @@ mod tests {
                     exe: p.exe.display().to_string(),
                     how: CloseHow::Closed,
                     error: None,
+                    windowless: false,
                 })
                 .collect()
         }

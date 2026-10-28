@@ -67,8 +67,9 @@ pub trait Remove: Send + Sync {
     fn uninstall(&self, plan: &UninstallPlan) -> Result<Ran>;
     /// Wait for the program to leave the Uninstall list; true once it has.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
-    /// Remove a Store app; true once Windows no longer lists it.
-    fn remove_app(&self, app: &Package) -> Result<bool>;
+    /// Remove a Store app; true once Windows no longer lists it. `before`
+    /// runs once the app is cleared to go, right before Windows removes it.
+    fn remove_app(&self, app: &Package, before: &mut dyn FnMut()) -> Result<bool>;
     /// Close these processes: their windows first, then end them.
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
     /// Remove leftovers, each one backed up first.
@@ -670,7 +671,17 @@ fn apply_step(
                 Ok(true)
             } else {
                 out["uninstaller"] = json!("removed by Windows");
-                r.remove_app(app)
+                // Its windows are asked first, as a program's are.
+                let mut closed = Vec::new();
+                let removed = r.remove_app(app, &mut || {
+                    let running = m.running();
+                    let picked = complete::app_processes(&running, app, std::process::id());
+                    if !picked.is_empty() {
+                        closed = r.close(&picked);
+                    }
+                });
+                out["closed"] = json!(closed);
+                removed
             }
         }
         PlanStep::Leftovers {
@@ -1139,6 +1150,7 @@ mod tests {
                 (200, r"C:\Users\me\AppData\Local\Other\player.exe"),
                 (300, r"C:\Games\OldGame\game.exe"),
                 (400, r"C:\Program Files\Game Service\service.exe"),
+                (500, r"C:\Program Files\WindowsApps\Vendor.Notes\Notes.exe"),
             ]
             .into_iter()
             .map(|(pid, exe)| Running {
@@ -1191,7 +1203,8 @@ mod tests {
             self.log(format!("wait {}", program.display_name));
             true
         }
-        fn remove_app(&self, app: &Package) -> Result<bool> {
+        fn remove_app(&self, app: &Package, before: &mut dyn FnMut()) -> Result<bool> {
+            before();
             self.log(format!("remove app {}", app.family_name));
             Ok(true)
         }
@@ -1205,6 +1218,7 @@ mod tests {
                     exe: p.exe.display().to_string(),
                     how: complete::CloseHow::Closed,
                     error: None,
+                    windowless: false,
                 })
                 .collect()
         }
@@ -1667,16 +1681,22 @@ mod tests {
             ])
         );
         let id = plan_id(&plan);
-        session
+        let done = session
             .call("apply_removal_plan", json!({ "plan_id": id }))
             .await;
+        // The app's windows are asked to close before Windows removes it.
         assert_eq!(
             recorder.calls(),
             [
+                "close 500",
                 "remove app Vendor.Notes_8wekyb3d8bbwe",
                 "close 300",
                 r"remove C:\Games\OldGame",
             ]
+        );
+        assert_eq!(
+            done["structuredContent"]["steps"][0]["closed"][0]["pid"], 500,
+            "{done}"
         );
     }
 

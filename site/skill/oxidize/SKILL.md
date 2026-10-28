@@ -88,7 +88,7 @@ For a review between the uninstaller and the removal, add `--keep`. `oxidize uni
 
 Several programs: `oxidize uninstall "<a>" "<b>" --dry-run --json`, then the same with `-y`. Every name must match exactly one program before anything runs. The JSON has `programs`, `uninstalled`, `failed` and `cancelled`.
 
-Store apps: `oxidize list --store --json` lists them with `"kind": "store"`. An app with a `protected` reason is never removed. Remove one with `oxidize uninstall "<family_name>"`, following rule 6. Windows removes it for the current user only. Nothing is closed first, and the JSON has `still_installed` and `removal` but no `nothing_left`.
+Store apps: `oxidize list --store --json` lists them with `"kind": "store"`. An app with a `protected` reason is never removed. Remove one with `oxidize uninstall "<family_name>"`, following rule 6. Windows removes it for the current user only. Whatever runs from the app's install folder is closed first, the same way as for a program: its windows are asked to close, and a helper with no window is ended at once. The dry run lists those processes in `would_close`, and the ones without a window again in `would_end`. The run lists them in `closed`, where a helper ended for want of a window has `"windowless": true`. The JSON has `still_installed` and `removal` but no `nothing_left`.
 
 ### Remove leftovers of a program that is already gone
 
