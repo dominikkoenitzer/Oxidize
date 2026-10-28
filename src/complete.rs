@@ -557,6 +557,53 @@ mod tests {
     use crate::model::{RegistrySource, RegistryView};
     use std::cell::RefCell;
 
+    #[test]
+    fn only_what_runs_from_the_apps_own_folder_is_picked() {
+        let apps = r"C:\Program Files\WindowsApps";
+        let mut app = crate::packages::fake::package("Vendor.Notes", "Notes");
+        app.installed_path = Some(format!(r"{apps}\Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe"));
+        let running: Vec<Running> = [
+            (100, r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe\Notes.exe"),
+            (
+                101,
+                r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe\sync\Sync.exe",
+            ),
+            (102, r"Vendor.NotesPro_2.0.0.0_x64__8wekyb3d8bbwe\Notes.exe"),
+            (
+                103,
+                r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe.old\Notes.exe",
+            ),
+            (104, r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe\Notes.exe"),
+        ]
+        .into_iter()
+        .map(|(pid, exe)| Running {
+            pid,
+            exe: PathBuf::from(format!(r"{apps}\{exe}")),
+        })
+        .collect();
+        let pids = |app: &Package| -> Vec<u32> {
+            app_processes(&running, app, 104)
+                .iter()
+                .map(|p| p.pid)
+                .collect()
+        };
+        // Its own processes, not a sibling package's, a look-alike folder's
+        // or this process itself.
+        assert_eq!(pids(&app), [100, 101]);
+
+        let mut elsewhere = app.clone();
+        for path in [
+            None,
+            Some(r"Vendor.Notes_1.2.3.0_x64__8wekyb3d8bbwe".to_string()),
+            // A sparse package points at its program's folder.
+            Some(r"C:\Program Files\Notes Editor".to_string()),
+            Some(apps.to_string()),
+        ] {
+            elsewhere.installed_path = path.clone();
+            assert!(pids(&elsewhere).is_empty(), "{path:?}");
+        }
+    }
+
     /// A PC in memory: the footprint shrinks by what was removed.
     struct FakePc {
         items: RefCell<Vec<Leftover>>,
