@@ -11,7 +11,9 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::model::{Confidence, Hive, Leftover, LeftoverKind, Program, ScanReport, ScanTarget};
+use crate::model::{
+    Confidence, Hive, Leftover, LeftoverKind, Package, Program, ScanReport, ScanTarget,
+};
 use crate::safety::{DeletionOutcome, SafetyContext};
 use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
@@ -36,7 +38,8 @@ pub struct Running {
 pub enum CloseHow {
     /// It closed its windows and exited by itself.
     Closed,
-    /// It was still running after the grace period and was ended.
+    /// It was still running after the grace period, or had no window to be
+    /// asked through, and was ended.
     Ended,
     /// It could not be ended, usually for want of administrator rights.
     Failed,
@@ -49,6 +52,10 @@ pub struct Closed {
     pub how: CloseHow,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// It had no window, so it could not be asked and was ended at once: a
+    /// helper running in the background.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub windowless: bool,
 }
 
 /// The folders a program's processes may run from: its install folder and
@@ -83,6 +90,25 @@ pub fn processes_in(running: &[Running], dirs: &[PathBuf], own_pid: u32) -> Vec<
         .filter(|p| dirs.iter().any(|d| system::path_under(&p.exe, d)))
         .cloned()
         .collect()
+}
+
+/// The processes running from a Store app's install folder. Only a folder
+/// named after the package counts, so a sparse package pointing at a
+/// program's folder, or a protected folder, never picks anything.
+pub fn app_processes(running: &[Running], app: &Package, own_pid: u32) -> Vec<Running> {
+    let dirs: Vec<PathBuf> = app
+        .installed_path
+        .iter()
+        .map(PathBuf::from)
+        .filter(|d| {
+            d.is_absolute()
+                && !scanner::is_protected_path(d)
+                && d.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.to_lowercase().starts_with(&app.name.to_lowercase()))
+        })
+        .collect();
+    processes_in(running, &dirs, own_pid)
 }
 
 /// Whether the vendor's uninstaller runs, and why.
@@ -639,6 +665,7 @@ mod tests {
                     exe: p.exe.display().to_string(),
                     how: CloseHow::Closed,
                     error: None,
+                    windowless: false,
                 })
                 .collect()
         }

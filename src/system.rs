@@ -908,6 +908,72 @@ fn lineage(pid: u32, parents: &std::collections::HashMap<u32, u32>) -> Vec<u32> 
     out
 }
 
+/// Does the top-level window speak for the process: its own window, or the
+/// frame Windows draws around a Store app's window? Closing that frame is
+/// how a Store app is asked to close.
+#[cfg(windows)]
+fn speaks_for(hwnd: windows::Win32::Foundation::HWND, pid: u32) -> bool {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumChildWindows, GetClassNameW, GetWindowThreadProcessId,
+    };
+
+    fn owner(hwnd: HWND) -> u32 {
+        let mut owner = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        owner
+    }
+
+    unsafe extern "system" fn child_of(hwnd: HWND, found: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `found` points to the pair that outlives the EnumChildWindows call.
+        let found = unsafe { &mut *(found.0 as *mut (u32, bool)) };
+        found.1 = owner(hwnd) == found.0;
+        (!found.1).into()
+    }
+
+    if owner(hwnd) == pid {
+        return true;
+    }
+    let mut class = [0u16; 32];
+    let len = unsafe { GetClassNameW(hwnd, &mut class) }.max(0) as usize;
+    if String::from_utf16_lossy(&class[..len]) != "ApplicationFrameWindow" {
+        return false;
+    }
+    let mut found = (pid, false);
+    let _ = unsafe {
+        EnumChildWindows(
+            Some(hwnd),
+            Some(child_of),
+            LPARAM(&mut found as *mut (u32, bool) as isize),
+        )
+    };
+    found.1
+}
+
+/// Can the process be asked to close: does a window speak for it? One
+/// without a window is ended when it is closed.
+#[cfg(windows)]
+pub fn has_window(pid: u32) -> bool {
+    use windows::Win32::Foundation::{HWND, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+
+    unsafe extern "system" fn look(hwnd: HWND, found: LPARAM) -> windows::core::BOOL {
+        // SAFETY: `found` points to the pair that outlives the EnumWindows call.
+        let found = unsafe { &mut *(found.0 as *mut (u32, bool)) };
+        found.1 = speaks_for(hwnd, found.0);
+        (!found.1).into()
+    }
+
+    let mut found = (pid, false);
+    let _ = unsafe { EnumWindows(Some(look), LPARAM(&mut found as *mut (u32, bool) as isize)) };
+    found.1
+}
+
+#[cfg(not(windows))]
+pub fn has_window(_pid: u32) -> bool {
+    false
+}
+
 /// Ask each process to close its windows, give them all `grace` together,
 /// then end whatever still runs. A process without a window cannot be
 /// asked, so it is ended right away.
@@ -923,9 +989,7 @@ pub fn close_processes(
         PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
         PROCESS_TERMINATE,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, PostMessageW, WM_CLOSE};
 
     /// One process being asked, and how many of its windows were.
     struct Ask {
@@ -936,9 +1000,7 @@ pub fn close_processes(
     unsafe extern "system" fn ask_to_close(hwnd: HWND, ask: LPARAM) -> windows::core::BOOL {
         // SAFETY: `ask` points to the `Ask` that outlives the EnumWindows call.
         let ask = unsafe { &mut *(ask.0 as *mut Ask) };
-        let mut owner = 0u32;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
-        if owner == ask.pid
+        if speaks_for(hwnd, ask.pid)
             && unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok()
         {
             ask.windows += 1;
@@ -988,6 +1050,7 @@ pub fn close_processes(
                 exe,
                 how: CloseHow::Failed,
                 error: Some(e.message()),
+                windowless: false,
             }),
         }
     }
@@ -1005,6 +1068,7 @@ pub fn close_processes(
                 exe,
                 how: CloseHow::Closed,
                 error: None,
+                windowless: !asked,
             }
         } else {
             match unsafe { TerminateProcess(h, 1) } {
@@ -1015,6 +1079,7 @@ pub fn close_processes(
                         exe,
                         how: CloseHow::Ended,
                         error: None,
+                        windowless: !asked,
                     }
                 }
                 Err(e) => Closed {
@@ -1022,6 +1087,7 @@ pub fn close_processes(
                     exe,
                     how: CloseHow::Failed,
                     error: Some(e.message()),
+                    windowless: !asked,
                 },
             }
         };
@@ -1063,6 +1129,38 @@ mod tests {
             "{}",
             exe.display()
         );
+    }
+
+    /// Runs on CI only: it starts a process and reads which windows exist,
+    /// which a desktop in use should not have done to it.
+    #[cfg(windows)]
+    #[test]
+    fn a_process_without_a_window_is_ended_at_once_and_named() {
+        use std::os::windows::process::CommandExt;
+        if std::env::var_os("CI").is_none() {
+            return;
+        }
+        let exe = PathBuf::from(system32("PING.EXE"));
+        let mut child = std::process::Command::new(&exe)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        assert!(!has_window(pid));
+        let start = std::time::Instant::now();
+        let closed = close_processes(
+            &[crate::complete::Running { pid, exe }],
+            std::time::Duration::from_secs(30),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!(closed[0].how, crate::complete::CloseHow::Ended);
+        assert!(closed[0].windowless);
+        // Not asked, so the grace is not waited out.
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
     #[test]
