@@ -763,8 +763,9 @@ fn uninstall_batch(
                 // says what is wrong.
                 let already_gone =
                     !g.dry_run && !env.store.is_registered(&app.family_name).unwrap_or(true);
-                run_package(env, app, already_gone, keep, levels, g)
-                    .unwrap_or_else(|e| ProgramRun::stopped_package(app, failed(e)))
+                let mut closed = Vec::new();
+                run_package(env, app, already_gone, keep, levels, g, &mut closed)
+                    .unwrap_or_else(|e| ProgramRun::stopped_package(app, failed(e), &closed))
             }
         };
         runs.push(run);
@@ -945,10 +946,15 @@ impl ProgramRun {
     }
 
     /// A Store app whose removal stopped with an error.
-    fn stopped_package(app: &Package, error: String) -> Self {
+    /// A Store app whose run ended in `error`, after closing `closed`.
+    fn stopped_package(app: &Package, error: String, closed: &[complete::Closed]) -> Self {
+        let mut json = json!({ "kind": "store", "program": app, "command": package_command(app), "error": error });
+        if !closed.is_empty() {
+            json["closed"] = json!(closed);
+        }
         ProgramRun {
             name: app.display_name.clone(),
-            json: json!({ "kind": "store", "program": app, "command": package_command(app), "error": error }),
+            json,
             gone: false,
             found: 0,
             removal: None,
@@ -1444,12 +1450,19 @@ pub(crate) const STORE_APP_WARNING: &str =
      The removal itself cannot be backed up, only the leftovers found after it.";
 
 /// What removing a Store app works with: the package store, the folder the
-/// apps keep their data in, and the scan by name for everything else.
+/// apps keep their data in, the scan by name for everything else, and the
+/// processes the app runs.
 struct StoreEnv<'a> {
     store: &'a dyn PackageStore,
     /// `%LOCALAPPDATA%`, whose `Packages` folder holds the apps' data.
     local_appdata: Option<PathBuf>,
     scan_by_name: fn(&ScanTarget) -> Vec<Leftover>,
+    /// Every running process with a known image.
+    running: &'a dyn Fn() -> Vec<complete::Running>,
+    /// Does the process have a window it can be asked to close through?
+    has_window: &'a dyn Fn(u32) -> bool,
+    /// Close these processes: their windows first, then end them.
+    close: &'a dyn Fn(&[complete::Running]) -> Vec<complete::Closed>,
 }
 
 impl StoreEnv<'static> {
@@ -1458,8 +1471,50 @@ impl StoreEnv<'static> {
             store: &WindowsPackageStore,
             local_appdata: scanner::env_dir("LOCALAPPDATA"),
             scan_by_name: |target| scanner::scan(target, false).items,
+            running: &system::running_processes,
+            has_window: &system::has_window,
+            close: &close_with_grace,
         }
     }
+}
+
+fn close_with_grace(procs: &[complete::Running]) -> Vec<complete::Closed> {
+    system::close_processes(procs, complete::CLOSE_GRACE)
+}
+
+/// Close what runs from a Store app's folder before Windows removes it, the
+/// way a program is closed before its uninstaller: windows are asked first,
+/// a helper without a window is ended. Without this Windows ends them all.
+fn close_app(env: &StoreEnv, app: &Package, g: &Global) -> Vec<complete::Closed> {
+    let picked = complete::app_processes(&(env.running)(), app, std::process::id());
+    if picked.is_empty() {
+        return Vec::new();
+    }
+    if !g.json {
+        let n = picked.len();
+        println!(
+            "Closing {n} running {}.",
+            if n == 1 { "process" } else { "processes" }
+        );
+    }
+    let closed = (env.close)(&picked);
+    if !g.json {
+        for c in &closed {
+            match c.how {
+                complete::CloseHow::Failed => term::warn(&format!(
+                    "could not close {}: {}",
+                    c.exe,
+                    c.error.as_deref().unwrap_or("unknown error")
+                )),
+                _ if c.windowless => println!(
+                    "{}",
+                    term::dim(&format!("ended {}, it has no window", c.exe))
+                ),
+                _ => {}
+            }
+        }
+    }
+    closed
 }
 
 /// The Store apps `uninstall` resolves names against. When Windows cannot
@@ -1519,11 +1574,12 @@ fn uninstall_package(
         return Err(Failure::cancelled("Cancelled.", true).into());
     }
 
-    let run = match run_package(env, app, false, keep, levels, g) {
+    let mut closed = Vec::new();
+    let run = match run_package(env, app, false, keep, levels, g, &mut closed) {
         Ok(run) => run,
         Err(e) => {
             if g.json {
-                let stopped = ProgramRun::stopped_package(app, format!("{e:#}"));
+                let stopped = ProgramRun::stopped_package(app, format!("{e:#}"), &closed);
                 println!("{}", serde_json::to_string_pretty(&stopped.json)?);
                 return Err(exit::reported(e));
             }
@@ -1552,13 +1608,32 @@ fn run_package(
     keep: bool,
     levels: &LevelOpts,
     g: &Global,
+    closed: &mut Vec<complete::Closed>,
 ) -> Result<ProgramRun> {
     let name = &app.display_name;
     let mut json_out = json!({ "kind": "store", "program": app, "command": package_command(app) });
 
     let mut gone = false;
     if g.dry_run {
+        let would_close = complete::app_processes(&(env.running)(), app, std::process::id());
+        // A helper without a window cannot be asked, so it would be ended.
+        let would_end: Vec<&complete::Running> = would_close
+            .iter()
+            .filter(|p| !(env.has_window)(p.pid))
+            .collect();
         if !g.json {
+            if !would_close.is_empty() {
+                println!("{}", term::dim("would close"));
+                for p in &would_close {
+                    let ended = would_end.iter().any(|e| e.pid == p.pid);
+                    let note = if ended {
+                        ", no window, so it is ended"
+                    } else {
+                        ""
+                    };
+                    println!("  {}{note}", p.exe.display());
+                }
+            }
             println!(
                 "{}",
                 term::dim(
@@ -1566,6 +1641,8 @@ fn run_package(
                 )
             );
         }
+        json_out["would_end"] = json!(would_end);
+        json_out["would_close"] = json!(would_close);
     } else if already_gone {
         if !g.json {
             println!("{name} is no longer registered, so it was not removed again.");
@@ -1574,7 +1651,9 @@ fn run_package(
         json_out["uninstaller"] = json!("not started, no longer registered");
         json_out["still_installed"] = json!(false);
     } else {
-        gone = remove_package(env.store, app)? == RemovalOutcome::Removed;
+        let removed = remove_package(env.store, app, &mut || *closed = close_app(env, app, g));
+        json_out["closed"] = json!(closed);
+        gone = removed? == RemovalOutcome::Removed;
         json_out["uninstaller"] = json!("removed by Windows");
         json_out["still_installed"] = json!(!gone);
         if !g.json {
@@ -1663,12 +1742,19 @@ pub(crate) fn store_app_leftovers(
 }
 
 /// Remove a Store app after asking the guard once more against a fresh
-/// listing: a refused app never reaches the removal.
-pub(crate) fn remove_package(store: &dyn PackageStore, app: &Package) -> Result<RemovalOutcome> {
+/// listing: a refused app never reaches the removal, and `before` runs only
+/// for one that may go.
+pub(crate) fn remove_package(
+    store: &dyn PackageStore,
+    app: &Package,
+    before: &mut dyn FnMut(),
+) -> Result<RemovalOutcome> {
     let installed = store.list()?;
     if let Err(reason) = package_guard(app, &installed) {
         bail!("{}", kept(app, &reason));
     }
+    // Only an app that may go is closed.
+    before();
     store.remove(app)
 }
 
@@ -3537,6 +3623,7 @@ mod tests {
                     exe: r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe".to_string(),
                     how: complete::CloseHow::Ended,
                     error: None,
+                    windowless: false,
                 }]
             },
             would_close: if dry_run {
@@ -3710,7 +3797,167 @@ mod tests {
                     true,
                 )]
             },
+            running: &nothing_runs,
+            has_window: &|_| true,
+            close: &nothing_closes,
         }
+    }
+
+    fn nothing_runs() -> Vec<complete::Running> {
+        Vec::new()
+    }
+
+    fn nothing_closes(_: &[complete::Running]) -> Vec<complete::Closed> {
+        Vec::new()
+    }
+
+    /// The app's own process, a helper of its own without a window, and a
+    /// process of another program.
+    fn notes_running() -> Vec<complete::Running> {
+        [
+            (100, r"C:\Program Files\WindowsApps\Vendor.Notes\Notes.exe"),
+            (
+                101,
+                r"C:\Program Files\WindowsApps\Vendor.Notes\sync\NotesSync.exe",
+            ),
+            (200, r"C:\Program Files\Other\other.exe"),
+        ]
+        .into_iter()
+        .map(|(pid, exe)| complete::Running {
+            pid,
+            exe: PathBuf::from(exe),
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_store_app_is_closed_before_windows_removes_it() {
+        let notes = package("Vendor.Notes", "Notes");
+        let store = FakePackageStore::new(notes_and_paint());
+        // The pids asked to close, and how many removals had run by then.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let close = |procs: &[complete::Running]| {
+            let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+            asked
+                .borrow_mut()
+                .push((pids, store.removed.borrow().len()));
+            procs
+                .iter()
+                .map(|p| complete::Closed {
+                    pid: p.pid,
+                    exe: p.exe.display().to_string(),
+                    how: complete::CloseHow::Closed,
+                    error: None,
+                    windowless: p.pid == 101,
+                })
+                .collect()
+        };
+        let env = StoreEnv {
+            scan_by_name: |_| Vec::new(),
+            running: &notes_running,
+            close: &close,
+            ..fake_env(&store, None)
+        };
+        let run = run_package(
+            &env,
+            &notes,
+            false,
+            false,
+            &LevelOpts::default(),
+            &unattended(false, true),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(*asked.borrow(), [(vec![100, 101], 0)]);
+        assert_eq!(store.removed.borrow().len(), 1);
+        let closed = &run.json["closed"];
+        assert_eq!(closed[0]["pid"], 100);
+        assert!(closed[0].get("windowless").is_none(), "{closed}");
+        assert_eq!(closed[1]["windowless"], true, "{closed}");
+    }
+
+    #[test]
+    fn a_failed_removal_still_says_what_was_closed() {
+        let notes = package("Vendor.Notes", "Notes");
+        let mut store = FakePackageStore::new(notes_and_paint());
+        store.fail_with = Some("in use".to_string());
+        let close = |procs: &[complete::Running]| {
+            procs
+                .iter()
+                .map(|p| complete::Closed {
+                    pid: p.pid,
+                    exe: p.exe.display().to_string(),
+                    how: complete::CloseHow::Closed,
+                    error: None,
+                    windowless: false,
+                })
+                .collect()
+        };
+        let env = StoreEnv {
+            scan_by_name: |_| Vec::new(),
+            running: &notes_running,
+            close: &close,
+            ..fake_env(&store, None)
+        };
+        let mut closed = Vec::new();
+        let Err(err) = run_package(
+            &env,
+            &notes,
+            false,
+            false,
+            &LevelOpts::default(),
+            &unattended(false, true),
+            &mut closed,
+        ) else {
+            panic!("the removal was to fail");
+        };
+        let stopped = ProgramRun::stopped_package(&notes, format!("{err:#}"), &closed);
+        let pids: Vec<u64> = stopped.json["closed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["pid"].as_u64().unwrap())
+            .collect();
+        assert_eq!(pids, [100, 101]);
+        assert!(stopped.json["error"].as_str().unwrap().contains("in use"));
+        // Nothing closed, nothing to say.
+        let quiet = ProgramRun::stopped_package(&notes, "refused".to_string(), &[]);
+        assert!(quiet.json.get("closed").is_none());
+    }
+
+    #[test]
+    fn a_dry_run_names_what_it_would_close_and_closes_nothing() {
+        let notes = package("Vendor.Notes", "Notes");
+        let store = FakePackageStore::new(notes_and_paint());
+        let env = StoreEnv {
+            scan_by_name: |_| Vec::new(),
+            running: &notes_running,
+            has_window: &|pid| pid == 100,
+            close: &|_| panic!("a dry run closes nothing"),
+            ..fake_env(&store, None)
+        };
+        let run = run_package(
+            &env,
+            &notes,
+            false,
+            false,
+            &LevelOpts::default(),
+            &unattended(true, true),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(store.removed.borrow().is_empty());
+        let pids = |key: &str| -> Vec<u64> {
+            run.json[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|p| p["pid"].as_u64().unwrap())
+                .collect()
+        };
+        assert_eq!(pids("would_close"), [100, 101]);
+        // The helper has no window to be asked through.
+        assert_eq!(pids("would_end"), [101]);
     }
 
     /// A stand-in LocalAppData, removed when the test ends, passed or failed.
@@ -3775,7 +4022,7 @@ mod tests {
         let env = fake_env(&store, None);
 
         for app in [&engine, &windows_store] {
-            let err = remove_package(&store, app).unwrap_err();
+            let err = remove_package(&store, app, &mut || panic!("closed")).unwrap_err();
             assert!(format!("{err:#}").contains(" stays: "), "{err:#}");
         }
         // Even a batch that skipped planning stops at the removal.
@@ -3807,11 +4054,11 @@ mod tests {
         let levels = LevelOpts::default();
         let notes = package("Vendor.Notes", "Notes");
 
-        let Err(err) = run_package(&env, &notes, false, true, &levels, &g) else {
+        let Err(err) = run_package(&env, &notes, false, true, &levels, &g, &mut Vec::new()) else {
             panic!("the removal fails");
         };
         assert!(format!("{err:#}").contains("0x80073CFA"), "{err:#}");
-        let stopped = ProgramRun::stopped_package(&notes, format!("{err:#}"));
+        let stopped = ProgramRun::stopped_package(&notes, format!("{err:#}"), &[]);
         assert!(stopped.failed(false));
         assert_eq!(stopped.json["kind"], "store");
         assert_eq!(stopped.json["program"]["family_name"], notes.family_name);
@@ -3839,7 +4086,16 @@ mod tests {
         let env = fake_env(&store, None);
         let g = unattended(false, false);
         let notes = package("Vendor.Notes", "Notes");
-        let run = run_package(&env, &notes, false, false, &LevelOpts::default(), &g).unwrap();
+        let run = run_package(
+            &env,
+            &notes,
+            false,
+            false,
+            &LevelOpts::default(),
+            &g,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert!(!run.gone);
         assert!(run.failed(false));
         assert_eq!(run.json["still_installed"], true);
@@ -3869,6 +4125,7 @@ mod tests {
             true,
             &LevelOpts::default(),
             &unattended(false, false),
+            &mut Vec::new(),
         )
         .unwrap();
         assert_eq!(*store.removed.borrow(), [notes.full_name.as_str()]);
@@ -3903,6 +4160,7 @@ mod tests {
             false,
             &LevelOpts::default(),
             &unattended(false, true),
+            &mut Vec::new(),
         )
         .unwrap();
         assert!(!folder.exists());
@@ -3926,6 +4184,7 @@ mod tests {
             true,
             &LevelOpts::default(),
             &unattended(false, false),
+            &mut Vec::new(),
         )
         .unwrap();
         let mut keys: Vec<&str> = run
@@ -3939,6 +4198,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "closed",
                 "command",
                 "kind",
                 "may_come_back",
@@ -3976,6 +4236,7 @@ mod tests {
             true,
             &LevelOpts::default(),
             &unattended(false, false),
+            &mut Vec::new(),
         )
         .unwrap();
         assert!(run.gone);

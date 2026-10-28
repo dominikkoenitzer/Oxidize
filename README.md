@@ -367,18 +367,20 @@ links, also the ones a browser hands to the program), file types and
 open-with entries whose command runs from the program's folder, shortcuts
 that lead into it whatever they are called, its folders in your temp folder,
 other uninstall entries left pointing into it, and the vendor's own key in
-your registry when nothing else of theirs is installed. Windows' own locations
-are never touched, and a vendor folder that also holds other products is never
-removed as a whole. One that held nothing but the program, folder or key, goes
-with it.
+your registry when nothing else of theirs is installed, Store apps included.
+Windows' own locations are never touched, and a vendor folder that also holds
+other products is never removed as a whole. One that held nothing but the
+program, folder or key, goes with it.
 
 `oxidize uninstall` also removes Store apps, by name or family name, alone or
 in a batch with programs. Windows removes the app for the current user only,
 and its data with it; reinstalling means the Store. That removal cannot be
-backed up. A data folder left in `%LOCALAPPDATA%\Packages` afterwards is a
-high-confidence leftover, name matches elsewhere are medium at most, and both
-are backed up like any other leftover. A protected app is never removed, and
-Windows may bring back an app it installs for every new account.
+backed up. What runs from the app's folder is closed first, as for a program,
+and a helper without a window is named when it is ended. A data folder left in
+`%LOCALAPPDATA%\Packages` afterwards is a high-confidence leftover, name
+matches elsewhere are medium at most, and both are backed up like any other
+leftover. A protected app is never removed, and Windows may bring back an app
+it installs for every new account.
 
 ## Build from source
 

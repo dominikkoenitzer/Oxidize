@@ -3649,6 +3649,7 @@ mod tests {
                 exe: r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe".to_string(),
                 how: CloseHow::Closed,
                 error: None,
+                windowless: false,
             }],
             would_close: Vec::new(),
             vendor: VendorStep::Skip {

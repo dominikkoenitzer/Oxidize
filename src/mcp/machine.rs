@@ -103,8 +103,8 @@ impl Remove for Remover {
         uninstall::wait_for_completion(program, plan, ENTRY_WAIT)
     }
 
-    fn remove_app(&self, app: &Package) -> Result<bool> {
-        Ok(commands::remove_package(&WindowsPackageStore, app)? == RemovalOutcome::Removed)
+    fn remove_app(&self, app: &Package, before: &mut dyn FnMut()) -> Result<bool> {
+        Ok(commands::remove_package(&WindowsPackageStore, app, before)? == RemovalOutcome::Removed)
     }
 
     fn close(&self, procs: &[Running]) -> Vec<Closed> {
