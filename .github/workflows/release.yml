@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The download page serves site/skill/oxidize.zip as it is in the repo, so it has to hold
+      # exactly the skill folder beside it.
+      - name: Skill zip
+        shell: pwsh
+        run: ./scripts/skill-zip.ps1 -Rev HEAD -Check
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
