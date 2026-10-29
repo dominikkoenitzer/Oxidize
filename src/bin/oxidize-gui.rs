@@ -2342,7 +2342,7 @@ fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) 
     job.append(
         &count.to_string(),
         6.0,
-        egui::TextFormat::simple(font, t.weak),
+        egui::TextFormat::simple(font, color),
     );
     let galley = ui.painter().layout_job(job);
     let size = egui::vec2(galley.size().x + 22.0, 26.0);
@@ -4924,6 +4924,71 @@ mod tests {
             }
             _ => false,
         })
+    }
+
+    /// The contrast ratio of two opaque colours, as WCAG counts it.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let linear = |v: u8| {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+        };
+        let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Every text colour drawn by `draw`, with the fill of the shape it sits on
+    /// laid over `under`.
+    fn text_on_fill(draw: impl FnMut(&mut egui::Ui), under: Color32) -> Vec<(Color32, Color32)> {
+        let ctx = egui::Context::default();
+        let mut draw = draw;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(ui));
+        output.textures_delta.clear();
+        let mut fill = under;
+        let mut pairs = Vec::new();
+        for clipped in &output.shapes {
+            match &clipped.shape {
+                egui::Shape::Rect(r) if r.fill.a() > 0 => {
+                    let a = f32::from(r.fill.a()) / 255.0;
+                    let mix =
+                        |f: u8, u: u8| (f32::from(f) + f32::from(u) * (1.0 - a)).round() as u8;
+                    fill = Color32::from_rgb(
+                        mix(r.fill.r(), under.r()),
+                        mix(r.fill.g(), under.g()),
+                        mix(r.fill.b(), under.b()),
+                    );
+                }
+                egui::Shape::Text(text) => {
+                    for section in &text.galley.job.sections {
+                        pairs.push((section.format.color, fill));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pairs
+    }
+
+    #[test]
+    fn the_selected_quick_filter_is_readable_in_both_themes() {
+        for dark in [false, true] {
+            let t = Tint::of(dark);
+            let pairs = text_on_fill(|ui| _ = chip(ui, &t, true, "All", 12), t.base);
+            assert!(!pairs.is_empty());
+            for (text, fill) in pairs {
+                let ratio = contrast(text, fill);
+                assert!(
+                    ratio >= 4.5,
+                    "dark {dark}: {text:?} on {fill:?} is {ratio:.2}"
+                );
+            }
+        }
     }
 
     #[test]
