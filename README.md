@@ -109,6 +109,8 @@ temporary files, dumps, caches and Recycle Bin items do not come back.
 Folders you list in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line,
 are never cleaned, with everything in them, temp folders included. `%TEMP%`
 and other variables work in the list, and the Clean up tab edits it.
+A line that is not a full path once variables are expanded, or that names a
+whole drive, protects nothing; it stays in the file but not in the list.
 `oxidize protect` prints the list, and `oxidize protect --check <path>` says
 whether that path is on it or inside a folder that is, and which entry
 covers it.

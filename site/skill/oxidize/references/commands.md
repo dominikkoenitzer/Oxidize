@@ -133,7 +133,7 @@ Counts what each category holds, from the files themselves, and what stays and w
 
 `oxidize protect [--check PATH]`
 
-Reads only. Without `--check` it prints the protected list; with `--json`, its `file` and `entries`.
+Reads only. Without `--check` it prints the protected list; with `--json`, its `file` and `entries`. A line of the file that is not a full path once `%VAR%` references are expanded, or that names a whole drive, protects nothing and is not among the entries.
 
 - `--check PATH`: whether `PATH` is listed itself or lies inside a listed folder. `%VAR%` references are expanded and a relative path is taken from the current folder. The comparison is by the full real name, so a folder reached through a junction answers by either name, and `C:\Tools\wt` is not covered by `C:\Tools\wt-old`.
 - `--json` prints `path`, `resolved` (the full path as compared, lower case), `protected`, `by` (the entry as written that covers it, or `null`) and `holds` (entries inside it; such a folder is cleaned but never removed as a whole). The exit code is 0 either way.

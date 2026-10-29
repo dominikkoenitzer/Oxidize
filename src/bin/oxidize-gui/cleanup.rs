@@ -187,10 +187,19 @@ impl Cleanup {
         if entry.is_empty() || self.busy {
             return;
         }
-        if self.protected.add(&entry) {
-            self.save_protected();
-        }
-        self.new_protected.clear();
+        // A refused folder stays in the field, so it can be put right.
+        let why = match self.protected.try_add(&entry) {
+            Ok(()) => {
+                self.save_protected();
+                self.new_protected.clear();
+                return;
+            }
+            Err(protect::NotAdded::Empty) => return,
+            Err(protect::NotAdded::Listed) => "Already protected.",
+            Err(protect::NotAdded::DriveRoot) => "A whole drive cannot be protected.",
+            Err(protect::NotAdded::NotFullPath) => "Not a full path, so it would protect nothing.",
+        };
+        self.protect_error = Some(why.to_string());
     }
 
     fn remove_protected(&mut self, entry: &str) {
@@ -968,6 +977,30 @@ mod tests {
         assert!(state.protected.is_empty());
         state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
         state.remove_protected(r"C:\Example Keep");
+        assert_eq!(state.protected.entries(), [r"C:\Example Keep"]);
+    }
+
+    #[test]
+    fn a_folder_the_list_refuses_stays_in_the_field_with_the_reason() {
+        let mut state = tab();
+        state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
+        for (typed, why) in [
+            (
+                r"Example\Keep",
+                "Not a full path, so it would protect nothing.",
+            ),
+            (r"C:\", "A whole drive cannot be protected."),
+            (r"c:\example keep\", "Already protected."),
+        ] {
+            // Refused by the list itself, so nothing is saved to the
+            // user's file.
+            assert!(!state.protected.clone().add(typed), "{typed}");
+            state.new_protected = typed.to_string();
+            state.protect_error = None;
+            state.add_protected();
+            assert_eq!(state.new_protected, typed);
+            assert_eq!(state.protect_error.as_deref(), Some(why));
+        }
         assert_eq!(state.protected.entries(), [r"C:\Example Keep"]);
     }
 
