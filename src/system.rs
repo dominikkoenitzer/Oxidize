@@ -951,7 +951,7 @@ fn speaks_for(hwnd: windows::Win32::Foundation::HWND, pid: u32) -> bool {
 }
 
 /// Can the process be asked to close: does a window speak for it? One
-/// without a window is ended when it is closed.
+/// without a window cannot be, and is left running.
 #[cfg(windows)]
 pub fn has_window(pid: u32) -> bool {
     use windows::Win32::Foundation::{HWND, LPARAM};
@@ -974,20 +974,21 @@ pub fn has_window(_pid: u32) -> bool {
     false
 }
 
-/// Ask each process to close its windows, give them all `grace` together,
-/// then end whatever still runs. A process without a window cannot be
-/// asked, so it is ended right away.
+/// Ask each process to close its windows and give them all `grace`
+/// together. Nothing is ended: a process still running after that, or one
+/// without a window to be asked through, is left running and named.
 #[cfg(windows)]
 pub fn close_processes(
     procs: &[crate::complete::Running],
     grace: std::time::Duration,
 ) -> Vec<crate::complete::Closed> {
     use crate::complete::{CloseHow, Closed};
-    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, HWND, LPARAM, WAIT_OBJECT_0, WPARAM,
+    };
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject,
-        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-        PROCESS_TERMINATE,
+        OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, PostMessageW, WM_CLOSE};
 
@@ -1012,7 +1013,8 @@ pub fn close_processes(
     let mut handles = Vec::new();
     for p in procs {
         let exe = p.exe.display().to_string();
-        let access = PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+        // No right to end it is asked for, so it cannot be ended here.
+        let access = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
         match unsafe { OpenProcess(access, false, p.pid) } {
             Ok(h) => {
                 // The id may belong to another program by now: Windows
@@ -1045,6 +1047,14 @@ pub fn close_processes(
                 };
                 handles.push((p.pid, exe, h, ask.windows > 0));
             }
+            // It exited between the listing and now.
+            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => out.push(Closed {
+                pid: p.pid,
+                exe,
+                how: CloseHow::Closed,
+                error: None,
+                windowless: false,
+            }),
             Err(e) => out.push(Closed {
                 pid: p.pid,
                 exe,
@@ -1062,37 +1072,18 @@ pub fn close_processes(
             std::time::Duration::ZERO
         };
         let exited = unsafe { WaitForSingleObject(h, left.as_millis() as u32) } == WAIT_OBJECT_0;
-        let closed = if exited {
-            Closed {
-                pid,
-                exe,
-                how: CloseHow::Closed,
-                error: None,
-                windowless: !asked,
-            }
-        } else {
-            match unsafe { TerminateProcess(h, 1) } {
-                Ok(()) => {
-                    let _ = unsafe { WaitForSingleObject(h, 2000) };
-                    Closed {
-                        pid,
-                        exe,
-                        how: CloseHow::Ended,
-                        error: None,
-                        windowless: !asked,
-                    }
-                }
-                Err(e) => Closed {
-                    pid,
-                    exe,
-                    how: CloseHow::Failed,
-                    error: Some(e.message()),
-                    windowless: !asked,
-                },
-            }
-        };
         let _ = unsafe { CloseHandle(h) };
-        out.push(closed);
+        out.push(Closed {
+            pid,
+            exe,
+            how: if exited {
+                CloseHow::Closed
+            } else {
+                CloseHow::Running
+            },
+            error: None,
+            windowless: !asked,
+        });
     }
     out
 }
@@ -1135,7 +1126,7 @@ mod tests {
     /// which a desktop in use should not have done to it.
     #[cfg(windows)]
     #[test]
-    fn a_process_without_a_window_is_ended_at_once_and_named() {
+    fn a_process_without_a_window_is_left_running_and_named() {
         use std::os::windows::process::CommandExt;
         if std::env::var_os("CI").is_none() {
             return;
@@ -1154,13 +1145,26 @@ mod tests {
             &[crate::complete::Running { pid, exe }],
             std::time::Duration::from_secs(30),
         );
+        let alive = child.try_wait().unwrap().is_none();
         let _ = child.kill();
         let _ = child.wait();
+        assert!(alive, "the process was ended");
         assert_eq!(closed.len(), 1, "{closed:?}");
-        assert_eq!(closed[0].how, crate::complete::CloseHow::Ended);
+        assert_eq!(closed[0].how, crate::complete::CloseHow::Running);
         assert!(closed[0].windowless);
         // Not asked, so the grace is not waited out.
         assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn closing_never_ends_a_process() {
+        let source = include_str!("system.rs");
+        for call in [
+            concat!("Terminate", "Process"),
+            concat!("PROCESS_", "TERMINATE"),
+        ] {
+            assert!(!source.contains(call), "{call} is back in system.rs");
+        }
     }
 
     #[test]
