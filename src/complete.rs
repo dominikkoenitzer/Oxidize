@@ -18,7 +18,7 @@ use crate::safety::{DeletionOutcome, SafetyContext};
 use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
 
-/// How long a program gets to close its windows before it is ended.
+/// How long a program gets to close its windows before the flow stops.
 pub const CLOSE_GRACE: Duration = Duration::from_secs(3);
 
 /// The longest the one-shot flow waits for a vendor uninstaller that keeps
@@ -39,9 +39,9 @@ pub enum CloseHow {
     /// It closed its windows and exited by itself.
     Closed,
     /// It was still running after the grace period, or had no window to be
-    /// asked through, and was ended.
-    Ended,
-    /// It could not be ended, usually for want of administrator rights.
+    /// asked through. It is left running and the flow stops.
+    Running,
+    /// It could not be asked, usually for want of administrator rights.
     Failed,
 }
 
@@ -52,10 +52,35 @@ pub struct Closed {
     pub how: CloseHow,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// It had no window, so it could not be asked and was ended at once: a
-    /// helper running in the background.
+    /// It had no window, so it could not be asked to close: a helper
+    /// running in the background.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub windowless: bool,
+}
+
+/// The one error for processes that did not close, or None when all did.
+/// Nothing is ended by force, so the flow stops on it.
+pub fn still_running(closed: &[Closed]) -> Option<String> {
+    let names: Vec<&str> = closed
+        .iter()
+        .filter(|c| c.how != CloseHow::Closed)
+        .map(|c| {
+            Path::new(&c.exe)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&c.exe)
+        })
+        .collect();
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(format!(
+            "{one} is still running, so nothing was removed. Close it and try again."
+        )),
+        many => Some(format!(
+            "{} are still running, so nothing was removed. Close them and try again.",
+            many.join(", ")
+        )),
+    }
 }
 
 /// The folders a program's processes may run from: its install folder and
@@ -231,7 +256,7 @@ pub fn verdict(still_installed: bool, rescan: &ScanReport, level: Confidence) ->
 }
 
 /// Close the processes that run from the program's folders: ask each to
-/// close its windows, wait up to `grace`, then end what is still running.
+/// close its windows and wait up to `grace`. What stays is left running.
 pub fn close_processes(dirs: &[PathBuf], grace: Duration) -> Vec<Closed> {
     if dirs.is_empty() {
         return Vec::new();
@@ -250,7 +275,7 @@ pub trait Pc {
     fn still_installed(&self, program: &Program) -> bool;
     /// Every running process with a known image.
     fn running(&self) -> Vec<Running>;
-    /// Close these processes: their windows first, then end them.
+    /// Ask these processes to close through their windows; none is ended.
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
     /// Run the vendor's uninstaller; returns how it went.
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<Ran>;
@@ -373,6 +398,14 @@ pub fn remove_completely(
 
     if !picked.is_empty() {
         out.closed = pc.close(&picked);
+        if let Some(e) = still_running(&out.closed) {
+            // Its files are in use, and it is never ended by force: neither
+            // the uninstaller nor the removal starts under it.
+            out.error = Some(e);
+            out.verdict.still_installed = true;
+            out.seconds = start.elapsed().as_secs_f64();
+            return out;
+        }
     }
 
     let mut installed = true;
@@ -614,6 +647,8 @@ mod tests {
         vendor_takes: Vec<String>,
         /// The vendor's uninstaller is still running when the wait ends.
         never_ends: bool,
+        /// Processes that stay when they are asked to close.
+        stays: Vec<u32>,
         /// Items a scan finds only once the item at the path is gone.
         shows_once_gone: RefCell<Vec<(String, Leftover)>>,
         /// Backups made so far.
@@ -629,6 +664,7 @@ mod tests {
                 stuck: Vec::new(),
                 vendor_takes: Vec::new(),
                 never_ends: false,
+                stays: Vec::new(),
                 shows_once_gone: RefCell::new(Vec::new()),
                 backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
@@ -710,7 +746,11 @@ mod tests {
                 .map(|p| Closed {
                     pid: p.pid,
                     exe: p.exe.display().to_string(),
-                    how: CloseHow::Closed,
+                    how: if self.stays.contains(&p.pid) {
+                        CloseHow::Running
+                    } else {
+                        CloseHow::Closed
+                    },
                     error: None,
                     windowless: false,
                 })
@@ -813,6 +853,51 @@ mod tests {
         assert!(out.complete(), "{out:?}");
         // The medium item was found but never meant to go.
         assert_eq!(out.verdict.below_level, 1);
+    }
+
+    #[test]
+    fn a_process_that_stays_stops_the_flow_before_anything_runs_or_goes() {
+        // Skipped uninstaller and one that would run alike.
+        for p in [program(Hive::CurrentUser), program(Hive::LocalMachine)] {
+            let mut pc = FakePc::new(per_user_footprint());
+            pc.stays = vec![100];
+            let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+            assert_eq!(pc.calls(), ["scan true", "close 100"]);
+            assert_eq!(out.closed[0].how, CloseHow::Running);
+            assert_eq!(
+                out.error.as_deref(),
+                Some(
+                    "player.exe is still running, so nothing was removed. Close it and try again."
+                )
+            );
+            assert!(out.verdict.still_installed, "{out:?}");
+            assert!(out.removal.is_none(), "{out:?}");
+            assert!(!out.complete(), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn processes_that_stay_are_named_in_one_sentence() {
+        let closed = |how: CloseHow, exe: &str| Closed {
+            pid: 1,
+            exe: exe.to_string(),
+            how,
+            error: None,
+            windowless: false,
+        };
+        assert_eq!(
+            still_running(&[closed(CloseHow::Closed, r"C:\a\a.exe")]),
+            None
+        );
+        assert_eq!(
+            still_running(&[
+                closed(CloseHow::Running, r"C:\a\tray.exe"),
+                closed(CloseHow::Closed, r"C:\a\a.exe"),
+                closed(CloseHow::Failed, r"C:\a\svc.exe"),
+            ])
+            .as_deref(),
+            Some("tray.exe, svc.exe are still running, so nothing was removed. Close them and try again.")
+        );
     }
 
     const SHORTCUT: &str =

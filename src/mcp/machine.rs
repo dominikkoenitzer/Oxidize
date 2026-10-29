@@ -103,7 +103,7 @@ impl Remove for Remover {
         uninstall::wait_for_completion(program, plan, ENTRY_WAIT)
     }
 
-    fn remove_app(&self, app: &Package, before: &mut dyn FnMut()) -> Result<bool> {
+    fn remove_app(&self, app: &Package, before: &mut dyn FnMut() -> Result<()>) -> Result<bool> {
         Ok(commands::remove_package(&WindowsPackageStore, app, before)? == RemovalOutcome::Removed)
     }
 

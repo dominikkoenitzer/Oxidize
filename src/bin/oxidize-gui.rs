@@ -1092,7 +1092,7 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
     let closed = out
         .closed
         .iter()
-        .filter(|c| c.how != CloseHow::Failed)
+        .filter(|c| c.how == CloseHow::Closed)
         .count();
     if closed > 0 {
         lines.push(format!("Closed {}", running_processes(closed)));
@@ -1134,6 +1134,8 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         )
     } else if out.complete() {
         format!("{name}: nothing left.")
+    } else if let Some(e) = &out.error {
+        e.clone()
     } else if out.verdict.still_installed {
         format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running."
@@ -3904,6 +3906,21 @@ mod tests {
             lines.last().map(String::as_str),
             Some("Example Player: 1 items are still there.")
         );
+    }
+
+    #[test]
+    fn a_process_that_stays_is_named_and_never_counted_closed() {
+        let mut out = finished(None);
+        out.closed[0].how = CloseHow::Running;
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = complete::still_running(&out.closed);
+        let lines = complete_log("Example Player", &out, false);
+        let stop = "player.exe is still running, so nothing was removed. Close it and try again.";
+        assert!(!lines.iter().any(|l| l.starts_with("Closed")), "{lines:?}");
+        assert_eq!(lines.last().map(String::as_str), Some(stop));
+        assert_eq!(complete_status("Example Player", &out, false), stop);
     }
 
     #[test]
