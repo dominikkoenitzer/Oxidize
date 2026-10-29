@@ -206,7 +206,7 @@ Without `--yes`, or with `--dry-run`:
   "chosen": [category], "chosen_folders": [path], "chosen_bytes": number }
 ```
 
-`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin" }`. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"failed"`.
+`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin" }`. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"repository"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"failed"`.
 
 With `--yes`:
 
