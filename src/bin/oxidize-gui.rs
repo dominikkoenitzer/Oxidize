@@ -219,8 +219,8 @@ fn restore_backup(name: &str, dry_run: bool) -> Result<Vec<RestoreItem>, String>
 
 impl OxidizeApp {
     /// The window's state before anything is loaded: no programs, the
-    /// default settings, nothing running.
-    fn blank() -> Self {
+    /// default settings, nothing running, and `cleanup` as the Clean up tab.
+    fn blank(cleanup: cleanup::Cleanup) -> Self {
         let (tx, rx) = channel();
         OxidizeApp {
             programs: Vec::new(),
@@ -230,7 +230,7 @@ impl OxidizeApp {
             checked: Vec::new(),
             uninstalled: None,
             complete: None,
-            cleanup: cleanup::Cleanup::new(),
+            cleanup,
             tab: Tab::Programs,
             filter: String::new(),
             quick: QuickFilter::All,
@@ -258,7 +258,7 @@ impl OxidizeApp {
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_style(&cc.egui_ctx);
-        let mut app = OxidizeApp::blank();
+        let mut app = OxidizeApp::blank(cleanup::Cleanup::new());
         app.elevated = safety::is_elevated();
         app.jobs = 1;
         app.status = LOADING.to_string();
@@ -1313,6 +1313,12 @@ impl OxidizeApp {
         // while a removal runs would act on what it is still changing, and
         // a restart would end it halfway.
         if self.busy() {
+            return;
+        }
+        // An unreadable protected list stands in as an empty one, which
+        // would protect nothing.
+        if let Some(why) = self.cleanup.refusal(&action) {
+            self.status = why;
             return;
         }
         {
@@ -3472,8 +3478,47 @@ mod tests {
     use super::*;
     use oxidize::model::{Hive, RegistrySource, RegistryView};
 
+    /// The window with a stand-in protected list, so no test reads the
+    /// user's own.
     fn app() -> OxidizeApp {
-        OxidizeApp::blank()
+        OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())))
+    }
+
+    fn stand_in_list() -> std::path::PathBuf {
+        std::env::temp_dir().join("oxidize-gui-test-protected.txt")
+    }
+
+    #[test]
+    fn the_tests_keep_to_a_stand_in_protected_list() {
+        assert_eq!(app().cleanup.list_file, Ok(stand_in_list()));
+    }
+
+    #[test]
+    fn nothing_is_cleaned_while_the_protected_list_cannot_be_read() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.cleanup.unreadable =
+            Some(r"reading C:\Example\protected.txt: stream did not contain valid UTF-8".into());
+        let analysis = clean::Analysis {
+            findings: Vec::new(),
+            elevated: false,
+            recycle_bin_days: clean::RECYCLE_DAYS,
+            protected: Vec::new(),
+        };
+        app.cleanup.analysis = Some((clean::Places::default(), analysis));
+        app.cleanup.slate.found = Some(Vec::new());
+        let why = r"Cannot clean up: reading C:\Example\protected.txt: stream did not contain valid UTF-8";
+        for dry_run in [false, true] {
+            app.dry_run = dry_run;
+            for action in [Action::Clean(clean::Choice::default()), Action::ClearTraces] {
+                app.status.clear();
+                app.act(&ctx, action);
+                assert!(app.confirm.is_none());
+                assert_eq!(app.status, why);
+            }
+        }
+        assert!(app.log.is_empty(), "{:?}", app.log);
+        assert_eq!(app.jobs, 0);
     }
 
     #[test]
@@ -3568,7 +3613,7 @@ mod tests {
         app.job_done();
         assert_eq!(app.close_step(false), Some(egui::ViewportCommand::Close));
         // Nothing running: closing is closing.
-        let mut idle = OxidizeApp::blank();
+        let mut idle = OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())));
         assert_eq!(idle.close_step(true), None);
     }
 
