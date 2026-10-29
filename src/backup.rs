@@ -696,8 +696,15 @@ pub fn move_path(from: &Path, to: &Path) -> Result<()> {
     if fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    copy_recursive(from, to)
-        .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    let to_was_there = fs::symlink_metadata(to).is_ok();
+    if let Err(e) = copy_recursive(from, to) {
+        // A copy that stopped halfway is no copy; left there it would stand in for the original.
+        if !to_was_there {
+            let _ = remove_path(to);
+        }
+        return Err(anyhow::Error::new(e))
+            .with_context(|| format!("copying {} to {}", from.display(), to.display()));
+    }
     if let Err(e) = remove_path(from) {
         if !still_whole(from, to) {
             return Err(anyhow::Error::new(PartialMove {
@@ -946,6 +953,41 @@ mod tests {
             uninstall_publisher("[HKEY_CURRENT_USER\\Software]\r\n"),
             None
         );
+    }
+
+    #[test]
+    fn a_copy_that_stops_halfway_is_not_left_behind() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = std::env::temp_dir().join("oxidize_halfway_copy_test");
+        let _cleanup = TestCleanup(vec![root.clone()]);
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::write(src.join("z.txt"), "last").unwrap();
+        // No sharing at all: the rename fails on it, and so does the copy, after `a.txt`.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src.join("z.txt"))
+            .unwrap();
+        let dst = root.join("dst");
+
+        let err = move_path(&src, &dst).unwrap_err();
+        assert!(err.downcast_ref::<PartialMove>().is_none(), "{err:#}");
+        assert!(!dst.exists());
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        // A folder that was there before the copy is not the copy's to take.
+        let earlier = root.join("earlier");
+        fs::create_dir_all(&earlier).unwrap();
+        fs::write(earlier.join("kept.txt"), "kept").unwrap();
+        move_path(&src, &earlier).unwrap_err();
+        assert_eq!(
+            fs::read_to_string(earlier.join("kept.txt")).unwrap(),
+            "kept"
+        );
+        drop(held);
+        assert_eq!(fs::read_to_string(src.join("z.txt")).unwrap(), "last");
     }
 
     #[test]
