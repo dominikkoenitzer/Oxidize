@@ -22,7 +22,7 @@ A run that fails before it has a result prints one object instead:
 | `incomplete` | 4 | an item failed or something is left |
 | `cancelled` | 5 | a question was answered no, `--json` ran without `-y`, or the Windows prompt of `--elevate` was declined |
 
-A run that already printed its result prints no error object. It only exits with the code from this table: an uninstall that leaves the program installed (3), a removal or restore with a failed item (4), a question answered no (5).
+A run that already printed its result prints no error object. It only exits with the code from this table: an uninstall that leaves the program installed (3), a removal, restore or `backups --clear` with a failed item (4), a question answered no (5).
 
 ## Shared values
 
@@ -194,7 +194,7 @@ With `--uninstall`: the one-program `uninstall` object. No match is an error wit
 ## backups
 
 - The list: an array of Backup, newest first.
-- `--delete NAME` or `--clear`: `{ "deleted": [names], "cancelled": bool }`. In a dry run the key is `"would_delete"`. With `--json` and without `-y`: `"cancelled": true`, an empty list and exit code 5.
+- `--delete NAME` or `--clear`: `{ "deleted": [names], "cancelled": bool }`. In a dry run the key is `"would_delete"`. With `--json` and without `-y`: `"cancelled": true`, an empty list and exit code 5. With `--clear`, a backup that could not be deleted is left out of `deleted`, the others still go, and the exit code is 4.
 
 ## clean
 
