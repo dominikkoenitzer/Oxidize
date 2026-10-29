@@ -645,4 +645,14 @@ mod tests {
         let named = format!("The latest version is {};", env!("CARGO_PKG_VERSION"));
         assert!(readme.contains(&named), "{named}");
     }
+
+    #[test]
+    fn llms_txt_names_every_download_the_page_links() {
+        let page = include_str!("../site/index.html");
+        let llms = include_str!("../site/llms.txt");
+        for link in page.split("href=\"/download/").skip(1) {
+            let target = format!("/download/{}", &link[..link.find('"').unwrap()]);
+            assert!(llms.contains(&format!("({target})")), "{target}");
+        }
+    }
 }
