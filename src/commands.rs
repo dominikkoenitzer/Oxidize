@@ -2059,10 +2059,7 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     }
     println!();
     if g.dry_run {
-        println!(
-            "{}",
-            term::dim(&format!("{} items would be restored", items.len()))
-        );
+        println!("{}", term::dim(&dry_restore_summary(&items)));
         return Ok(());
     } else {
         let mut parts = vec![format!("{ok} restored")];
@@ -2084,6 +2081,11 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The last line of `restore --dry-run` in text.
+fn dry_restore_summary(items: &[restore::RestoreItem]) -> String {
+    format!("{} items would be restored", items.len())
 }
 
 // clean
