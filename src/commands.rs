@@ -1021,12 +1021,20 @@ impl ProgramRun {
             return e.clone();
         }
         match &self.removal {
-            Some(o) if dry_run => format!("{} leftovers would be removed", o.attempted),
+            Some(o) if dry_run => format!(
+                "{} would be removed",
+                plural(o.attempted, "leftover", "leftovers")
+            ),
             // Removal was offered and declined.
-            Some(o) if o.attempted == 0 => format!("{} leftovers kept", self.found),
+            Some(o) if o.attempted == 0 => {
+                format!("{} kept", plural(self.found, "leftover", "leftovers"))
+            }
             Some(o) => {
                 let emptied = o.emptied_parents.len() + o.emptied_keys.len();
-                let mut parts = vec![format!("{} leftovers removed", o.deleted + emptied)];
+                let mut parts = vec![format!(
+                    "{} removed",
+                    plural(o.deleted + emptied, "leftover", "leftovers")
+                )];
                 if o.skipped > 0 {
                     parts.push(format!("{} already gone", o.skipped));
                 }
@@ -1037,7 +1045,7 @@ impl ProgramRun {
             }
             None if self.found == 0 => "no leftovers".to_string(),
             None if !dry_run && !self.gone => "leftovers not removed".to_string(),
-            None => format!("{} leftovers kept", self.found),
+            None => format!("{} kept", plural(self.found, "leftover", "leftovers")),
         }
     }
 }
@@ -1830,8 +1838,8 @@ fn cmd_orphans(args: &OrphansArgs, g: &Global) -> Result<()> {
             println!(
                 "{}",
                 term::dim(&format!(
-                    "{} folders, {}. Portable tools and caches show up here too. Check one: oxidize scan <name>",
-                    report.folders.len(),
+                    "{}, {}. Portable tools and caches show up here too. Check one: oxidize scan <name>",
+                    plural(report.folders.len(), "folder", "folders"),
                     util::human_size(total)
                 ))
             );
@@ -1887,8 +1895,8 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
         if !g.dry_run
             && !g.confirm(
                 &format!(
-                    "Delete all {} backups ({})?",
-                    all.len(),
+                    "Delete all {} ({})?",
+                    plural(all.len(), "backup", "backups"),
                     util::human_size(total)
                 ),
                 false,
@@ -2183,7 +2191,10 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     }
     let failed = done.iter().filter(|c| c.failed()).count();
     if failed > 0 {
-        let message = format!("{failed} of {} categories did not clean fully", done.len());
+        let message = format!(
+            "{failed} of {} did not clean fully",
+            plural(done.len(), "category", "categories")
+        );
         return Err(Failure::incomplete(message, true).into());
     }
     Ok(())
@@ -2378,7 +2389,7 @@ fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
         Category::DeliveryOptimization if f.actionable() => plural(n, "file", "files"),
         Category::RecycleBin => plural(n, "item", "items"),
         Category::Orphans => match choice {
-            Some(c) => format!("{} of {n} folders", c.folders.len()),
+            Some(c) => format!("{} of {}", c.folders.len(), plural(n, "folder", "folders")),
             None => plural(n, "folder", "folders"),
         },
         Category::WindowsOld if f.actionable() => "1 folder".to_string(),
@@ -3349,6 +3360,27 @@ mod tests {
         assert_eq!(run("A", false, 0, None).state(false), "still registered");
         assert_eq!(run("A", true, 0, None).state(false), "uninstalled");
         assert_eq!(run("A", false, 0, None).state(true), "dry run");
+    }
+
+    #[test]
+    fn one_leftover_is_counted_as_one() {
+        let preview = DeletionOutcome {
+            attempted: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            run("A", false, 1, Some(preview)).leftovers(true),
+            "1 leftover would be removed"
+        );
+        assert_eq!(
+            run("A", true, 1, Some(DeletionOutcome::default())).leftovers(false),
+            "1 leftover kept"
+        );
+        assert_eq!(
+            run("A", true, 2, Some(removed(1, 1, None))).leftovers(false),
+            "1 leftover removed, 1 failed"
+        );
+        assert_eq!(run("A", true, 1, None).leftovers(false), "1 leftover kept");
     }
 
     #[test]
