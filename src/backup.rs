@@ -443,6 +443,10 @@ pub fn find_backup(name: &str) -> Result<BackupInfo> {
 }
 
 fn pick_backup(all: &[BackupInfo], name: &str) -> Result<BackupInfo> {
+    // As a part of a name, an empty one would match every backup.
+    if name.trim().is_empty() {
+        return Err(Failure::usage("give a name; an empty one would match everything").into());
+    }
     if let Some(b) = all.iter().find(|b| b.name.eq_ignore_ascii_case(name)) {
         return Ok(b.clone());
     }
@@ -1042,6 +1046,19 @@ mod tests {
             "restored",
         ] {
             assert!(json.get(field).is_some(), "{field}");
+        }
+    }
+
+    #[test]
+    fn an_empty_name_picks_no_backup() {
+        let all = vec![info(
+            "2026-10-10 120000 Example Player",
+            "Example Player",
+            "",
+        )];
+        for name in ["", "  "] {
+            let err = pick_backup(&all, name).unwrap_err();
+            assert_eq!(crate::exit::outcome(&err).code, "usage", "{name:?}");
         }
     }
 }
