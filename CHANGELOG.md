@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.11, 2026-10-29
+
+- A process is never ended. Each one that runs from the program's folders,
+  or from a Store app's, is asked to close its windows. One that is still
+  running three seconds later, or has no window to be asked through, is
+  left running, and the removal stops before the uninstaller or anything
+  else runs, with one sentence naming it. A dry run lists those without a
+  window in `would_stay`, and a run lists them in `closed` as `running`.
+- The window's questions for Remove completely and Run uninstaller say that
+  what a program's own uninstaller removes is not backed up, and so does
+  the tip of the backup setting.
+
 ## 0.2.10, 2026-10-28
 
 - Before a Store app is removed, whatever runs from its install folder is
