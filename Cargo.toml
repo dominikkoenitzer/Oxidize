@@ -1,6 +1,6 @@
 [package]
 name = "oxidize"
-version = "0.2.10"
+version = "0.2.11"
 edition = "2021"
 rust-version = "1.95"
 description = "Uninstall Windows programs and remove what they leave behind."
