@@ -22,6 +22,12 @@ pub struct Cleanup {
     /// How the last cleaning went.
     pub results: Option<Vec<Cleaned>>,
     pub protected: protect::Protected,
+    /// The file the protected list is kept in, or why there is none.
+    pub list_file: Result<PathBuf, String>,
+    /// Why the protected list could not be read. Until it can, nothing is
+    /// analysed, cleaned or written over it: the empty list in its place
+    /// protects nothing.
+    pub unreadable: Option<String>,
     /// The folder being typed into the protected list.
     pub new_protected: String,
     /// A problem reading or saving the protected list.
@@ -76,9 +82,19 @@ impl Cleanup {
     }
 
     pub fn new() -> Self {
-        let (protected, protect_error) = match protect::load() {
+        Self::from_file(protect::file_path())
+    }
+
+    /// The tab with the protected list read from `file`.
+    pub fn from_file(file: anyhow::Result<PathBuf>) -> Self {
+        let list_file = file.map_err(|e| format!("{e:#}"));
+        let read = match &list_file {
+            Ok(f) => protect::load_from(f).map_err(|e| format!("{e:#}")),
+            Err(e) => Err(e.clone()),
+        };
+        let (protected, unreadable) = match read {
             Ok(p) => (p, None),
-            Err(e) => (protect::Protected::default(), Some(format!("{e:#}"))),
+            Err(e) => (protect::Protected::default(), Some(e)),
         };
         Cleanup {
             analysis: None,
@@ -86,8 +102,10 @@ impl Cleanup {
             folders: Vec::new(),
             results: None,
             protected,
+            protect_error: unreadable.clone(),
+            list_file,
+            unreadable,
             new_protected: String::new(),
-            protect_error,
             slate: Slate::default(),
             view: View::Files,
             show_protected: false,
@@ -95,6 +113,23 @@ impl Cleanup {
             busy: false,
             cleaning: false,
         }
+    }
+
+    /// Why `action` cannot run: it needs the protected list, and the list
+    /// could not be read.
+    pub fn refusal(&self, action: &Action) -> Option<String> {
+        let needs_list = matches!(
+            action,
+            Action::Analyse | Action::Clean(_) | Action::ClearTraces
+        );
+        let why = self.unreadable.as_ref().filter(|_| needs_list)?;
+        Some(format!("Cannot clean up: {why}"))
+    }
+
+    /// The protected list can be changed: nothing runs, and what is on
+    /// screen is what the file holds.
+    fn can_change_list(&self) -> bool {
+        !self.busy && self.unreadable.is_none()
     }
 
     /// Take in a new analysis with the safe set ticked.
@@ -184,7 +219,7 @@ impl Cleanup {
 
     fn add_protected(&mut self) {
         let entry = self.new_protected.trim().to_string();
-        if entry.is_empty() || self.busy {
+        if entry.is_empty() || !self.can_change_list() {
             return;
         }
         if self.protected.add(&entry) {
@@ -194,15 +229,18 @@ impl Cleanup {
     }
 
     fn remove_protected(&mut self, entry: &str) {
-        if !self.busy && self.protected.remove(entry) {
+        if self.can_change_list() && self.protected.remove(entry) {
             self.save_protected();
         }
     }
 
     fn save_protected(&mut self) {
-        self.protect_error = protect::save(&self.protected)
-            .err()
-            .map(|e| format!("{e:#}"));
+        self.protect_error = match &self.list_file {
+            Ok(f) => protect::save_to(&self.protected, f)
+                .err()
+                .map(|e| format!("{e:#}")),
+            Err(e) => Some(e.clone()),
+        };
         // An analysis made before the list changed may hold what is now
         // protected; the cleaning checks the list again, but the numbers on
         // screen would be wrong.
@@ -327,7 +365,9 @@ fn head(
 fn headline(state: &Cleanup, busy: bool) -> (String, String) {
     match (state.view, &state.analysis) {
         _ if !state.has_something() => {
-            if busy {
+            if let Some(why) = state.refusal(&Action::Analyse) {
+                ("Clean up this PC".into(), why)
+            } else if busy {
                 (
                     "Analysing...".into(),
                     "Counting what each category holds.".into(),
@@ -826,8 +866,8 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
                 .desired_width((ui.available_width() - 60.0).max(80.0)),
         );
         let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-        let add = ui.add_enabled(!state.busy, egui::Button::new("Add"));
-        if add.clicked() || (enter && !state.busy) {
+        let add = ui.add_enabled(state.can_change_list(), egui::Button::new("Add"));
+        if add.clicked() || (enter && state.can_change_list()) {
             state.add_protected();
         }
     });
@@ -860,7 +900,10 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
                     );
                     if hovered
                         && ui
-                            .add_enabled(!state.busy, egui::Button::new("Remove").small())
+                            .add_enabled(
+                                state.can_change_list(),
+                                egui::Button::new("Remove").small(),
+                            )
                             .clicked()
                     {
                         remove = Some(entry.clone());
@@ -947,6 +990,8 @@ mod tests {
             folders: Vec::new(),
             results: None,
             protected: protect::Protected::default(),
+            list_file: Ok(std::env::temp_dir().join("oxidize-gui-test-protected.txt")),
+            unreadable: None,
             new_protected: String::new(),
             protect_error: None,
             slate: Slate::default(),
@@ -969,6 +1014,62 @@ mod tests {
         state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
         state.remove_protected(r"C:\Example Keep");
         assert_eq!(state.protected.entries(), [r"C:\Example Keep"]);
+    }
+
+    #[test]
+    fn a_protected_list_that_cannot_be_read_is_never_written_over() {
+        // Not UTF-8, so it cannot be read.
+        let bad = [0xff, 0xfe, b'C', b':'];
+        let dir = std::env::temp_dir().join(format!(
+            "oxidize-gui-test-unreadable-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("protected.txt");
+        std::fs::write(&file, bad).unwrap();
+        let mut state = Cleanup::from_file(Ok(file.clone()));
+        state.new_protected = r"C:\Example Keep".to_string();
+        state.add_protected();
+        let added = state.protected.entries().to_vec();
+        state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
+        state.remove_protected(r"C:\Example Keep");
+        let after = std::fs::read(&file);
+        let files = std::fs::read_dir(&dir).map(|d| d.count());
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(after.unwrap(), bad);
+        assert_eq!(files.unwrap(), 1);
+        assert!(added.is_empty(), "{added:?}");
+        assert_eq!(state.protected.entries(), [r"C:\Example Keep"]);
+        let why = state.unreadable.clone().unwrap();
+        assert!(
+            why.starts_with(&format!("reading {}: ", file.display())),
+            "{why}"
+        );
+        assert_eq!(state.protect_error, Some(why));
+    }
+
+    #[test]
+    fn nothing_that_needs_the_protected_list_runs_while_it_cannot_be_read() {
+        let mut state = tab();
+        let needs_list = || {
+            [
+                Action::Analyse,
+                Action::Clean(Choice::default()),
+                Action::ClearTraces,
+            ]
+        };
+        for action in needs_list() {
+            assert_eq!(state.refusal(&action), None);
+        }
+        state.unreadable =
+            Some(r"reading C:\Example\protected.txt: stream did not contain valid UTF-8".into());
+        let why = r"Cannot clean up: reading C:\Example\protected.txt: stream did not contain valid UTF-8";
+        for action in needs_list() {
+            assert_eq!(state.refusal(&action).as_deref(), Some(why));
+        }
+        assert_eq!(state.refusal(&Action::Refresh), None);
+        // Said where a cleaning starts, before anything is clicked.
+        assert_eq!(headline(&state, false).1, why);
     }
 
     #[test]
