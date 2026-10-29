@@ -1203,12 +1203,43 @@ impl eframe::App for OxidizeApp {
             self.programs_tab(ui, &t, today, &mut action);
         }
 
+        focus_ring(ctx, &t);
+
         // ---- Execute the requested action (outside the panel borrows) ----
         if let Some(action) = action {
             self.act(ctx, action);
         }
     }
 }
+
+/// Outline whatever holds the keyboard focus in copper, as the search field
+/// outlines itself, so Tab never lands on something that looks untouched.
+fn focus_ring(ctx: &egui::Context, t: &Tint) {
+    let Some(response) = ctx
+        .memory(|m| m.focused())
+        .and_then(|id| ctx.read_response(id))
+    else {
+        return;
+    };
+    // A text field draws its own outline.
+    if response.sense.senses_drag() {
+        return;
+    }
+    let radius = ctx
+        .data(|d| d.get_temp::<f32>(response.id.with(RING_RADIUS)))
+        .unwrap_or(4.0);
+    ctx.layer_painter(response.layer_id)
+        .with_clip_rect(response.interact_rect)
+        .rect_stroke(
+            response.rect,
+            radius,
+            egui::Stroke::new(1.0, t.copper),
+            egui::StrokeKind::Inside,
+        );
+}
+
+/// Where a widget with rounder corners leaves the radius for its focus ring.
+const RING_RADIUS: &str = "focus ring radius";
 
 impl OxidizeApp {
     /// The program overview, table and details panel.
@@ -2263,14 +2294,6 @@ fn tab_label(ui: &mut egui::Ui, t: &Tint, open: bool, label: &str) -> egui::Resp
             );
             ui.painter().rect_filled(line, 1.0, t.copper);
         }
-        if response.has_focus() {
-            ui.painter().rect_stroke(
-                rect,
-                4.0,
-                egui::Stroke::new(1.0, t.copper),
-                egui::StrokeKind::Inside,
-            );
-        }
     }
     response
 }
@@ -2290,6 +2313,9 @@ fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) 
     let size = egui::vec2(galley.size().x + 22.0, 26.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(response.id.with(RING_RADIUS), 13.0f32));
+    }
     if ui.is_rect_visible(rect) {
         let fill = if selected {
             t.button_active
@@ -4672,5 +4698,72 @@ mod tests {
         let eframe = &manifest[manifest.find("\neframe = ").unwrap()..];
         let features = &eframe[..eframe.find("] }").unwrap()];
         assert!(features.contains("\"clipboard\""), "{features}");
+    }
+
+    /// True when `shapes` hold a copper outline drawn on `rect`.
+    fn has_ring(shapes: &[egui::Shape], rect: egui::Rect, copper: Color32) -> bool {
+        shapes.iter().any(|shape| match shape {
+            egui::Shape::Vec(inner) => has_ring(inner, rect, copper),
+            egui::Shape::Rect(r) => {
+                r.stroke.color == copper && r.stroke.width >= 1.0 && r.rect == rect
+            }
+            _ => false,
+        })
+    }
+
+    #[test]
+    fn every_stop_tab_reaches_shows_where_the_focus_is() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let mut app = app();
+        let mut other = example_program();
+        other.registry_key = "example-editor".to_string();
+        other.display_name = "Example Editor".to_string();
+        app.programs = vec![example_program(), other];
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = |tab: bool| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            events: if tab {
+                vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        };
+        let mut run = |tab: bool| {
+            let mut out = ctx.run_ui(input(tab), |ui| app.ui(ui, &mut frame));
+            out.textures_delta.clear();
+            out
+        };
+        run(false);
+        let copper = Tint::of(ctx.global_style().visuals.dark_mode).copper;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40 {
+            run(true);
+            let out = run(false);
+            let id = ctx
+                .memory(|m| m.focused())
+                .expect("Tab gives something focus");
+            if !seen.insert(id) {
+                break;
+            }
+            let rect = ctx
+                .read_response(id)
+                .expect("the focused widget is shown")
+                .rect;
+            let shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+            assert!(has_ring(&shapes, rect, copper), "no focus ring at {rect:?}");
+        }
+        assert!(seen.len() > 5, "{}", seen.len());
     }
 }
