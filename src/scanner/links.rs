@@ -721,9 +721,7 @@ mod tests {
 
     #[test]
     fn a_shortcut_into_the_install_folder_is_the_programs_whatever_its_name() {
-        let root =
-            std::env::temp_dir().join(format!("oxidize_shortcut_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_shortcut_test");
         let deep = root.join(r"Tools\Group");
         let too_deep = deep.join("Deeper");
         fs::create_dir_all(&too_deep).unwrap();
@@ -772,8 +770,6 @@ mod tests {
         scan_shortcuts_in(&root, &quillmark(None), &mut out, &mut Vec::new());
         assert_eq!(names(&out), ["Start.lnk", "Writer.lnk"]);
         assert!(out.iter().all(|l| l.reason == "shortcut to a missing file"));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -789,8 +785,7 @@ mod tests {
 
     #[test]
     fn a_temp_folder_is_sure_only_when_named_exactly_like_the_product() {
-        let root = std::env::temp_dir().join(format!("oxidize_temp_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_temp_test");
         for folder in [
             "Quillmark",
             "Quillmark Setup 2",
@@ -852,8 +847,6 @@ mod tests {
             found.iter().any(|l| Path::new(&l.path) == holder),
             "{found:?}"
         );
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     fn brightway(alone: bool) -> ScanTarget {
@@ -865,9 +858,7 @@ mod tests {
 
     #[test]
     fn the_vendors_temp_folder_goes_only_when_nothing_else_of_theirs_is_installed() {
-        let root =
-            std::env::temp_dir().join(format!("oxidize_brand_temp_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_brand_temp_test");
         fs::create_dir_all(root.join(r"Brightway\http")).unwrap();
         fs::create_dir_all(root.join("Other Tool")).unwrap();
         let snap = Snapshot::with_programs(Vec::new());
@@ -879,7 +870,6 @@ mod tests {
 
         // Another product of theirs is installed: the vendor's folder stays.
         assert!(scan_temp_dir(&root, &brightway(false), &snap).is_empty());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -1252,15 +1242,14 @@ mod tests {
     fn a_link_handler_matches_by_path_not_by_name() {
         // A file of the product's name that is still there, somewhere else,
         // is someone else's copy.
-        let dir = std::env::temp_dir().join(format!("oxidize_links_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::backup::TestDir::new("oxidize_links_test");
         std::fs::create_dir_all(&dir).unwrap();
         let exe = dir.join("quillmark.exe");
         std::fs::write(&exe, b"").unwrap();
 
         let t = quillmark(Some(HOME));
         let elsewhere = match_link_handler(&format!(r#""{}" "%1""#, exe.display()), &t);
-        let _ = std::fs::remove_dir_all(&dir);
+        drop(dir);
         assert!(elsewhere.is_none());
     }
 }

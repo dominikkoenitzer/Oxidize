@@ -3628,9 +3628,7 @@ mod tests {
 
     #[test]
     fn a_store_apps_folders_are_found_by_identity_not_by_one_word() {
-        let root =
-            std::env::temp_dir().join(format!("oxidize_store_scan_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_store_scan_test");
         for folder in [
             "speech",
             "Games",
@@ -3662,8 +3660,6 @@ mod tests {
         found.sort();
         assert_eq!(found, ["Game Speech Window", "XboxSpeechToTextOverlay"]);
         assert!(out.iter().all(|l| l.confidence == Confidence::High));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// A machine-wide install that keeps each build in its own folder below
@@ -3795,8 +3791,7 @@ mod tests {
     #[test]
     fn the_vendors_folders_go_whole_and_the_start_menu_folder_is_not_windows() {
         let t = player_target(Vec::new());
-        let root = std::env::temp_dir().join(format!("oxidize_brand_test_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_brand_test");
         // `AppData\Local\Brightway` holds a longer namesake; that does not
         // make it a family folder when nothing else carries the name.
         for dir in [
@@ -3826,7 +3821,7 @@ mod tests {
         assert!(out
             .iter()
             .any(|l| Path::new(&l.path) == root.join("Brightway")));
-        let _ = fs::remove_dir_all(&root);
+        drop(root);
 
         // The Start menu sits in `Microsoft\Windows`; a vendor's folder in it
         // is still the vendor's, and Windows' own folders still are not.
@@ -4089,9 +4084,8 @@ mod tests {
 
     /// A root like `Program Files`: a few hundred unrelated folders, the
     /// product's own folder, its vendor folder and a family folder.
-    fn many_folders(name: &str, unrelated: usize) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("{name}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+    fn many_folders(name: &str, unrelated: usize) -> crate::backup::TestDir {
+        let root = crate::backup::TestDir::new(name);
         for i in 0..unrelated {
             fs::create_dir_all(root.join(format!("Unrelated Tool {i}")).join("bin")).unwrap();
         }
@@ -4120,7 +4114,6 @@ mod tests {
             .collect();
         found.sort();
         assert_eq!(found, [r"Quillhaven\Tindral Notes", "Tindral Notes"]);
-        let _ = fs::remove_dir_all(&root);
     }
 
     /// Times the walk of one large root. Run with
@@ -4138,6 +4131,5 @@ mod tests {
             assert_eq!(out.len(), 2);
         }
         eprintln!("20 walks of 2000 folders: {:?}", start.elapsed());
-        let _ = fs::remove_dir_all(&root);
     }
 }
