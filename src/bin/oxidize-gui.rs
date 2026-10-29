@@ -724,12 +724,16 @@ impl OxidizeApp {
                         .collect();
                     self.status = if report.installed {
                         format!(
-                            "{} items make up {}. It is still installed.",
-                            report.total(),
+                            "{} up {}. It is still installed.",
+                            count(report.total(), "item makes", "items make"),
                             report.program_name
                         )
                     } else {
-                        format!("{} leftovers of {}.", report.total(), report.program_name)
+                        format!(
+                            "{} of {}.",
+                            count(report.total(), "leftover", "leftovers"),
+                            report.program_name
+                        )
                     };
                     self.scan_for = Some(id);
                     self.scan = Some(report);
@@ -911,11 +915,14 @@ impl OxidizeApp {
             Confirm::Remove(items, _, ctx) => {
                 if ctx.make_backups {
                     format!(
-                        "Remove {} items? A backup is kept, so this can be undone.",
-                        items.len()
+                        "Remove {}? A backup is kept, so this can be undone.",
+                        count(items.len(), "item", "items")
                     )
                 } else {
-                    format!("Remove {} items permanently?", items.len())
+                    format!(
+                        "Remove {} permanently?",
+                        count(items.len(), "item", "items")
+                    )
                 }
             }
             Confirm::Complete(p, ctx) => complete_confirm_text(&p.display_name, ctx),
@@ -1053,7 +1060,10 @@ fn removal_log(outcome: &DeletionOutcome, dry_run: bool) -> Vec<String> {
         lines.push(format!("removed {k} (emptied key)"));
     }
     lines.push(if dry_run {
-        format!("dry run: {} items would be removed", outcome.attempted)
+        format!(
+            "dry run: {} would be removed",
+            count(outcome.attempted, "item", "items")
+        )
     } else {
         let mut parts = vec![format!("{} removed", outcome.deleted)];
         if outcome.skipped > 0 {
@@ -1084,8 +1094,8 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
             }
         });
         lines.push(format!(
-            "dry run: {} items would be removed",
-            out.selected.len()
+            "dry run: {} would be removed",
+            count(out.selected.len(), "item", "items")
         ));
         return lines;
     }
@@ -1140,8 +1150,8 @@ fn window_error(text: &str) -> String {
 fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
     if dry_run {
         format!(
-            "dry run: {} items of {name} would be removed",
-            out.selected.len()
+            "dry run: {} of {name} would be removed",
+            count(out.selected.len(), "item", "items")
         )
     } else if out.complete() {
         format!("{name}: nothing left.")
@@ -1153,8 +1163,8 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         )
     } else if !out.verdict.remaining.is_empty() {
         format!(
-            "{name}: {} items are still there.",
-            out.verdict.remaining.len()
+            "{name}: {} still there.",
+            count(out.verdict.remaining.len(), "item is", "items are")
         )
     } else {
         format!("{name}: some items could not be removed.")
@@ -2042,7 +2052,7 @@ fn scan_results(
         ui.add_space(4.0);
     }
     let reclaim = report.reclaimable_bytes();
-    let mut summary = format!("{} items", report.total());
+    let mut summary = count(report.total(), "item", "items");
     if reclaim > 0 {
         summary.push_str(&format!(", {} in files", util::human_size(reclaim)));
     }
@@ -2103,8 +2113,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
-                    "Dry run: {} items would be removed, {} would be closed.",
-                    out.selected.len(),
+                    "Dry run: {} would be removed, {} would be closed.",
+                    count(out.selected.len(), "item", "items"),
                     running_processes(out.would_close.len())
                 ))
                 .color(t.text),
@@ -2119,8 +2129,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
         ui.label(RichText::new("Nothing left.").size(18.0).color(t.verdigris));
         ui.label(
             RichText::new(format!(
-                "Removed {} items in {:.1} s",
-                removed_count(out),
+                "Removed {} in {:.1} s",
+                count(removed_count(out), "item", "items"),
                 out.seconds
             ))
             .color(t.weak),
@@ -2139,9 +2149,10 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
     }
     if v.below_level > 0 {
         ui.label(
-            RichText::new(format!(
-                "{} lower-confidence items were kept",
-                v.below_level
+            RichText::new(count(
+                v.below_level,
+                "lower-confidence item was kept",
+                "lower-confidence items were kept",
             ))
             .color(t.weak),
         );
@@ -3775,7 +3786,7 @@ mod tests {
         assert!(!app.busy(), "no reload was started");
         assert_eq!(
             app.status,
-            "dry run: 1 items of Example Player would be removed"
+            "dry run: 1 item of Example Player would be removed"
         );
     }
 
@@ -3944,7 +3955,7 @@ mod tests {
         assert!(lines.contains(&"Uninstaller finished with exit code 0".to_string()));
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("Example Player: 1 items are still there.")
+            Some("Example Player: 1 item is still there.")
         );
     }
 
@@ -4715,6 +4726,65 @@ mod tests {
         let eframe = &manifest[manifest.find("\neframe = ").unwrap()..];
         let features = &eframe[..eframe.find("] }").unwrap()];
         assert!(features.contains("\"clipboard\""), "{features}");
+    }
+
+    #[test]
+    fn one_item_is_counted_as_one_item() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            std::path::PathBuf::from(r"D:\Games\Example Player"),
+            Confidence::High,
+            "found",
+            None,
+            false,
+        );
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let report = ScanReport {
+            program_name: "Example Player".to_string(),
+            installed: false,
+            items: vec![item.clone()],
+        };
+        app.tx
+            .send(Msg::Scan {
+                id: program.id().to_string(),
+                report,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 leftover of Example Player.");
+
+        let dry = DeletionOutcome {
+            attempted: 1,
+            dry_run: true,
+            ..DeletionOutcome::default()
+        };
+        let lines = removal_log(&dry, true);
+        assert!(
+            lines.contains(&"dry run: 1 item would be removed".to_string()),
+            "{lines:?}"
+        );
+
+        let mut out = finished(None);
+        out.selected = vec![item.clone()];
+        assert_eq!(
+            complete_status("Example Player", &out, true),
+            "dry run: 1 item of Example Player would be removed"
+        );
+        let lines = complete_log("Example Player", &out, true);
+        assert!(
+            lines.contains(&"dry run: 1 item would be removed".to_string()),
+            "{lines:?}"
+        );
+        out.verdict.nothing_left = false;
+        out.verdict.remaining = vec![item];
+        assert_eq!(
+            complete_status("Example Player", &out, false),
+            "Example Player: 1 item is still there."
+        );
     }
 
     #[test]
