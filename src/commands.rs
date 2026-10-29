@@ -1976,14 +1976,7 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
         {
             return report_cancelled(g);
         }
-        let mut done = Vec::new();
-        for b in &all {
-            if !g.dry_run {
-                backup::delete_backup(b)?;
-            }
-            done.push(b.name.clone());
-        }
-        return report_deleted(&done, g);
+        return clear_backups(&all, g, backup::delete_backup);
     }
 
     if let Some(name) = &args.delete {
@@ -2035,6 +2028,37 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
             backup::backups_base()?.display()
         ))
     );
+    Ok(())
+}
+
+/// `backups --clear` once confirmed: delete each backup with `delete`, or
+/// only name it in a dry run. One that cannot go is warned about and kept,
+/// and the rest still go; any such backup makes the run incomplete.
+fn clear_backups(
+    all: &[backup::BackupInfo],
+    g: &Global,
+    mut delete: impl FnMut(&backup::BackupInfo) -> Result<()>,
+) -> Result<()> {
+    let mut done = Vec::new();
+    let mut failed = 0;
+    for b in all {
+        if !g.dry_run {
+            if let Err(e) = delete(b) {
+                term::warn(&format!("{e:#}"));
+                failed += 1;
+                continue;
+            }
+        }
+        done.push(b.name.clone());
+    }
+    // In text, an empty list would read "No backups." while all are still there.
+    if g.json || !done.is_empty() {
+        report_deleted(&done, g)?;
+    }
+    if failed > 0 {
+        let message = format!("{failed} of {} backups could not be deleted", all.len());
+        return Err(Failure::incomplete(message, g.json).into());
+    }
     Ok(())
 }
 
@@ -4545,5 +4569,42 @@ mod tests {
         );
         items.remove(1);
         assert_eq!(dry_restore_summary(&items), "2 items would be restored");
+    }
+
+    #[test]
+    fn clearing_goes_on_past_a_backup_it_cannot_delete() {
+        let all: Vec<_> = ["one", "two", "three"]
+            .iter()
+            .map(|name| backup::BackupInfo {
+                id: name.to_string(),
+                name: name.to_string(),
+                path: PathBuf::from(name),
+                program: name.to_string(),
+                created: String::new(),
+                items: 1,
+                size_bytes: 0,
+                restored: None,
+            })
+            .collect();
+        let mut tried = Vec::new();
+        let err = clear_backups(&all, &unattended(false, false), |b| {
+            tried.push(b.name.clone());
+            if b.name == "two" {
+                bail!("in use");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert_eq!(tried, ["one", "two", "three"]);
+        let o = exit::outcome(&err);
+        assert_eq!(
+            (o.code, o.exit, o.message.as_str(), o.reported),
+            (
+                "incomplete",
+                exit::INCOMPLETE,
+                "1 of 3 backups could not be deleted",
+                true
+            )
+        );
     }
 }

@@ -95,7 +95,7 @@ Finds the program behind a running process or an executable.
 Lists the backups of earlier removals, newest first. Reads only unless a delete flag is given.
 
 - `--delete NAME`: delete one backup, after a question that defaults to no. `NAME` is matched as for `restore`.
-- `--clear`: delete every backup, after a question that defaults to no.
+- `--clear`: delete every backup, after a question that defaults to no. A backup that cannot be deleted stays, and the others still go.
 - Only folders inside the backups folder are ever deleted.
 
 ## restore
