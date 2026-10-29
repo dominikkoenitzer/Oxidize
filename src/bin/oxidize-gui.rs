@@ -1141,6 +1141,8 @@ fn window_error(text: &str) -> String {
     if text.contains(uninstall::NEEDS_ADMIN) {
         "The uninstaller needs administrator rights: Restart as administrator, then try again."
             .to_string()
+    } else if text.contains(uninstall::UNINSTALLER_MISSING) {
+        "The uninstaller file is missing.".to_string()
     } else {
         text.to_string()
     }
@@ -4790,6 +4792,24 @@ mod tests {
             complete_status("Example Player", &out, false),
             "Example Player: 1 item is still there."
         );
+    }
+
+    #[test]
+    fn a_missing_uninstaller_is_named_in_one_plain_sentence() {
+        let plan = uninstall::UninstallPlan {
+            argv: vec!["oxidize-test-no-such-uninstaller.exe".to_string()],
+            is_msi: false,
+            source: "UninstallString".to_string(),
+            unattended: false,
+        };
+        let e = uninstall::run_with(
+            &plan,
+            std::process::Stdio::null(),
+            std::process::Stdio::null(),
+        )
+        .unwrap_err();
+        let shown = window_error(&format!("Uninstall failed: {e:#}"));
+        assert_eq!(shown, "The uninstaller file is missing.");
     }
 
     #[test]
