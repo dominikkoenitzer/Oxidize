@@ -347,14 +347,23 @@ pub fn backups_base() -> Result<PathBuf> {
 /// The tests make and restore backups of their own. They go to a folder of
 /// this test run, never among the real ones, where a run that fails halfway
 /// would leave them listed for the user to restore.
+///
+/// Each test runs on its own thread and gets its own folder, so one test's
+/// `TestCleanup` never removes the folder while another test creates a backup.
 #[cfg(test)]
 pub fn backups_base() -> Result<PathBuf> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    thread_local! {
+        static TEST: usize = NEXT.fetch_add(1, Ordering::Relaxed);
+    }
+    let test = TEST.with(|n| *n);
     Ok(std::env::temp_dir()
-        .join(format!("oxidize-test-run-{}", std::process::id()))
+        .join(format!("oxidize-test-run-{}-{test}", std::process::id()))
         .join("backups"))
 }
 
-/// Removes a test's folders when it ends, passed or failed, and the run's folder once empty.
+/// Removes a test's folders when it ends, passed or failed, and its backups folder once empty.
 #[cfg(test)]
 pub(crate) struct TestCleanup(pub Vec<PathBuf>);
 
@@ -888,6 +897,35 @@ mod tests {
         let second = BackupSession::new("Oxidize Session Test").unwrap();
         cleanup.0.push(second.root().to_path_buf());
         assert_ne!(first.root(), second.root());
+    }
+
+    #[test]
+    fn another_tests_guard_never_takes_the_backups_folder_from_a_new_backup() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let _cleanup = TestCleanup(Vec::new());
+        // Another test ending over and over, as many do while this one runs.
+        let stop = Arc::new(AtomicBool::new(false));
+        let other = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    drop(TestCleanup(Vec::new()));
+                }
+            })
+        };
+        let mut failed = Vec::new();
+        for _ in 0..500 {
+            match BackupSession::new("Oxidize Shared Folder Test") {
+                Ok(session) => {
+                    let _ = fs::remove_dir_all(session.root());
+                }
+                Err(e) => failed.push(format!("{e:#}")),
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        other.join().unwrap();
+        assert_eq!(failed.first(), None, "{} of 500 failed", failed.len());
     }
 
     /// A folder whose last file is held open without delete sharing: rename
