@@ -1273,6 +1273,12 @@ impl OxidizeApp {
         if self.busy() {
             return;
         }
+        // An unreadable protected list stands in as an empty one, which
+        // would protect nothing.
+        if let Some(why) = self.cleanup.refusal(&action) {
+            self.status = why;
+            return;
+        }
         {
             match action {
                 Action::Refresh => self.load_programs(ctx),
@@ -3431,6 +3437,34 @@ mod tests {
 
     fn app() -> OxidizeApp {
         OxidizeApp::blank()
+    }
+
+    #[test]
+    fn nothing_is_cleaned_while_the_protected_list_cannot_be_read() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.cleanup.unreadable =
+            Some(r"reading C:\Example\protected.txt: stream did not contain valid UTF-8".into());
+        let analysis = clean::Analysis {
+            findings: Vec::new(),
+            elevated: false,
+            recycle_bin_days: clean::RECYCLE_DAYS,
+            protected: Vec::new(),
+        };
+        app.cleanup.analysis = Some((clean::Places::default(), analysis));
+        app.cleanup.slate.found = Some(Vec::new());
+        let why = r"Cannot clean up: reading C:\Example\protected.txt: stream did not contain valid UTF-8";
+        for dry_run in [false, true] {
+            app.dry_run = dry_run;
+            for action in [Action::Clean(clean::Choice::default()), Action::ClearTraces] {
+                app.status.clear();
+                app.act(&ctx, action);
+                assert!(app.confirm.is_none());
+                assert_eq!(app.status, why);
+            }
+        }
+        assert!(app.log.is_empty(), "{:?}", app.log);
+        assert_eq!(app.jobs, 0);
     }
 
     #[test]
