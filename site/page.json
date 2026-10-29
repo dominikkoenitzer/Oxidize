@@ -198,10 +198,12 @@
     }
   },
   "new": {
-    "version": "0.2.11",
+    "version": "0.2.12",
     "items": [
-      "A running program is never ended. Its windows are asked to close, and when something still runs three seconds later, or has no window, the removal stops before anything goes and names it.",
-      "The questions before Remove completely and Run uninstaller say that what a program's own uninstaller removes is not in the backup."
+      "A clean leaves a git repository in a temp folder whole, however old its files are.",
+      "A clean refuses to start while the protected list cannot be read.",
+      "A folder whose move into the backup stopped halfway is taken back whole, and a restore puts back what such a move took.",
+      "In the window, every control Tab reaches shows its focus, and grey text reads on its fill."
     ]
   },
   "requirements": [
