@@ -4,7 +4,7 @@
 
 Oxidize runs on Windows 10 and 11. It needs no installer and no runtime.
 The download on this page is oxidize-gui.exe, the window app. Its Remove completely button does the whole removal, and Undo puts back what Oxidize removed itself.
-The command line, oxidize.exe, has the same engine, a --json output and exit codes 0 to 5. It is published with every release next to the window app; this page links only the window app.
+The command line, oxidize.exe, has the same engine, a --json output and exit codes 0 to 5. It is published with every release next to the window app, and a zip holds both.
 oxidize uninstall <program> --yes removes a program completely in one command and ends with a second scan that says what, if anything, is left.
 Leftovers it looks for: registry keys and values, folders under Program Files, ProgramData, AppData, the Start Menu, Startup and the Desktop, services, scheduled tasks, firewall rules, PATH entries, link and file types, shortcuts and temp folders.
 Everything Oxidize removes itself is backed up to %LOCALAPPDATA%\Oxidize\backups first unless --no-backup is given, and oxidize restore puts it back. What a program's own uninstaller removes is not in the backup.
@@ -14,6 +14,8 @@ oxidize clean shows what temporary files, crash dumps, browser caches, the Recyc
 ## Download
 
 - [Oxidize for Windows](/download/windows): oxidize-gui.exe, the window app
+- [Command line](/download/cli): oxidize.exe
+- [Zip](/download/zip): oxidize-windows-x64.zip, both in one zip
 
 ## Skill for AI assistants
 

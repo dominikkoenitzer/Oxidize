@@ -181,7 +181,7 @@ question. `oxidize backups --delete <name>` deletes one backup and
 
 To update, download the file again and replace the old one. Every release uses
 the same file names, so the links here always get the latest version.
-The latest version is 0.2.8; [CHANGELOG.md](CHANGELOG.md) lists what each
+The latest version is 0.2.9; [CHANGELOG.md](CHANGELOG.md) lists what each
 release changed.
 
 To remove Oxidize, delete `oxidize-gui.exe` and `oxidize.exe`, then the folder
