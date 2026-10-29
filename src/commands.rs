@@ -1882,14 +1882,7 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
         {
             return report_cancelled(g);
         }
-        let mut done = Vec::new();
-        for b in &all {
-            if !g.dry_run {
-                backup::delete_backup(b)?;
-            }
-            done.push(b.name.clone());
-        }
-        return report_deleted(&done, g);
+        return clear_backups(&all, g, backup::delete_backup);
     }
 
     if let Some(name) = &args.delete {
@@ -1942,6 +1935,23 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
         ))
     );
     Ok(())
+}
+
+/// `backups --clear` once confirmed: delete each backup with `delete`, or
+/// only name it in a dry run.
+fn clear_backups(
+    all: &[backup::BackupInfo],
+    g: &Global,
+    mut delete: impl FnMut(&backup::BackupInfo) -> Result<()>,
+) -> Result<()> {
+    let mut done = Vec::new();
+    for b in all {
+        if !g.dry_run {
+            delete(b)?;
+        }
+        done.push(b.name.clone());
+    }
+    report_deleted(&done, g)
 }
 
 /// Say which backups went, as JSON or as one line each.
