@@ -776,10 +776,11 @@ fn sanitize(s: &str) -> String {
             c => c,
         })
         .collect();
-    out = out.trim_matches([' ', '.']).to_string();
     if out.chars().count() > 80 {
         out = out.chars().take(80).collect();
     }
+    // Windows drops a folder name's trailing space, so a path built on to the name as written misses.
+    out = out.trim_matches([' ', '.']).to_string();
     if out.is_empty() {
         out.push_str("item");
     }
@@ -848,6 +849,26 @@ mod tests {
         let second = BackupSession::new("Oxidize Session Test").unwrap();
         cleanup.0.push(second.root().to_path_buf());
         assert_ne!(first.root(), second.root());
+    }
+
+    #[test]
+    fn a_long_name_cut_after_a_space_still_takes_a_backup() {
+        let root = std::env::temp_dir().join("oxidize_long_name_test");
+        let _ = fs::remove_dir_all(&root);
+        let mut cleanup = TestCleanup(vec![root.clone()]);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("leftover.txt");
+        fs::write(&file, "kept").unwrap();
+
+        // The 80th character is a space, so the cut name ends in one.
+        let label = format!("Oxidize Long Name Test{} more words", "x".repeat(57));
+        let mut session = BackupSession::new(&label).unwrap();
+        cleanup.0.push(session.root().to_path_buf());
+
+        let dest = session.quarantine(LeftoverKind::File, &file).unwrap();
+        assert_eq!(fs::read_to_string(dest).unwrap(), "kept");
+        assert!(session.root().join(MANIFEST).exists());
+        assert!(!session.name().ends_with([' ', '.']));
     }
 
     /// A folder whose last file is held open without delete sharing: rename
