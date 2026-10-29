@@ -142,6 +142,8 @@ pub enum KeptReason {
     RecentlyDeleted(u64),
     InUse,
     Protected,
+    /// A git repository, kept whole however old its files are.
+    Repository,
     AccessDenied,
     Unreadable,
     NeedsAdmin,
@@ -160,6 +162,7 @@ impl KeptReason {
             KeptReason::RecentlyDeleted(_) => "recently_deleted",
             KeptReason::InUse => "in_use",
             KeptReason::Protected => "protected",
+            KeptReason::Repository => "repository",
             KeptReason::AccessDenied => "access_denied",
             KeptReason::Unreadable => "unreadable",
             KeptReason::NeedsAdmin => "needs_admin",
@@ -175,6 +178,7 @@ impl KeptReason {
             KeptReason::RecentlyDeleted(days) => format!("deleted in the last {days} days"),
             KeptReason::InUse => "in use by a running program".to_string(),
             KeptReason::Protected => "protected".to_string(),
+            KeptReason::Repository => "git repository, kept whole".to_string(),
             KeptReason::AccessDenied => "access denied".to_string(),
             KeptReason::Unreadable => "could not be read".to_string(),
             KeptReason::NeedsAdmin => "needs administrator rights".to_string(),
@@ -217,6 +221,13 @@ pub fn stays_text(kept: &[Kept]) -> Option<String> {
                 // Folders and files both: say how many, not which kind.
                 let noun = if k.count == 1 { "item" } else { "items" };
                 format!("{} {noun} {}", k.count, k.reason.text())
+            } else if k.reason == KeptReason::Repository && k.count > 0 {
+                let noun = if k.count == 1 {
+                    "git repository"
+                } else {
+                    "git repositories"
+                };
+                format!("{} {noun} kept whole", k.count)
             } else if k.count > 0 {
                 format!("{} {}", k.count, k.reason.text())
             } else {

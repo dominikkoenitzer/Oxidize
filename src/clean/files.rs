@@ -1,7 +1,8 @@
 //! Walking a folder for files the cleaner may delete, and deleting them.
 //!
 //! A walk never follows a link or a junction, never enters a protected
-//! folder, and counts every file it leaves with the reason. The deletion
+//! folder or a git repository, and counts every file it leaves with the
+//! reason. The deletion
 //! checks each file again right before it goes: still there, still old
 //! enough, still not protected.
 
@@ -181,6 +182,10 @@ pub fn walk_except(
     if !meta.is_dir() || is_link(&meta) {
         return out;
     }
+    if is_repository(root) {
+        add(&mut out.kept, KeptReason::Repository, 1, 0);
+        return out;
+    }
     // Folders are listed after their contents, deepest last in the list, so
     // reversing it later removes children before their parents.
     let mut stack = vec![(root.to_path_buf(), root_key)];
@@ -210,6 +215,10 @@ pub fn walk_except(
                 continue;
             }
             if meta.is_dir() {
+                if is_repository(&path) {
+                    add(&mut out.kept, KeptReason::Repository, 1, 0);
+                    continue;
+                }
                 if old_enough(&meta, rule, now) {
                     dirs.push((path.clone(), child.clone()));
                 }
@@ -265,6 +274,22 @@ fn consider_file(
         dir: false,
         key,
     });
+}
+
+/// A git repository: a working tree, whose `.git` is a folder or, in a
+/// linked worktree or a submodule, a file, or a bare repository. Its files
+/// only work together, and an old one is often the one still needed, so it
+/// is kept whole and never entered.
+fn is_repository(dir: &Path) -> bool {
+    if fs::symlink_metadata(dir.join(".git")).is_ok() {
+        return true;
+    }
+    let has = |name: &str, folder: bool| {
+        fs::symlink_metadata(dir.join(name))
+            .map(|m| m.is_dir() == folder)
+            .unwrap_or(false)
+    };
+    has("HEAD", false) && has("objects", true) && has("refs", true)
 }
 
 /// A symbolic link, a junction or another reparse point. Never followed,
@@ -538,6 +563,72 @@ pub(crate) mod tests {
         assert!(walk(&root, &week(), &whole, SystemTime::now())
             .candidates
             .is_empty());
+    }
+
+    #[test]
+    fn a_git_repository_is_kept_whole_however_old() {
+        let root = fixture("repos");
+        // A checkout, a linked worktree whose .git is a file, and a bare
+        // repository, every file in them a month old.
+        file_aged(&root.join(r"checkout\.git\HEAD"), 20, 30);
+        file_aged(&root.join(r"checkout\.git\objects\pack\p.pack"), 300, 30);
+        file_aged(&root.join(r"checkout\src\main.rs"), 40, 30);
+        file_aged(&root.join(r"worktree\.git"), 10, 30);
+        file_aged(&root.join(r"worktree\lib.rs"), 50, 30);
+        file_aged(&root.join(r"bare.git\HEAD"), 20, 30);
+        file_aged(&root.join(r"bare.git\objects\ab\cdef"), 60, 30);
+        fs::create_dir_all(root.join(r"bare.git\refs\heads")).unwrap();
+        for dir in ["checkout", "worktree", "bare.git"] {
+            age(&root.join(dir), 30);
+        }
+        // Next to them, a plain folder and a loose file of the same age.
+        file_aged(&root.join(r"plain\old.log"), 7, 30);
+        age(&root.join("plain"), 30);
+        file_aged(&root.join("junk.tmp"), 3, 30);
+
+        let w = walk(&root, &week(), &Protected::default(), SystemTime::now());
+        assert_eq!((w.files(), w.bytes()), (2, 10));
+        assert_eq!(kept(&w.kept, KeptReason::Repository), (3, 0));
+        let repos = ["checkout", "worktree", "bare.git"].map(|d| root.join(d));
+        assert!(w
+            .candidates
+            .iter()
+            .all(|c| repos.iter().all(|r| !c.path.starts_with(r))));
+        assert_eq!(
+            super::super::stays_text(&w.kept).unwrap(),
+            "stays: 3 git repositories kept whole"
+        );
+
+        let done = delete(
+            &w.candidates,
+            &week(),
+            &Protected::default(),
+            SystemTime::now(),
+        );
+        assert_eq!((done.files, done.freed), (2, 10));
+        assert!(!root.join("plain").exists());
+        for file in [
+            r"checkout\.git\HEAD",
+            r"checkout\.git\objects\pack\p.pack",
+            r"checkout\src\main.rs",
+            r"worktree\.git",
+            r"worktree\lib.rs",
+            r"bare.git\HEAD",
+            r"bare.git\objects\ab\cdef",
+            r"bare.git\refs\heads",
+        ] {
+            assert!(root.join(file).exists(), "{file}");
+        }
+
+        // A walk that starts in a repository takes nothing from it.
+        let inside = walk(
+            &root.join("checkout"),
+            &week(),
+            &Protected::default(),
+            SystemTime::now(),
+        );
+        assert!(inside.candidates.is_empty());
+        assert_eq!(kept(&inside.kept, KeptReason::Repository), (1, 0));
     }
 
     #[test]
