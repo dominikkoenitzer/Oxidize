@@ -645,21 +645,25 @@ fn temp(places: &Places, opts: &Options) -> Finding {
         f.take_walk(walk, rule);
     }
     if let Some(root) = &places.windows_temp {
-        // The user's own temp folder can sit inside Windows' one on some
-        // setups; it was counted already.
-        let same = user_temp.is_some_and(|u| protect::key_of(u) == protect::key_of(root));
-        if !same && root.is_dir() && fit(root, &mut f, "") {
-            admin_walk(&mut f, root, rule, opts);
+        // The user's own temp folder can be Windows' one or sit inside it on
+        // some setups; it was counted already, so the walk passes over it.
+        let (user, windows) = (user_temp.map(|u| protect::key_of(u)), protect::key_of(root));
+        let counted = user
+            .as_deref()
+            .is_some_and(|u| u == windows || protect::under(&windows, u));
+        let inside = user.filter(|u| protect::under(u, &windows));
+        if !counted && root.is_dir() && fit(root, &mut f, "") {
+            admin_walk(&mut f, root, rule, opts, inside.as_deref());
         }
     }
     f
 }
 
-/// Walk a machine-wide folder. Without administrator rights it is only
-/// counted, as what would need them.
-fn admin_walk(f: &mut Finding, root: &Path, rule: Rule, opts: &Options) {
+/// Walk a machine-wide folder, all but `skip`. Without administrator rights
+/// it is only counted, as what would need them.
+fn admin_walk(f: &mut Finding, root: &Path, rule: Rule, opts: &Options, skip: Option<&str>) {
     if opts.elevated {
-        let walk = files::walk(root, &rule, opts.protected, opts.now);
+        let walk = files::walk_except(root, &rule, opts.protected, opts.now, skip);
         f.take_walk(walk, rule);
         return;
     }
@@ -667,7 +671,7 @@ fn admin_walk(f: &mut Finding, root: &Path, rule: Rule, opts: &Options) {
         probe_in_use: false,
         ..rule
     };
-    let walk = files::walk(root, &looked, opts.protected, opts.now);
+    let walk = files::walk_except(root, &looked, opts.protected, opts.now, skip);
     let (count, bytes) = (walk.files(), walk.bytes());
     for k in walk.kept {
         f.keep(k.reason, k.count, k.bytes);
@@ -697,7 +701,7 @@ fn crash_dumps(places: &Places, opts: &Options) -> Finding {
             probe_in_use: true,
         };
         if spot.path.exists() {
-            admin_walk(&mut f, &spot.path, rule, opts);
+            admin_walk(&mut f, &spot.path, rule, opts, None);
         }
     }
     f

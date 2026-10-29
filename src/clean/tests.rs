@@ -302,6 +302,75 @@ fn the_analysis_counts_every_category_and_changes_nothing() {
 }
 
 #[test]
+fn a_temp_folder_inside_windows_one_is_counted_once() {
+    for elevated in [false, true] {
+        let mut pc = Pc::new(&format!("temp_inside_{elevated}"));
+        pc.fill();
+        let inner = pc.places.windows_temp.as_ref().unwrap().join("1");
+        file_aged(&inner.join("old.log"), 100, 20);
+        file_aged(&inner.join(r"setup\data.bin"), 400, 20);
+        age(&inner.join("setup"), 20);
+        age(&inner, 20);
+        pc.places.user_temp = Some(inner.clone());
+        let tools = FakeTools::default();
+        let a = analyse_with(
+            &pc,
+            &Protected::default(),
+            elevated,
+            &[],
+            &tools,
+            &no_orphans,
+        );
+        let temp = a.finding(Category::Temp).unwrap();
+        // The user's two files, and Windows' own log beside the folder.
+        let (counted, needs_admin) = if elevated {
+            ((3, 700), (0, 0))
+        } else {
+            ((2, 500), (1, 200))
+        };
+        assert_eq!((temp.count, temp.bytes), counted, "elevated {elevated}");
+        assert_eq!(
+            kept(&temp.kept, &KeptReason::NeedsAdmin),
+            needs_admin,
+            "elevated {elevated}"
+        );
+        let done = clean_with(
+            &pc,
+            &a,
+            &a.choice(&[Category::Temp], Confidence::High),
+            &Protected::default(),
+            elevated,
+            &tools,
+        );
+        assert_eq!(
+            (done[0].removed, done[0].freed),
+            counted,
+            "elevated {elevated}"
+        );
+        // The user's temp folder itself is not Windows' to take.
+        assert!(inner.is_dir(), "elevated {elevated}");
+    }
+    // The same folder named twice is walked once.
+    for elevated in [false, true] {
+        let mut pc = Pc::new(&format!("temp_same_{elevated}"));
+        pc.fill();
+        pc.places.user_temp = pc.places.windows_temp.clone();
+        let tools = FakeTools::default();
+        let a = analyse_with(
+            &pc,
+            &Protected::default(),
+            elevated,
+            &[],
+            &tools,
+            &no_orphans,
+        );
+        let temp = a.finding(Category::Temp).unwrap();
+        assert_eq!((temp.count, temp.bytes), (1, 200), "elevated {elevated}");
+        assert_eq!(kept(&temp.kept, &KeptReason::NeedsAdmin), (0, 0));
+    }
+}
+
+#[test]
 fn the_safe_set_is_chosen_unless_the_user_says_otherwise() {
     let pc = Pc::new("safe_set");
     pc.fill();
