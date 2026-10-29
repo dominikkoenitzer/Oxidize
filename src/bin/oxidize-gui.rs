@@ -1365,7 +1365,11 @@ impl OxidizeApp {
                                 self.log.push(line.clone());
                                 self.status = line;
                             }
-                            Err(e) => self.log.push(format!("Cannot uninstall: {e:#}")),
+                            Err(e) => {
+                                let line = format!("Cannot uninstall {}: {e:#}", p.display_name);
+                                self.log.push(line.clone());
+                                self.status = line;
+                            }
                         }
                     } else {
                         self.confirm = Some(Confirm::Uninstall(p, self.silent));
@@ -4711,6 +4715,20 @@ mod tests {
         let eframe = &manifest[manifest.find("\neframe = ").unwrap()..];
         let features = &eframe[..eframe.find("] }").unwrap()];
         assert!(features.contains("\"clipboard\""), "{features}");
+    }
+
+    #[test]
+    fn a_dry_run_without_an_uninstaller_says_so_in_the_status_line() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.dry_run = true;
+        app.act(&ctx, Action::Uninstall(example_program()));
+        assert!(
+            app.status.starts_with("Cannot uninstall Example Player"),
+            "{}",
+            app.status
+        );
+        assert!(app.confirm.is_none());
     }
 
     #[test]
