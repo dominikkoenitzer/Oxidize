@@ -875,7 +875,7 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
     let question = if how.keep {
         "Run the uninstaller?"
     } else {
-        "Remove it completely? Running copies are closed first."
+        "Remove it completely? Running copies are asked to close first."
     };
     if !g.dry_run && !g.confirm(question, true) {
         if g.json {

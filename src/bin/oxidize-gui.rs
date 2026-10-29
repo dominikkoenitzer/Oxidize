@@ -907,7 +907,7 @@ impl OxidizeApp {
             return;
         }
         let message = match self.confirm.as_ref().unwrap() {
-            Confirm::Uninstall(p, _) => format!("Run the uninstaller for {}?", p.display_name),
+            Confirm::Uninstall(p, _) => uninstall_confirm_text(&p.display_name),
             Confirm::Remove(items, _, ctx) => {
                 if ctx.make_backups {
                     format!(
@@ -1003,16 +1003,24 @@ fn complete_confirm_text(name: &str, ctx: &SafetyContext) -> String {
              the result lists what would go at {level} confidence."
         )
     } else if ctx.make_backups {
+        // The backup holds only what Oxidize removes itself.
         format!(
-            "Remove {name} completely? Running copies are closed, everything found at {level} \
-             confidence is removed, a backup is kept."
+            "Remove {name} completely? Running copies are asked to close, everything found at \
+             {level} confidence is removed, a backup is kept. What its own uninstaller removes, \
+             if it runs, is not in the backup."
         )
     } else {
         format!(
-            "Remove {name} completely? Running copies are closed, everything found at {level} \
-             confidence is removed permanently, no backup is kept."
+            "Remove {name} completely? Running copies are asked to close, everything found at \
+             {level} confidence is removed permanently, no backup is kept."
         )
     }
+}
+
+/// The question "Run uninstaller" asks. The backup setting does not reach
+/// what a program's own uninstaller removes, so it says so either way.
+fn uninstall_confirm_text(name: &str) -> String {
+    format!("Run the uninstaller for {name}? What it removes is not backed up.")
 }
 
 /// "1 running process", "2 running processes".
@@ -1465,7 +1473,8 @@ impl OxidizeApp {
             Setting::Backups => {
                 ui.checkbox(&mut self.make_backups, "Back up before deleting")
                     .on_hover_text(
-                        "Export registry keys to .reg and quarantine files before deleting",
+                        "Export registry keys to .reg and quarantine files before Oxidize deletes \
+                         them. What a program's own uninstaller removes is not covered.",
                     );
             }
             Setting::Silent => {
@@ -3873,16 +3882,25 @@ mod tests {
         };
         assert_eq!(
             complete_confirm_text("Example Player", &ctx(false, true)),
-            "Remove Example Player completely? Running copies are closed, everything found at \
-             high confidence is removed, a backup is kept."
+            "Remove Example Player completely? Running copies are asked to close, everything \
+             found at high confidence is removed, a backup is kept. What its own uninstaller \
+             removes, if it runs, is not in the backup."
         );
         assert_eq!(
             complete_confirm_text("Example Player", &ctx(false, false)),
-            "Remove Example Player completely? Running copies are closed, everything found at \
-             high confidence is removed permanently, no backup is kept."
+            "Remove Example Player completely? Running copies are asked to close, everything \
+             found at high confidence is removed permanently, no backup is kept."
         );
         assert!(complete_confirm_text("Example Player", &ctx(true, true))
             .contains("nothing is closed or removed"));
+    }
+
+    #[test]
+    fn running_an_uninstaller_never_promises_a_backup() {
+        assert_eq!(
+            uninstall_confirm_text("Example Player"),
+            "Run the uninstaller for Example Player? What it removes is not backed up."
+        );
     }
 
     #[test]
