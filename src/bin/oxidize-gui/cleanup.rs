@@ -704,7 +704,8 @@ fn folder_list(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
         .iter()
         .filter(|o| state.folders.contains(&o.path))
         .count();
-    egui::CollapsingHeader::new(format!("{} folders, {ticked} ticked", f.folders.len()))
+    let folders = count(f.folders.len(), "folder", "folders");
+    egui::CollapsingHeader::new(format!("{folders}, {ticked} ticked"))
         .id_salt("cleanup_folders")
         .default_open(f.folders.len() <= 20)
         .show(ui, |ui| {
