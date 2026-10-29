@@ -1245,8 +1245,11 @@ impl eframe::App for OxidizeApp {
 /// Outline whatever holds the keyboard focus in copper, as the search field
 /// outlines itself, so Tab never lands on something that looks untouched.
 fn focus_ring(ctx: &egui::Context, t: &Tint) {
+    // Only a widget drawn in this pass: one that just went keeps its place
+    // from the last pass, where something else may sit now.
     let Some(response) = ctx
         .memory(|m| m.focused())
+        .filter(|&id| ctx.viewport(|v| v.this_pass.widgets.contains(id)))
         .and_then(|id| ctx.read_response(id))
     else {
         return;
@@ -5075,5 +5078,63 @@ mod tests {
             assert!(has_ring(&shapes, rect, copper), "no focus ring at {rect:?}");
         }
         assert!(seen.len() > 5, "{}", seen.len());
+    }
+
+    #[test]
+    fn a_focused_row_that_leaves_the_list_leaves_no_ring_behind() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let mut app = app();
+        app.programs = vec![example_program()];
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = |tab: bool| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            events: if tab {
+                vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        };
+        let mut run = |app: &mut OxidizeApp, tab: bool| {
+            let mut out = ctx.run_ui(input(tab), |ui| app.ui(ui, &mut frame));
+            out.textures_delta.clear();
+            out
+        };
+        run(&mut app, false);
+        let copper = Tint::of(ctx.global_style().visuals.dark_mode).copper;
+        let mut row = None;
+        for _ in 0..40 {
+            run(&mut app, true);
+            run(&mut app, false);
+            let id = ctx
+                .memory(|m| m.focused())
+                .expect("Tab gives something focus");
+            let rect = ctx
+                .read_response(id)
+                .expect("the focused widget is shown")
+                .rect;
+            // Only the table row spans the width of the table.
+            if rect.width() > 500.0 {
+                row = Some(rect);
+                break;
+            }
+        }
+        let rect = row.expect("Tab reaches the row");
+        // A refresh after an uninstall takes the row away.
+        app.programs.clear();
+        let out = run(&mut app, false);
+        let shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+        assert!(!has_ring(&shapes, rect, copper), "ring left at {rect:?}");
     }
 }
