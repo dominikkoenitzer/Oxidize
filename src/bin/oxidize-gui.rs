@@ -1146,6 +1146,11 @@ fn window_error(text: &str) -> String {
     }
 }
 
+/// The removal stopped because the uninstaller it needed did not start.
+fn never_started(out: &Outcome) -> bool {
+    out.error.is_some() && out.vendor.runs() && out.uninstaller.is_none()
+}
+
 /// One line on how a complete removal ended, for the status bar.
 fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
     if dry_run {
@@ -1155,7 +1160,7 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         )
     } else if out.complete() {
         format!("{name}: nothing left.")
-    } else if out.error.is_some() && out.vendor.runs() && out.uninstaller.is_none() {
+    } else if never_started(out) {
         format!("{name}: the uninstaller did not start. Nothing was removed.")
     } else if out.verdict.still_installed {
         format!(
@@ -2135,7 +2140,7 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             ))
             .color(t.weak),
         );
-    } else if v.still_installed {
+    } else if v.still_installed && !never_started(out) {
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
@@ -4822,6 +4827,40 @@ mod tests {
         assert!(!status.contains("cancelled"), "{status}");
         let log = complete_log("Example Player", &out, false).join("\n");
         assert!(!log.contains("--elevate"), "{log}");
+    }
+
+    #[test]
+    fn an_uninstaller_that_never_started_is_not_called_cancelled_in_the_details() {
+        let mut out = finished(None);
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = Some(uninstall::NEEDS_ADMIN.to_string());
+        let done = Completed {
+            program: example_program(),
+            outcome: out,
+            dry_run: false,
+        };
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let t = Tint::of(ctx.global_style().visuals.dark_mode);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_complete(ui, &t, &done, false, true);
+        });
+        output.textures_delta.clear();
+        let mut shown = String::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                shown.push_str(text.galley.text());
+                shown.push('\n');
+            }
+        }
+        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("cancelled"), "{shown}");
     }
 
     /// True when `shapes` hold a copper outline drawn on `rect`.
