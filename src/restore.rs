@@ -135,10 +135,20 @@ fn within(dir: &Path, p: &Path) -> bool {
 fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
     let files = norm(&root.join("files"));
     let s = from.to_string_lossy().replace('/', "\\");
-    if !s.to_lowercase().starts_with(&format!("{files}\\")) {
+    let prefix = format!("{files}\\");
+    if !s.to_lowercase().starts_with(&prefix) {
         return None;
     }
-    let rest = s.get(files.len() + 1..)?;
+    // Lower case can change a name's length (`İ`), so the prefix is measured in `s` itself.
+    let mut lowered = 0;
+    let cut = s.char_indices().find_map(|(at, c)| {
+        if lowered == prefix.len() {
+            return Some(at);
+        }
+        lowered += c.to_lowercase().map(char::len_utf8).sum::<usize>();
+        None
+    })?;
+    let rest = &s[cut..];
     let (first, tail) = rest.split_once('\\').unwrap_or((rest, ""));
     if first.is_empty() {
         return None;
@@ -602,6 +612,24 @@ mod tests {
             r"C:\Elsewhere\files\C\Foo",
         ] {
             assert_eq!(origin(outside), None, "{outside}");
+        }
+    }
+
+    #[test]
+    fn a_backup_under_a_name_that_changes_length_in_lower_case_still_goes_home() {
+        for root in [
+            r"C:\Profiles\İsmail\Oxidize\backups\2026-10-18 Example",
+            "C:\\B\\backups\\2026-10-18 \u{212A}elvin Tools",
+            r"C:\B\backups\2026-10-18 İİİ",
+        ] {
+            let root = Path::new(root);
+            let from = root.join(r"files\C\ProgramData\Foo");
+            assert_eq!(
+                origin_of(root, &from),
+                Some(r"C:\ProgramData\Foo".into()),
+                "{}",
+                root.display()
+            );
         }
     }
 
