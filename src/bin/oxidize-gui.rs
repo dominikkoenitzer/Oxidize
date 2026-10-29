@@ -2507,7 +2507,7 @@ impl Tint {
                 side: rgb(0xff, 0xff, 0xff),
                 field: rgb(0xff, 0xff, 0xff),
                 text: rgb(0x1f, 0x1c, 0x19),
-                weak: rgb(0x6e, 0x68, 0x60),
+                weak: rgb(0x6a, 0x64, 0x5c),
                 line: rgb(0xe4, 0xde, 0xd6),
                 line_strong: rgb(0xcf, 0xc6, 0xbb),
                 button: rgb(0xff, 0xff, 0xff),
@@ -4988,6 +4988,15 @@ mod tests {
                     "dark {dark}: {text:?} on {fill:?} is {ratio:.2}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn grey_text_on_the_selected_row_is_readable_in_both_themes() {
+        for dark in [false, true] {
+            let t = Tint::of(dark);
+            let ratio = contrast(t.weak, t.selected);
+            assert!(ratio >= 4.5, "dark {dark}: {ratio:.2}");
         }
     }
 
