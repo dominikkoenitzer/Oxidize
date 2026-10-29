@@ -388,7 +388,7 @@ impl OxidizeApp {
                     still_installed: uninstall::still_installed(&program),
                     program,
                 },
-                Err(e) => Msg::Error(format!("Uninstall failed: {e:#}")),
+                Err(e) => Msg::Error(window_error(&format!("Uninstall failed: {e:#}"))),
             },
             Err(e) => Msg::Error(format!("Cannot uninstall {}: {e:#}", program.display_name)),
         });
@@ -1119,10 +1119,21 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
         }
     }
     if let Some(e) = &out.error {
-        lines.push(format!("ERROR: {e}"));
+        lines.push(format!("ERROR: {}", window_error(e)));
     }
     lines.push(complete_status(name, out, false));
     lines
+}
+
+/// An error as the window shows it: the window has a button where the
+/// command line has a flag.
+fn window_error(text: &str) -> String {
+    if text.contains(uninstall::NEEDS_ADMIN) {
+        "The uninstaller needs administrator rights: Restart as administrator, then try again."
+            .to_string()
+    } else {
+        text.to_string()
+    }
 }
 
 /// One line on how a complete removal ended, for the status bar.
@@ -1134,6 +1145,8 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         )
     } else if out.complete() {
         format!("{name}: nothing left.")
+    } else if out.error.is_some() && out.vendor.runs() && out.uninstaller.is_none() {
+        format!("{name}: the uninstaller did not start. Nothing was removed.")
     } else if out.verdict.still_installed {
         format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running."
@@ -2130,7 +2143,7 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
         );
     }
     if let Some(e) = &out.error {
-        ui.add(egui::Label::new(RichText::new(e).color(t.red)).wrap());
+        ui.add(egui::Label::new(RichText::new(window_error(e)).color(t.red)).wrap());
     }
     if undo {
         ui.add_space(6.0);
@@ -4698,6 +4711,29 @@ mod tests {
         let eframe = &manifest[manifest.find("\neframe = ").unwrap()..];
         let features = &eframe[..eframe.find("] }").unwrap()];
         assert!(features.contains("\"clipboard\""), "{features}");
+    }
+
+    #[test]
+    fn an_uninstaller_refused_for_rights_points_to_the_restart_button() {
+        let shown = window_error(&format!("Uninstall failed: {}", uninstall::NEEDS_ADMIN));
+        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("--elevate"), "{shown}");
+
+        // Remove completely: the uninstaller never started, nothing went.
+        let mut out = finished(None);
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = Some(uninstall::NEEDS_ADMIN.to_string());
+        let status = complete_status("Example Player", &out, false);
+        assert!(status.contains("did not start"), "{status}");
+        assert!(!status.contains("cancelled"), "{status}");
+        let log = complete_log("Example Player", &out, false).join("\n");
+        assert!(!log.contains("--elevate"), "{log}");
     }
 
     /// True when `shapes` hold a copper outline drawn on `rect`.
