@@ -241,16 +241,12 @@ pub fn is_shared_root_key(subpath: &str) -> bool {
         r"SOFTWARE\Policies",
         r"SOFTWARE\RegisteredApplications",
         r"SOFTWARE\WOW6432Node",
-        r"SOFTWARE\WOW6432Node\Classes",
-        r"SOFTWARE\WOW6432Node\Microsoft",
-        r"SOFTWARE\WOW6432Node\Policies",
         r"SOFTWARE\Microsoft\Windows",
         r"SOFTWARE\Microsoft\Windows\CurrentVersion",
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
         r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
-        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
         r"SOFTWARE\Classes\CLSID",
         r"SOFTWARE\Classes\Applications",
         r"SYSTEM\CurrentControlSet",
@@ -259,9 +255,18 @@ pub fn is_shared_root_key(subpath: &str) -> bool {
         r"SYSTEM\ControlSet001\Services",
     ];
     let parts: Vec<&str> = subpath.split('\\').collect();
+    // The 32-bit view of a shared key is shared too.
+    let native = parts
+        .iter()
+        .filter(|p| !p.eq_ignore_ascii_case("WOW6432Node"))
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\\");
     parts.len() < 2
         || parts.iter().any(|p| p.trim().is_empty())
-        || SHARED.iter().any(|k| k.eq_ignore_ascii_case(subpath))
+        || SHARED
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(subpath) || k.eq_ignore_ascii_case(&native))
 }
 
 /// True only when the key is genuinely not there. A key we may not open is
@@ -329,6 +334,32 @@ mod tests {
             r"SOFTWARE\Example Vendor\Example Product",
             r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Example",
             r"SYSTEM\CurrentControlSet\Services\ExampleService",
+        ] {
+            assert!(!is_shared_root_key(key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn the_32_bit_view_of_a_shared_key_is_shared_too() {
+        for key in [
+            r"SOFTWARE\WOW6432Node\Microsoft",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+            r"Software\Wow6432Node\Microsoft\Windows\CurrentVersion\App Paths",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            r"SOFTWARE\WOW6432Node\Clients",
+            r"SOFTWARE\WOW6432Node\RegisteredApplications",
+            r"SOFTWARE\WOW6432Node\Classes\CLSID",
+            r"SOFTWARE\Classes\WOW6432Node",
+            r"SOFTWARE\Classes\WOW6432Node\CLSID",
+        ] {
+            assert!(is_shared_root_key(key), "{key:?}");
+        }
+        for key in [
+            r"SOFTWARE\WOW6432Node\Example Vendor",
+            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Example",
+            r"SOFTWARE\Classes\WOW6432Node\CLSID\{00000000-0000-0000-0000-0000000000E1}",
         ] {
             assert!(!is_shared_root_key(key), "{key:?}");
         }
