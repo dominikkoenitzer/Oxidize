@@ -208,8 +208,8 @@ struct OxidizeApp {
 
 impl OxidizeApp {
     /// The window's state before anything is loaded: no programs, the
-    /// default settings, nothing running.
-    fn blank() -> Self {
+    /// default settings, nothing running, and `cleanup` as the Clean up tab.
+    fn blank(cleanup: cleanup::Cleanup) -> Self {
         let (tx, rx) = channel();
         OxidizeApp {
             programs: Vec::new(),
@@ -219,7 +219,7 @@ impl OxidizeApp {
             checked: Vec::new(),
             uninstalled: None,
             complete: None,
-            cleanup: cleanup::Cleanup::new(),
+            cleanup,
             tab: Tab::Programs,
             filter: String::new(),
             quick: QuickFilter::All,
@@ -246,7 +246,7 @@ impl OxidizeApp {
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_style(&cc.egui_ctx);
-        let mut app = OxidizeApp::blank();
+        let mut app = OxidizeApp::blank(cleanup::Cleanup::new());
         app.elevated = safety::is_elevated();
         app.jobs = 1;
         app.status = LOADING.to_string();
@@ -3435,8 +3435,19 @@ mod tests {
     use super::*;
     use oxidize::model::{Hive, RegistrySource, RegistryView};
 
+    /// The window with a stand-in protected list, so no test reads the
+    /// user's own.
     fn app() -> OxidizeApp {
-        OxidizeApp::blank()
+        OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())))
+    }
+
+    fn stand_in_list() -> std::path::PathBuf {
+        std::env::temp_dir().join("oxidize-gui-test-protected.txt")
+    }
+
+    #[test]
+    fn the_tests_keep_to_a_stand_in_protected_list() {
+        assert_eq!(app().cleanup.list_file, Ok(stand_in_list()));
     }
 
     #[test]
@@ -3559,7 +3570,7 @@ mod tests {
         app.job_done();
         assert_eq!(app.close_step(false), Some(egui::ViewportCommand::Close));
         // Nothing running: closing is closing.
-        let mut idle = OxidizeApp::blank();
+        let mut idle = OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())));
         assert_eq!(idle.close_step(true), None);
     }
 

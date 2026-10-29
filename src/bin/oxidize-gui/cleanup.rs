@@ -86,7 +86,7 @@ impl Cleanup {
     }
 
     /// The tab with the protected list read from `file`.
-    fn from_file(file: anyhow::Result<PathBuf>) -> Self {
+    pub fn from_file(file: anyhow::Result<PathBuf>) -> Self {
         let list_file = file.map_err(|e| format!("{e:#}"));
         let read = match &list_file {
             Ok(f) => protect::load_from(f).map_err(|e| format!("{e:#}")),
