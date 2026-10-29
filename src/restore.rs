@@ -329,8 +329,9 @@ mod tests {
     use crate::backup::BackupSession;
     use crate::model::LeftoverKind;
 
+    /// A fresh folder for one test, for its `cleanup` to remove.
     fn fixture(name: &str) -> std::path::PathBuf {
-        let root = std::env::temp_dir().join(format!("oxidize_restore_{name}"));
+        let root = backup::test_path(&format!("oxidize_restore_{name}"));
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
@@ -414,7 +415,8 @@ mod tests {
 
     #[test]
     fn a_registry_export_writes_only_into_the_key_it_came_from() {
-        let root = fixture("reg_scope");
+        let root = backup::TestDir::new("oxidize_restore_reg_scope");
+        fs::create_dir_all(&root).unwrap();
         let file = root.join("export.reg");
         let own = r"HKEY_CURRENT_USER\SOFTWARE\Example Vendor";
         reg_file(&file, &[own, &format!(r"{own}\Settings")]);
@@ -451,7 +453,6 @@ mod tests {
                 "{sections:?} {key:?}"
             );
         }
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

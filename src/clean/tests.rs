@@ -78,7 +78,7 @@ impl Tools for FakeTools {
 /// A PC in a folder: temp folders, dumps, a Recycle Bin, a browser and a
 /// previous Windows.
 struct Pc {
-    root: PathBuf,
+    root: crate::backup::TestDir,
     places: Places,
 }
 
@@ -114,7 +114,7 @@ impl Pc {
             local_appdata: Some(local),
             roaming_appdata: Some(root.join("Roaming")),
             windows_old: Some(root.join("Windows.old")),
-            system_drive: Some(root.clone()),
+            system_drive: Some(root.to_path_buf()),
         };
         Pc { root, places }
     }
@@ -183,7 +183,7 @@ impl Pc {
     /// changed nothing.
     fn snapshot(&self) -> Vec<(PathBuf, u64)> {
         let mut out = Vec::new();
-        let mut stack = vec![self.root.clone()];
+        let mut stack = vec![self.root.to_path_buf()];
         while let Some(d) = stack.pop() {
             for e in fs::read_dir(&d).unwrap().flatten() {
                 let m = fs::symlink_metadata(e.path()).unwrap();
@@ -195,12 +195,6 @@ impl Pc {
         }
         out.sort();
         out
-    }
-}
-
-impl Drop for Pc {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 

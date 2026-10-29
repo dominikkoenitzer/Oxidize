@@ -137,8 +137,10 @@ mod tests {
     use crate::clean::files::tests::fixture;
 
     /// A profile laid out in a test folder, and the check that knows it.
-    fn profile(name: &str) -> (PathBuf, TempCheck) {
-        let root = fixture(name).join("me");
+    /// The folder goes when the returned guard is dropped.
+    fn profile(name: &str) -> (crate::backup::TestDir, PathBuf, TempCheck) {
+        let dir = fixture(name);
+        let root = dir.join("me");
         let local = root.join(r"AppData\Local");
         for d in [
             local.join("Temp"),
@@ -161,12 +163,12 @@ mod tests {
             homes: vec![local.join("Temp")],
             profile: Some(root.clone()),
         };
-        (root, check)
+        (dir, root, check)
     }
 
     #[test]
     fn only_a_folder_in_a_temp_place_passes() {
-        let (me, check) = profile("temp_root_places");
+        let (_dir, me, check) = profile("temp_root_places");
         let local = me.join(r"AppData\Local");
         assert_eq!(check.refusal(&local.join("Temp")), None);
         let inner = local.join(r"Temp\Setup 1");
@@ -193,7 +195,6 @@ mod tests {
         refused(&under_docs, "lies inside");
         refused(Path::new("Temp"), "not a full path");
         refused(Path::new(""), "not a full path");
-        let _ = std::fs::remove_dir_all(me.parent().unwrap());
     }
 
     #[test]

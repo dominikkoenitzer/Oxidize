@@ -361,10 +361,9 @@ pub(crate) mod tests {
     use super::*;
     use std::fs::FileTimes;
 
-    /// A fresh folder under the temp folder for one test.
-    pub fn fixture(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("oxidize_clean_{name}"));
-        let _ = fs::remove_dir_all(&root);
+    /// A fresh folder under the temp folder for one test, gone when the test ends.
+    pub fn fixture(name: &str) -> crate::backup::TestDir {
+        let root = crate::backup::TestDir::new(&format!("oxidize_clean_{name}"));
         fs::create_dir_all(&root).unwrap();
         root
     }
@@ -432,7 +431,6 @@ pub(crate) mod tests {
         assert!(!root.join("sub").exists());
         // The root folder itself always stays.
         assert!(root.is_dir());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -451,7 +449,6 @@ pub(crate) mod tests {
         assert_eq!(done.files, 0);
         assert_eq!(kept(&done.kept, KeptReason::Recent(7)).0, 1);
         assert!(root.join("a.tmp").exists());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -487,7 +484,6 @@ pub(crate) mod tests {
         assert_eq!(kept(&done.kept, KeptReason::InUse), (1, 40));
         assert!(root.join("held.tmp").exists());
         drop(held);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -527,7 +523,6 @@ pub(crate) mod tests {
         assert!(walk(&root, &week(), &whole, SystemTime::now())
             .candidates
             .is_empty());
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -543,7 +538,6 @@ pub(crate) mod tests {
         };
         let w = walk(&root, &rule, &Protected::default(), SystemTime::now());
         assert_eq!((w.files(), w.bytes()), (2, 50));
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -555,7 +549,7 @@ pub(crate) mod tests {
         let made = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(&link)
-            .arg(&outside)
+            .arg(&*outside)
             .output()
             .unwrap();
         assert!(made.status.success());
@@ -568,9 +562,6 @@ pub(crate) mod tests {
             SystemTime::now(),
         );
         assert!(outside.join("keep.txt").exists());
-        let _ = fs::remove_dir(&link);
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
@@ -590,7 +581,7 @@ pub(crate) mod tests {
         let made = std::process::Command::new("cmd")
             .args(["/c", "mklink", "/J"])
             .arg(root.join("sub"))
-            .arg(&elsewhere)
+            .arg(&*elsewhere)
             .output()
             .unwrap();
         assert!(made.status.success());
@@ -603,9 +594,6 @@ pub(crate) mod tests {
         assert_eq!(done.files, 0);
         assert!(elsewhere.join("old.tmp").exists());
         assert!(elsewhere.join("empty").exists());
-        let _ = fs::remove_dir(root.join("sub"));
-        let _ = fs::remove_dir_all(&root);
-        let _ = fs::remove_dir_all(&elsewhere);
     }
 
     #[test]
@@ -625,6 +613,5 @@ pub(crate) mod tests {
         );
         assert_eq!(done.files, 1);
         assert!(!path.exists());
-        let _ = fs::remove_dir_all(&root);
     }
 }

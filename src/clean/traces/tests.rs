@@ -82,10 +82,10 @@ impl Shell for FakeShell {
     }
 }
 
-/// A stand-in profile. Its registry key goes when the test ends, also when
-/// it fails.
+/// A stand-in profile. Its registry key and folder go when the test ends,
+/// also when it fails.
 struct Profile {
-    root: PathBuf,
+    root: crate::backup::TestDir,
     places: TracePlaces,
     key: String,
 }
@@ -95,7 +95,6 @@ impl Drop for Profile {
         let _ = hkcu().delete_subkey_all(&self.key);
         // The parent goes once no other test uses it.
         let _ = hkcu().delete_subkey(STAND_IN_KEY);
-        let _ = fs::remove_dir_all(&self.root);
     }
 }
 
@@ -519,5 +518,4 @@ fn a_file_explorer_took_first_is_not_a_failure() {
     // Anything else is still an error.
     fs::create_dir_all(dir.join("a folder")).unwrap();
     assert!(remove_if_there(&dir.join("a folder")).is_err());
-    let _ = fs::remove_dir_all(&dir);
 }

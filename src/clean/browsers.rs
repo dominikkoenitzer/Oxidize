@@ -301,7 +301,6 @@ mod tests {
             );
             assert!(!d.starts_with("Crashpad"), "{d}");
         }
-        let _ = fs::remove_dir_all(&local);
     }
 
     #[test]
@@ -339,7 +338,6 @@ mod tests {
         // The cache folders themselves stay for the browser to fill again.
         assert!(p.join("Cache").is_dir());
         assert!(!p.join(r"Cache\Cache_Data\data_1").exists());
-        let _ = fs::remove_dir_all(&local);
     }
 
     #[test]
@@ -360,7 +358,6 @@ mod tests {
         // The lock file alone says it runs, whatever the process list shows.
         fs::write(user_data.join("lockfile"), "").unwrap();
         assert!(is_running(b, &[]));
-        let _ = fs::remove_dir_all(&local);
     }
 
     #[test]
@@ -396,6 +393,5 @@ mod tests {
             b,
             &[PathBuf::from(r"D:\Apps\Firefox\firefox.exe")]
         ));
-        let _ = fs::remove_dir_all(&root);
     }
 }

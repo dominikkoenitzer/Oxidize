@@ -320,8 +320,7 @@ mod tests {
 
     #[test]
     fn a_path_that_is_gone_is_covered_by_the_real_name_of_its_folder() {
-        let dir = std::env::temp_dir().join("oxidize_protect_junction_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::backup::TestDir::new("oxidize_protect_junction_test");
         let real = dir.join("real");
         std::fs::create_dir_all(real.join("keep")).unwrap();
         let link = dir.join("link");
@@ -340,14 +339,11 @@ mod tests {
         let by_real = Protected::new([real.join("keep").display().to_string()]);
         assert!(by_real.covers(&link.join("keep").join("gone.txt")));
         assert!(!by_real.covers(&link.join("other.txt")));
-        let _ = std::fs::remove_dir(&link);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_list_is_saved_and_read_back() {
-        let dir = std::env::temp_dir().join("oxidize_protect_save_test");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::backup::TestDir::new("oxidize_protect_save_test");
         let file = dir.join("Oxidize").join(FILE_NAME);
         assert!(load_from(&file).unwrap().is_empty());
         let mut p = Protected::default();
@@ -358,6 +354,5 @@ mod tests {
         assert!(!p.remove(r"C:\One"));
         save_to(&p, &file).unwrap();
         assert_eq!(load_from(&file).unwrap().entries(), [r"C:\Two"]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

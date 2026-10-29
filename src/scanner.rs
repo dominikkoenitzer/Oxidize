@@ -2760,8 +2760,7 @@ mod tests {
 
     #[test]
     fn a_folder_holding_a_longer_namesake_is_a_family_folder() {
-        let root = std::env::temp_dir().join("oxidize_namesake_test");
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_namesake_test");
         fs::create_dir_all(root.join("Python").join("Python313")).unwrap();
         fs::create_dir_all(root.join("Git").join("bin")).unwrap();
 
@@ -2769,8 +2768,6 @@ mod tests {
         assert!(holds_namesake_child(&root.join("Python"), &python));
         let git = name_target("Git", Some("The Git Development Community"));
         assert!(!holds_namesake_child(&root.join("Git"), &git));
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2890,8 +2887,7 @@ mod tests {
 
     #[test]
     fn a_folder_that_holds_another_install_is_left_alone() {
-        let root = std::env::temp_dir().join("oxidize_shared_test");
-        let _ = fs::remove_dir_all(&root);
+        let root = crate::backup::TestDir::new("oxidize_shared_test");
         let game = root
             .join("Steam")
             .join("library")
@@ -2918,8 +2914,6 @@ mod tests {
             &mut out,
         );
         assert!(out.is_empty(), "{out:?}");
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -3135,8 +3129,7 @@ mod tests {
 
     #[test]
     fn a_file_named_like_the_programs_elsewhere_is_not_the_programs() {
-        let base = std::env::temp_dir().join("oxidize_exe_name_test");
-        let _ = fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_exe_name_test");
         let own = base.join("Example Runtime");
         let other = base.join("Other App").join("bin");
         fs::create_dir_all(&own).unwrap();
@@ -3162,15 +3155,13 @@ mod tests {
             match_exe_item("x", Some(&base.join("Gone").join("node.exe")), &t),
             Some((Confidence::High, _))
         ));
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn what_runs_from_an_untrusted_install_folder_is_only_as_sure_as_the_folder() {
         // A tool that recorded a folder whose name says nothing about it,
         // holding another program's game that is still there.
-        let base = std::env::temp_dir().join("oxidize_untrusted_folder_test");
-        let _ = fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_untrusted_folder_test");
         let tools = base.join("Tools");
         let game = tools.join("OtherGame").join("game.exe");
         fs::create_dir_all(game.parent().unwrap()).unwrap();
@@ -3186,15 +3177,13 @@ mod tests {
         t.install_vouched = true;
         let hit = match_exe_item("Other Game", Some(&game), &t);
         assert!(matches!(hit, Some((Confidence::High, _))), "{hit:?}");
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
     fn what_points_at_a_gone_file_in_an_untrusted_folder_still_goes() {
         // The program is uninstalled; its folder went with it, and the
         // autostart, task, service and PATH entry point at nothing.
-        let base = std::env::temp_dir().join("oxidize_gone_untrusted_test");
-        let _ = fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_gone_untrusted_test");
         let tools = base.join("Tools");
         let mut t = name_target("Quillmark", Some("Example Studio"));
         t.install_location = Some(tools.clone());
@@ -3208,7 +3197,6 @@ mod tests {
         ] {
             assert_eq!(hit, Some(Confidence::High));
         }
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -3494,8 +3482,7 @@ mod tests {
 
     #[test]
     fn a_root_behind_a_junction_is_protected_where_it_really_is() {
-        let base = std::env::temp_dir().join("oxidize_guard_junction_test");
-        let _ = fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_guard_junction_test");
         let real = base.join("real root");
         fs::create_dir_all(real.join("Vendor")).unwrap();
         let link = base.join("linked root");
@@ -3517,8 +3504,6 @@ mod tests {
         // What is inside it is still only a folder.
         assert!(!is_protected_path_in(&real.join("Vendor"), &roots));
         assert!(!is_protected_path_in(&link.join("Vendor"), &roots));
-        let _ = fs::remove_dir(&link);
-        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
