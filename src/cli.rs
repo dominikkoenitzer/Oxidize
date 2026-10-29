@@ -638,4 +638,11 @@ mod tests {
         assert_eq!(bare_start(0, true), BareStart::Help);
         assert_eq!(bare_start(0, false), BareStart::Help);
     }
+
+    #[test]
+    fn the_readme_names_the_version_being_built() {
+        let readme = include_str!("../README.md");
+        let named = format!("The latest version is {};", env!("CARGO_PKG_VERSION"));
+        assert!(readme.contains(&named), "{named}");
+    }
 }
