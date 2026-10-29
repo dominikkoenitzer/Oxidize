@@ -1491,14 +1491,15 @@ fn other_program_install_dirs(
 /// gone, and the trailing dots and spaces Windows itself ignores taken off
 /// every part. `C:/Windows`, `C:\PROGRA~1` and `C:\Windows.` all name a
 /// protected directory, and a guard that compares raw strings misses all
-/// three. A path that does not exist yet is read the same way without its
-/// real name: `C:\\Windows`, `C:\.\Windows` and `C:\Temp\..\Windows` are
+/// three. A path that does not exist yet is read the same way, with the real
+/// name of the part that does exist: `C:\\Windows`, `C:\.\Windows`,
+/// `C:\Temp\..\Windows` and a junction to `C:\Windows` all lead into
 /// `C:\Windows` too.
 fn resolve_for_guard(p: &Path) -> String {
     let real = std::fs::canonicalize(p)
         .or_else(|e| {
             if p.is_absolute() {
-                std::path::absolute(p)
+                std::path::absolute(p).map(|p| real_where_there(&p))
             } else {
                 Err(e)
             }
@@ -1515,6 +1516,21 @@ fn resolve_for_guard(p: &Path) -> String {
         .join("\\")
         .trim_end_matches('\\')
         .to_string()
+}
+
+/// `p` with its longest leading part that exists replaced by that part's real
+/// name, and the rest as written.
+fn real_where_there(p: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = p;
+    while let (Some(parent), Some(name)) = (at.parent(), at.file_name()) {
+        rest.push(name);
+        if let Ok(real) = std::fs::canonicalize(parent) {
+            return rest.iter().rev().fold(real, |path, name| path.join(name));
+        }
+        at = parent;
+    }
+    p.to_path_buf()
 }
 
 /// Paths that are never deletable: drive roots, the Windows folder, the scan
@@ -3482,6 +3498,36 @@ mod tests {
         assert!(!is_protected_path(Path::new(&format!(
             r"{drive}\Program Files\\Some Vendor\.\Some App"
         ))));
+    }
+
+    #[test]
+    fn a_path_not_there_yet_behind_a_junction_is_read_where_the_junction_leads() {
+        let base = std::env::temp_dir().join("oxidize_guard_new_behind_junction_test");
+        let link = base.join("windows link");
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(env_dir("windir").unwrap())
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        let written = [
+            link.join(r"System32\oxidize-guard-test.dll"),
+            link.join(r"oxidize-no-such-folder\oxidize-guard-test.dll"),
+        ];
+        let seen: Vec<_> = written
+            .iter()
+            .map(|p| (p.exists(), is_protected_path(p)))
+            .collect();
+        let _ = fs::remove_dir(&link);
+        let _ = fs::remove_dir_all(&base);
+        for (p, (exists, protected)) in written.iter().zip(seen) {
+            assert!(!exists, "{}", p.display());
+            assert!(protected, "{}", p.display());
+        }
     }
 
     #[test]
