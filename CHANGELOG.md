@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.2.12, 2026-10-30
+
+- A git repository in a temp folder stays whole, however old its files are.
+  A folder with a `.git` folder or file, or a bare repository, is never
+  entered, so a clean no longer takes old files out of a checkout and
+  leaves it broken. It is counted in `kept` with the code `repository`.
+- A clean refuses to start while the protected list cannot be read, and the
+  list refuses entries that are not full paths.
+- A temp folder inside Windows' own is counted once.
+- A folder whose move into the backup stopped halfway is taken back whole,
+  and a restore puts back what such a move took. A dry restore counts only
+  what it would put back. Clearing backups goes on past one that cannot be
+  deleted, and an empty backup name is refused.
+- The 32-bit view of a shared registry key counts as shared, a program's
+  icon entry is matched by its whole path, and a shortcut's path is read in
+  the system code page.
+- A process that stays is named before an uninstaller that never ran, a
+  missing uninstaller file is named in plain words, and a dry run checks
+  the registration the way the removal does.
+- `--elevate` prints the output of `list` and `protect` again.
+- In the window, every widget Tab reaches shows its focus, counts of one
+  say "1 item", and grey text and the dry run badge read on their fills.
+
 ## 0.2.11, 2026-10-29
 
 - A process is never ended. Each one that runs from the program's folders,
