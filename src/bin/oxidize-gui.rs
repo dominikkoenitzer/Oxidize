@@ -1376,7 +1376,7 @@ impl OxidizeApp {
                     if self.dry_run {
                         match uninstall::plan(&p, self.silent) {
                             Ok(plan) => {
-                                let line = format!("[dry-run] would run: {}", plan.display());
+                                let line = format!("dry run: would run {}", plan.display());
                                 self.log.push(line.clone());
                                 self.status = line;
                             }
@@ -4789,6 +4789,20 @@ mod tests {
         assert_eq!(
             complete_status("Example Player", &out, false),
             "Example Player: 1 item is still there."
+        );
+    }
+
+    #[test]
+    fn a_dry_run_of_the_uninstaller_reads_like_every_other_dry_run() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.dry_run = true;
+        let mut program = example_program();
+        program.uninstall_string = Some(r"D:\Apps\Example\uninstall.exe".to_string());
+        app.act(&ctx, Action::Uninstall(program));
+        assert_eq!(
+            app.status,
+            r"dry run: would run D:\Apps\Example\uninstall.exe"
         );
     }
 
