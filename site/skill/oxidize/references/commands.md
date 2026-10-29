@@ -46,7 +46,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 
 - `PROGRAM`: a name, a unique part of it, or its id: the `registry_key` of a program or the `family_name` of a Store app. Matching tries the exact id, then the exact name, then a unique part of the name.
 - Several names run one after another. Every name must match exactly one program before anything runs; otherwise nothing runs and the unclear names are listed with their candidates.
-- Closing: a process whose executable lies in the program's install folder, or in a folder the scan gives the program at High confidence, is asked to close its windows. One still running three seconds later, or one without a window, is ended. Processes in the Windows folder, Oxidize itself and the processes that started it are never closed.
+- Closing: a process whose executable lies in the program's install folder, or in a folder the scan gives the program at High confidence, is asked to close its windows. Nothing is ended by force: one still running three seconds later, or one without a window to be asked through, stops the run with an error before the uninstaller or any removal. Processes in the Windows folder, Oxidize itself and the processes that started it are never closed.
 - The uninstaller is skipped when the program is registered for the current user only, has a folder of its own, is not a Windows Installer product, and owns nothing machine-wide: no service, firewall rule, or key, value or PATH entry in HKLM, and no file under Program Files, ProgramData or the Public folder. Oxidize then removes all of it itself, the uninstall entry included. Every other program runs its uninstaller first.
 - `--use-uninstaller`: always run the program's own uninstaller.
 - `--silent`: use the program's unattended uninstall switches where it has them. For Windows Installer products this adds `/qn /norestart`, for an uninstaller named `unins000.exe` (or another number) without a recorded quiet command `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`. A program without either runs its normal uninstall command. `-y` and `--json` imply `--silent`.
@@ -57,7 +57,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 - Some of Windows' records of a removed file, such as the history of a shortcut, only show once the file is gone. New high-confidence items in the second scan go without another question in one more pass, into the same backup, and a last scan follows. There is never a third pass.
 - The last scan ends the run with `Nothing left.` or a list of what is still there and why. Items below the chosen level are counted as kept.
 - `--dry-run`: lists every process it would close and every item it would remove, and says whether the uninstaller would run. Nothing is closed, started or removed.
-- A Store app guarded as `protected` in `list` is refused. Removing a Store app cannot be backed up; its leftovers found afterwards are. What runs from the app's install folder is closed first, as for a program; a helper with no window is ended at once and named in `would_end` (dry run) or with `"windowless": true` in `closed`.
+- A Store app guarded as `protected` in `list` is refused. Removing a Store app cannot be backed up; its leftovers found afterwards are. What runs from the app's install folder is closed first, as for a program; one that stays stops the removal. A helper with no window is named in `would_stay` (dry run) or with `"windowless": true` in `closed`.
 
 ## scan
 
