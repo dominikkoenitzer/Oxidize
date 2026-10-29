@@ -188,7 +188,7 @@ pub struct TraceArgs {
 #[derive(Args, Debug)]
 pub struct BackupsArgs {
     /// Delete one backup by name.
-    #[arg(long, value_name = "NAME")]
+    #[arg(long, value_name = "NAME", value_parser = named)]
     pub delete: Option<String>,
 
     /// Delete every backup.
@@ -462,6 +462,8 @@ mod tests {
             &["oxidize", "trace", ""],
             &["oxidize", "restore", ""],
             &["oxidize", "scan", "Example", "--publisher", ""],
+            &["oxidize", "backups", "--delete", ""],
+            &["oxidize", "backups", "--delete", " "],
         ] {
             let err = Cli::try_parse_from(args).unwrap_err();
             assert!(err.to_string().contains("empty one"), "{args:?}: {err}");

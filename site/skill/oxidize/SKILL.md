@@ -51,7 +51,7 @@ Follow these on every run.
 - 1: any other error. For example no program matches (`not_found`), a name matches several (`ambiguous`), `scan --remove` on a program that is still installed, or an uninstaller that could not start.
 - 2: the command line did not parse. The message is on stderr, not in JSON.
 - 3: the program is still installed after its uninstall.
-- 4: the removal is incomplete: an item failed or something is left. `restore` exits with 4 when an item could not be put back.
+- 4: the removal is incomplete: an item failed or something is left. `restore` exits with 4 when an item could not be put back, and `backups --clear` when a backup could not be deleted.
 - 5: cancelled: a question was answered no, `--json` ran without `-y`, or the user declined the Windows prompt of `--elevate`.
 
 A batch of several programs exits with the code of the first one that failed. The JSON gives the details: `nothing_left` and `remaining` after `uninstall`, `failed` and each item's `error` in `removal`, and `ok` on every item of `restore`.
