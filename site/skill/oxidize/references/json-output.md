@@ -137,7 +137,7 @@ An object:
 | `seconds` | number, how long the run took |
 | `would_close` | dry run only: `[{ "pid", "exe" }]`, the processes that would be closed |
 | `would_remove` | dry run only: `[Leftover]`, every item that would go |
-| `closed` | missing in a dry run: `[{ "pid", "exe", "how" }]`. `how` is `"closed"` (it closed by itself), `"ended"` or `"failed"`, the last with an `error`. A process ended because it had no window to be asked through also has `"windowless": true`. |
+| `closed` | missing in a dry run: `[{ "pid", "exe", "how" }]`. `how` is `"closed"` (it closed by itself), `"running"` (still running after three seconds, or never asked for want of a window) or `"failed"` (it could not be asked), the last with an `error`. One with no window to be asked through has `"windowless": true`. Any process not `"closed"` stops the run before the uninstaller, and `error` names it. |
 | `uninstaller` | missing in a dry run. `"skipped, <reason>"`, or how it ended: `"finished"`, `"finished, a reboot is required"`, `"finished, a reboot has been started"`, `"reported the product as not installed (1605)"`, `"was cancelled (1602)"`, `"found another installation in progress (1618)"`, `"exited with code N"`, `"ended without an exit code"` or `"was still running after N s"`. `null` when it could not start; `error` says why. |
 | `still_installed` | bool, missing in a dry run |
 | `remaining` | `[Leftover]`, missing in a dry run: the items at the chosen level that the second scan still found |
@@ -159,7 +159,7 @@ With `--keep`: `{ "kind", "program", "command", "uninstaller", "still_installed"
 `{ "kind": "store", "program": Package, "command", "closed", "uninstaller", "still_installed", "may_come_back", "report", "removal" }`
 
 - `command` is `remove package <full_name> for this user`.
-- `closed` lists what ran from the app's install folder and was closed first, as for a program. A dry run has `would_close` instead, and `would_end` for the processes in it without a window, which would be ended rather than asked.
+- `closed` lists what ran from the app's install folder and was closed first, as for a program. A dry run has `would_close` instead, and `would_stay` for the processes in it without a window, which cannot be asked and would stop the removal unless the user closes them first.
 - `uninstaller` is `"removed by Windows"` or `"not started, no longer registered"`. It and `still_installed` are missing in a dry run.
 - `may_come_back` is present once the app was removed: Windows may bring it back, as it installs the app for every new account.
 - `removal` is missing when the report is empty, with `--keep`, or while the app is still registered.
