@@ -752,8 +752,15 @@ pub fn move_path(from: &Path, to: &Path) -> Result<()> {
     if fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    copy_recursive(from, to)
-        .with_context(|| format!("copying {} to {}", from.display(), to.display()))?;
+    let to_was_there = fs::symlink_metadata(to).is_ok();
+    if let Err(e) = copy_recursive(from, to) {
+        // A copy that stopped halfway is no copy; left there it would stand in for the original.
+        if !to_was_there {
+            let _ = remove_path(to);
+        }
+        return Err(anyhow::Error::new(e))
+            .with_context(|| format!("copying {} to {}", from.display(), to.display()));
+    }
     if let Err(e) = remove_path(from) {
         if !still_whole(from, to) {
             return Err(anyhow::Error::new(PartialMove {
@@ -825,10 +832,11 @@ fn sanitize(s: &str) -> String {
             c => c,
         })
         .collect();
-    out = out.trim_matches([' ', '.']).to_string();
     if out.chars().count() > 80 {
         out = out.chars().take(80).collect();
     }
+    // Windows drops a folder name's trailing space, so a path built on to the name as written misses.
+    out = out.trim_matches([' ', '.']).to_string();
     if out.is_empty() {
         out.push_str("item");
     }
@@ -926,6 +934,26 @@ mod tests {
         stop.store(true, Ordering::Relaxed);
         other.join().unwrap();
         assert_eq!(failed.first(), None, "{} of 500 failed", failed.len());
+    }
+
+    #[test]
+    fn a_long_name_cut_after_a_space_still_takes_a_backup() {
+        let root = test_path("oxidize_long_name_test");
+        let _ = fs::remove_dir_all(&root);
+        let mut cleanup = TestCleanup(vec![root.clone()]);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("leftover.txt");
+        fs::write(&file, "kept").unwrap();
+
+        // The 80th character is a space, so the cut name ends in one.
+        let label = format!("Oxidize Long Name Test{} more words", "x".repeat(57));
+        let mut session = BackupSession::new(&label).unwrap();
+        cleanup.0.push(session.root().to_path_buf());
+
+        let dest = session.quarantine(LeftoverKind::File, &file).unwrap();
+        assert_eq!(fs::read_to_string(dest).unwrap(), "kept");
+        assert!(session.root().join(MANIFEST).exists());
+        assert!(!session.name().ends_with([' ', '.']));
     }
 
     /// A folder whose last file is held open without delete sharing: rename
@@ -1030,6 +1058,41 @@ mod tests {
             uninstall_publisher("[HKEY_CURRENT_USER\\Software]\r\n"),
             None
         );
+    }
+
+    #[test]
+    fn a_copy_that_stops_halfway_is_not_left_behind() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = test_path("oxidize_halfway_copy_test");
+        let _cleanup = TestCleanup(vec![root.clone()]);
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::write(src.join("z.txt"), "last").unwrap();
+        // No sharing at all: the rename fails on it, and so does the copy, after `a.txt`.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(src.join("z.txt"))
+            .unwrap();
+        let dst = root.join("dst");
+
+        let err = move_path(&src, &dst).unwrap_err();
+        assert!(err.downcast_ref::<PartialMove>().is_none(), "{err:#}");
+        assert!(!dst.exists());
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        // A folder that was there before the copy is not the copy's to take.
+        let earlier = root.join("earlier");
+        fs::create_dir_all(&earlier).unwrap();
+        fs::write(earlier.join("kept.txt"), "kept").unwrap();
+        move_path(&src, &earlier).unwrap_err();
+        assert_eq!(
+            fs::read_to_string(earlier.join("kept.txt")).unwrap(),
+            "kept"
+        );
+        drop(held);
+        assert_eq!(fs::read_to_string(src.join("z.txt")).unwrap(), "last");
     }
 
     #[test]
