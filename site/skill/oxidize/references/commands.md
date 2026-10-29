@@ -13,7 +13,7 @@ These work with every command, before or after it.
 | `--json` | Print one JSON document on stdout instead of text. Never asks; without `-y` every question counts as no. |
 | `--no-color` | Plain text without colour. `--json` implies it. |
 | `--no-backup` | Delete without a backup. Removals become permanent. |
-| `--elevate` | Run the same command again as administrator, after a Windows prompt, in a new window. Oxidize waits for it and exits with its exit code. With `--json` or `-y` it also prints that run's stdout and stderr; otherwise the run keeps its own window for its questions and its output stays there. A declined prompt exits with 5. Without effect when Oxidize already runs as administrator. |
+| `--elevate` | Run the same command again as administrator, after a Windows prompt, in a new window. Oxidize waits for it and exits with its exit code. It also prints that run's stdout and stderr for `list`, `protect` and `clean`, which never ask a question, and for any command with `--json` or `-y`; otherwise the run keeps its own window for its questions and its output stays there. A declined prompt exits with 5. Without effect when Oxidize already runs as administrator. |
 
 ## Confidence levels
 
