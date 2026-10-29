@@ -6,6 +6,7 @@
 //! checks each file again right before it goes: still there, still old
 //! enough, still not protected.
 
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -175,6 +176,10 @@ pub fn walk_except(
         add(&mut out.kept, KeptReason::Protected, 1, 0);
         return out;
     }
+    if repository_above(root, &mut HashMap::new()).is_some() {
+        add(&mut out.kept, KeptReason::Repository, 1, 0);
+        return out;
+    }
     if meta.is_file() {
         consider_file(root.to_path_buf(), root_key, &meta, rule, now, &mut out);
         return out;
@@ -292,6 +297,19 @@ fn is_repository(dir: &Path) -> bool {
     has("HEAD", false) && has("objects", true) && has("refs", true)
 }
 
+/// The git repository `path` lies in, if one of the folders above it is
+/// one. Answers are kept in `seen`, since files share their folders.
+fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<PathBuf> {
+    path.ancestors()
+        .skip(1)
+        .find(|dir| {
+            *seen
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| is_repository(dir))
+        })
+        .map(Path::to_path_buf)
+}
+
 /// A symbolic link, a junction or another reparse point. Never followed,
 /// never deleted.
 fn is_link(meta: &fs::Metadata) -> bool {
@@ -318,9 +336,19 @@ pub fn delete(
     now: SystemTime,
 ) -> Deleted {
     let mut out = Deleted::default();
+    // A folder can become a repository after the walk, by a clone or an
+    // init into it, so each file is checked against the folders above it.
+    let mut seen = HashMap::new();
+    let mut repositories = HashSet::new();
     for c in candidates.iter().filter(|c| !c.dir) {
         if protected.covers(&c.path) {
             add(&mut out.kept, KeptReason::Protected, 1, c.bytes);
+            continue;
+        }
+        if let Some(repo) = repository_above(&c.path, &mut seen) {
+            if repositories.insert(repo) {
+                add(&mut out.kept, KeptReason::Repository, 1, 0);
+            }
             continue;
         }
         let Ok(meta) = fs::symlink_metadata(&c.path) else {
@@ -629,6 +657,33 @@ pub(crate) mod tests {
         );
         assert!(inside.candidates.is_empty());
         assert_eq!(kept(&inside.kept, KeptReason::Repository), (1, 0));
+        // So does one that starts further down in it.
+        let below = walk(
+            &root.join(r"checkout\src"),
+            &week(),
+            &Protected::default(),
+            SystemTime::now(),
+        );
+        assert!(below.candidates.is_empty());
+        assert_eq!(kept(&below.kept, KeptReason::Repository), (1, 0));
+
+        // A folder that becomes a repository between the walk and the
+        // deletion keeps its files.
+        file_aged(&root.join(r"later\a.txt"), 5, 30);
+        file_aged(&root.join(r"later\b.txt"), 5, 30);
+        let w = walk(&root, &week(), &Protected::default(), SystemTime::now());
+        assert_eq!(w.files(), 2);
+        fs::create_dir(root.join(r"later\.git")).unwrap();
+        let done = delete(
+            &w.candidates,
+            &week(),
+            &Protected::default(),
+            SystemTime::now(),
+        );
+        assert_eq!(done.files, 0);
+        assert_eq!(kept(&done.kept, KeptReason::Repository), (1, 0));
+        assert!(root.join(r"later\a.txt").exists());
+        assert!(root.join(r"later\b.txt").exists());
     }
 
     #[test]
