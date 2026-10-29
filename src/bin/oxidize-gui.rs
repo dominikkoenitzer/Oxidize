@@ -4075,6 +4075,22 @@ mod tests {
     }
 
     #[test]
+    fn a_process_that_stays_is_named_before_an_uninstaller_that_never_ran() {
+        let mut out = finished(None);
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.closed[0].how = CloseHow::Running;
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = complete::still_running(&out.closed);
+        let stop = "player.exe is still running, so nothing was removed. Close it and try again.";
+        assert_eq!(complete_status("Example Player", &out, false), stop);
+    }
+
+    #[test]
     fn a_product_code_packs_the_way_windows_installer_files_it() {
         assert_eq!(
             packed_product_code("{12345678-ABCD-EF01-2345-6789ABCDEF01}").as_deref(),
