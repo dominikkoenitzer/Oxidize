@@ -26,6 +26,23 @@ pub struct Protected {
     entries: Vec<String>,
     /// The same, expanded and normalised for comparing.
     keys: Vec<String>,
+    /// Lines of the file that protect nothing: a drive root, or not a full
+    /// path. They go back into the file as they were, so a save never
+    /// loses what the user wrote.
+    idle: Vec<String>,
+}
+
+/// Why an entry is not taken onto the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotAdded {
+    Empty,
+    /// Already listed, perhaps written another way.
+    Listed,
+    /// It would protect everything on the drive.
+    DriveRoot,
+    /// Not a full path once `%VAR%` references are expanded, so it would
+    /// name a different folder for every folder Oxidize runs from.
+    NotFullPath,
 }
 
 impl Protected {
@@ -46,24 +63,36 @@ impl Protected {
         self.entries.is_empty()
     }
 
-    /// Add one entry. Returns false when it is empty or already listed.
+    /// Add one entry. Returns false when it is not taken.
     pub fn add(&mut self, entry: &str) -> bool {
+        self.try_add(entry).is_ok()
+    }
+
+    /// Add one entry, or say why it is not taken.
+    pub fn try_add(&mut self, entry: &str) -> Result<(), NotAdded> {
         // A list saved by an editor that writes a byte order mark starts
         // with one, and it would make the first folder a name nothing has.
         let entry = entry.trim_start_matches('\u{feff}');
         let entry = entry.trim().trim_matches('"').trim();
         if entry.is_empty() {
-            return false;
+            return Err(NotAdded::Empty);
         }
-        let key = key_of(Path::new(&util::expand_env_vars(entry)));
-        if key.len() <= 3 || self.keys.contains(&key) {
+        let path = util::expand_env_vars(entry);
+        if !Path::new(&path).is_absolute() {
+            return Err(NotAdded::NotFullPath);
+        }
+        let key = key_of(Path::new(&path));
+        if key.len() <= 3 {
             // A drive root would protect everything on it; the list is for
             // folders, so such a line is ignored rather than honoured.
-            return false;
+            return Err(NotAdded::DriveRoot);
+        }
+        if self.keys.contains(&key) {
+            return Err(NotAdded::Listed);
         }
         self.entries.push(entry.to_string());
         self.keys.push(key);
-        true
+        Ok(())
     }
 
     /// Remove an entry as written. Returns false when it was not listed.
@@ -127,7 +156,7 @@ impl Protected {
     /// The list as the file stores it.
     pub fn to_file_text(&self) -> String {
         let mut text = HEADER.to_string();
-        for e in &self.entries {
+        for e in self.entries.iter().chain(&self.idle) {
             text.push_str(e);
             text.push('\n');
         }
@@ -137,12 +166,17 @@ impl Protected {
     /// Read the list from the text of the file.
     pub fn from_file_text(text: &str) -> Self {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-        Protected::new(
-            text.lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                .map(str::to_string),
-        )
+        let mut p = Protected::default();
+        for line in text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            if let Err(NotAdded::DriveRoot | NotAdded::NotFullPath) = p.try_add(line) {
+                p.idle.push(line.to_string());
+            }
+        }
+        p
     }
 }
 
@@ -305,6 +339,48 @@ mod tests {
         assert!(!p.covers(Path::new(r"C:\Else")));
         let back = Protected::from_file_text(&p.to_file_text());
         assert_eq!(back.entries(), p.entries());
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_full_path_protects_nothing() {
+        let mut p = Protected::default();
+        for entry in [
+            r"Work\Keep",
+            r"%OXIDIZE_PROTECT_NEVER_SET%\Keep",
+            r"\Work\Keep",
+            r"C:Work\Keep",
+        ] {
+            assert_eq!(p.try_add(entry), Err(NotAdded::NotFullPath), "{entry}");
+        }
+        assert!(p.is_empty());
+        assert_eq!(p.try_add(r"C:\"), Err(NotAdded::DriveRoot));
+        assert_eq!(p.try_add(r"C:\Work\Keep"), Ok(()));
+        assert_eq!(p.try_add(r"c:\work\keep\"), Err(NotAdded::Listed));
+        assert_eq!(p.try_add(" \"\" "), Err(NotAdded::Empty));
+    }
+
+    #[test]
+    fn a_line_that_protects_nothing_is_kept_when_the_list_is_saved() {
+        let mut p = Protected::from_file_text(
+            "C:\\Keep\nWork\\Keep\n%OXIDIZE_PROTECT_NEVER_SET%\\Docs\nC:\\\n",
+        );
+        assert_eq!(p.entries(), [r"C:\Keep"]);
+        let here = std::env::current_dir().unwrap();
+        assert!(!p.covers(&here.join(r"Work\Keep\a.txt")));
+        assert!(p.add(r"C:\Also"));
+        assert!(p.remove(r"C:\Keep"));
+        let saved = p.to_file_text();
+        let lines: Vec<&str> = saved.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(
+            lines,
+            [
+                r"C:\Also",
+                r"Work\Keep",
+                r"%OXIDIZE_PROTECT_NEVER_SET%\Docs",
+                r"C:\"
+            ]
+        );
+        assert_eq!(Protected::from_file_text(&saved).to_file_text(), saved);
     }
 
     #[test]
