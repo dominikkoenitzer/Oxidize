@@ -68,9 +68,10 @@ pub trait Remove: Send + Sync {
     /// Wait for the program to leave the Uninstall list; true once it has.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove a Store app; true once Windows no longer lists it. `before`
-    /// runs once the app is cleared to go, right before Windows removes it.
-    fn remove_app(&self, app: &Package, before: &mut dyn FnMut()) -> Result<bool>;
-    /// Close these processes: their windows first, then end them.
+    /// runs once the app is cleared to go, right before Windows removes it;
+    /// an error from it stops the removal.
+    fn remove_app(&self, app: &Package, before: &mut dyn FnMut() -> Result<()>) -> Result<bool>;
+    /// Ask these processes to close through their windows; none is ended.
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
     /// Remove leftovers, each one backed up first.
     fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome>;
@@ -644,8 +645,11 @@ fn apply_step(
             leftovers,
         } => {
             out["kind"] = json!("program");
-            out["closed"] = json!(close_running(m, r, target, leftovers));
-            if !registered(m, program) {
+            let closed = close_running(m, r, target, leftovers);
+            out["closed"] = json!(closed);
+            if let Some(e) = complete::still_running(&closed) {
+                Err(anyhow!(e))
+            } else if !registered(m, program) {
                 out["uninstaller"] = json!("not started, no longer registered");
                 Ok(true)
             } else if let VendorStep::Skip { reason } = vendor {
@@ -679,6 +683,10 @@ fn apply_step(
                     if !picked.is_empty() {
                         closed = r.close(&picked);
                     }
+                    match complete::still_running(&closed) {
+                        Some(e) => Err(anyhow!(e)),
+                        None => Ok(()),
+                    }
                 });
                 out["closed"] = json!(closed);
                 removed
@@ -691,8 +699,12 @@ fn apply_step(
             let programs = m.programs(true);
             match commands::scan_subject(&programs, Vec::new, &name) {
                 Ok(None) => {
-                    out["closed"] = json!(close_running(m, r, target, leftovers));
-                    Ok(true)
+                    let closed = close_running(m, r, target, leftovers);
+                    out["closed"] = json!(closed);
+                    match complete::still_running(&closed) {
+                        Some(e) => Err(anyhow!(e)),
+                        None => Ok(true),
+                    }
                 }
                 Ok(Some(_)) => Err(anyhow!("{name} is installed now. Plan its removal again.")),
                 Err(e) => Err(e.context(format!(
@@ -1174,6 +1186,8 @@ mod tests {
         calls: Mutex<Vec<String>>,
         /// The uninstaller is still running when the wait ends.
         never_ends: bool,
+        /// Processes that stay when they are asked to close.
+        stays: Vec<u32>,
     }
 
     impl Recorder {
@@ -1203,8 +1217,12 @@ mod tests {
             self.log(format!("wait {}", program.display_name));
             true
         }
-        fn remove_app(&self, app: &Package, before: &mut dyn FnMut()) -> Result<bool> {
-            before();
+        fn remove_app(
+            &self,
+            app: &Package,
+            before: &mut dyn FnMut() -> Result<()>,
+        ) -> Result<bool> {
+            before()?;
             self.log(format!("remove app {}", app.family_name));
             Ok(true)
         }
@@ -1216,9 +1234,13 @@ mod tests {
                 .map(|p| Closed {
                     pid: p.pid,
                     exe: p.exe.display().to_string(),
-                    how: complete::CloseHow::Closed,
+                    how: if self.stays.contains(&p.pid) {
+                        complete::CloseHow::Running
+                    } else {
+                        complete::CloseHow::Closed
+                    },
                     error: None,
-                    windowless: false,
+                    windowless: self.stays.contains(&p.pid),
                 })
                 .collect()
         }
@@ -1760,6 +1782,40 @@ mod tests {
         assert_eq!(step["still_installed"], true, "{step}");
         assert_eq!(step["failed"], true, "{step}");
         assert!(step.get("backup").is_none(), "{step}");
+    }
+
+    #[tokio::test]
+    async fn a_process_that_stays_stops_its_step_before_anything_is_removed() {
+        let recorder = Recorder {
+            stays: vec![400, 500, 300],
+            ..Recorder::default()
+        };
+        let (server, recorder) = server_with(pc(), recorder);
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call(
+                "plan_removal",
+                json!({ "programs": ["Game Service", "Notes", "OldGame"] }),
+            )
+            .await;
+        let id = plan_id(&plan);
+        let done = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        // Asked, never ended, and nothing after the asking ran.
+        assert_eq!(recorder.calls(), ["close 400", "close 500", "close 300"]);
+        let steps = &done["structuredContent"]["steps"];
+        for (i, exe) in ["service.exe", "Notes.exe", "game.exe"].iter().enumerate() {
+            let step = &steps[i];
+            assert_eq!(step["failed"], true, "{step}");
+            assert_eq!(step["closed"][0]["how"], "running", "{step}");
+            assert_eq!(
+                step["error"],
+                format!("{exe} is still running, so nothing was removed. Close it and try again."),
+                "{step}"
+            );
+            assert!(step.get("backup").is_none(), "{step}");
+        }
     }
 
     #[tokio::test]
