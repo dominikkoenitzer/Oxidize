@@ -81,7 +81,7 @@ fn stays_inside(root: &Path, action: &Undo) -> Result<()> {
                 anyhow::bail!("refused: {} is not part of this backup", file.display());
             }
         }
-        Undo::MoveBack { from, to } => {
+        Undo::MoveBack { from, to, .. } => {
             if !within(&root.join("files"), from) {
                 anyhow::bail!("refused: {} is not part of this backup", from.display());
             }
@@ -165,7 +165,8 @@ fn check(action: &Undo) -> Result<()> {
         }
         // The same answers the real run gives: a copy with something new in
         // its place stays where it is, and one already home is fine.
-        Undo::MoveBack { from, to } => match (from.exists(), to.exists()) {
+        Undo::MoveBack { from, to, partial } => match (from.exists(), to.exists()) {
+            (true, true) if *partial && missing_part(from, to) => Ok(()),
             (true, true) => anyhow::bail!("already exists: {}", to.display()),
             (false, false) => {
                 anyhow::bail!("the quarantined copy is missing: {}", from.display())
@@ -182,7 +183,7 @@ fn check(action: &Undo) -> Result<()> {
 fn undo(action: &Undo) -> Result<()> {
     match action {
         Undo::RegImport { file, .. } => backup::import_registry_file(file),
-        Undo::MoveBack { from, to } => move_back(from, to),
+        Undo::MoveBack { from, to, partial } => move_back(from, to, *partial),
         Undo::TaskImport { name, file } => system::import_task(name, file),
         Undo::PathAdd { hive, entry, index } => path_add(*hive, entry, *index),
         Undo::ValueWrite {
@@ -252,7 +253,7 @@ fn reg_type(vtype: u32) -> Option<winreg::enums::RegType> {
         _ => return None,
     })
 }
-fn move_back(from: &Path, to: &Path) -> Result<()> {
+fn move_back(from: &Path, to: &Path, partial: bool) -> Result<()> {
     if !from.exists() {
         // Restoring the same backup twice: the first run already moved this
         // one home, which is the state the caller wanted either way.
@@ -260,6 +261,12 @@ fn move_back(from: &Path, to: &Path) -> Result<()> {
             return Ok(());
         }
         anyhow::bail!("quarantined copy is missing: {}", from.display());
+    }
+    if partial && to.exists() && missing_part(from, to) {
+        put_back_missing(from, to)?;
+        // What is left in the copy is what the delete never took.
+        return backup::remove_path(from)
+            .with_context(|| format!("removing the rest of {}", from.display()));
     }
     if to.exists() {
         anyhow::bail!("already exists: {}", to.display());
@@ -269,6 +276,37 @@ fn move_back(from: &Path, to: &Path) -> Result<()> {
     }
     backup::move_path(from, to)
         .with_context(|| format!("moving {} back to {}", from.display(), to.display()))
+}
+
+/// The folder a partial move left behind still lacks something its copy
+/// holds. Once it is whole again, by a reinstall or a restore, it is not
+/// the copy's to fill.
+fn missing_part(from: &Path, to: &Path) -> bool {
+    // A link is not a folder by this reading, so neither side is followed.
+    let dir = |p: &Path| fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+    dir(from) && dir(to) && !backup::still_whole(to, from)
+}
+
+/// Move each item of the copy that is not at the target back into it.
+/// Anything already there stays as it is.
+fn put_back_missing(from: &Path, to: &Path) -> Result<()> {
+    let reading = |p: &Path| format!("reading {}", p.display());
+    for entry in fs::read_dir(from).with_context(|| reading(from))? {
+        let entry = entry.with_context(|| reading(from))?;
+        let copy_is_dir = entry.file_type().with_context(|| reading(from))?.is_dir();
+        let (copy, home) = (entry.path(), to.join(entry.file_name()));
+        match fs::symlink_metadata(&home) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                backup::move_path(&copy, &home).with_context(|| {
+                    format!("moving {} back to {}", copy.display(), home.display())
+                })?;
+            }
+            Err(e) => return Err(e).with_context(|| reading(&home)),
+            Ok(m) if m.is_dir() && copy_is_dir => put_back_missing(&copy, &home)?,
+            Ok(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
@@ -494,6 +532,7 @@ mod tests {
             Undo::MoveBack {
                 from: from.clone(),
                 to: temp.to_path_buf(),
+                partial: false,
             },
         );
         let err = planted_result(&session);
@@ -521,6 +560,7 @@ mod tests {
             Undo::MoveBack {
                 from: link.join("x.txt"),
                 to: home.join("x.txt"),
+                partial: false,
             },
         );
         let err = planted_result(&session);
@@ -578,6 +618,79 @@ mod tests {
         assert!(session.root().join(backup::MANIFEST).exists());
     }
 
+    /// A folder quarantined while one file in it was held open: the delete
+    /// took the rest and stopped there. The handle comes back with it.
+    fn partly_removed(name: &str) -> (std::path::PathBuf, BackupSession, backup::TestCleanup) {
+        use std::os::windows::fs::OpenOptionsExt;
+        let root = fixture(name);
+        let app = root.join("app");
+        fs::create_dir_all(app.join("sub")).unwrap();
+        fs::write(app.join("a.txt"), "first").unwrap();
+        fs::write(app.join(r"sub\b.txt"), "inner").unwrap();
+        fs::write(app.join("z.txt"), "last").unwrap();
+        // A label of its own: two sessions made in one second share a name.
+        let mut session = BackupSession::new(&format!("Oxidize Test {name}")).unwrap();
+        let guard = cleanup(&session, &[&root]);
+        // Read sharing so the copy can read it, no delete sharing.
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(app.join("z.txt"))
+            .unwrap();
+        let err = session
+            .quarantine(LeftoverKind::Directory, &app)
+            .unwrap_err();
+        drop(held);
+        assert!(format!("{err:#}").contains("partially removed"), "{err:#}");
+        assert!(!app.join("a.txt").exists() && app.join("z.txt").exists());
+        (app, session, guard)
+    }
+
+    #[test]
+    fn a_folder_that_was_only_partly_removed_comes_back_whole() {
+        let (app, session, _cleanup) = partly_removed("partly_removed");
+        // What the delete never took was changed since, and stays as it is.
+        fs::write(app.join("z.txt"), "changed").unwrap();
+
+        let dry = restore(&listed(&session), true).unwrap();
+        assert!(dry.iter().all(|i| i.result.is_ok()), "{dry:?}");
+        let items = restore(&listed(&session), false).unwrap();
+        assert!(items.iter().all(|i| i.result.is_ok()), "{items:?}");
+        for (file, text) in [
+            ("a.txt", "first"),
+            (r"sub\b.txt", "inner"),
+            ("z.txt", "changed"),
+        ] {
+            assert_eq!(fs::read_to_string(app.join(file)).unwrap(), text, "{file}");
+        }
+        assert!(listed(&session).restored.is_some());
+        assert!(!session.root().join("files").exists());
+        let again = restore(&listed(&session), false).unwrap();
+        assert!(again.iter().all(|i| i.result.is_ok()), "{again:?}");
+    }
+
+    #[test]
+    fn a_partly_removed_folder_that_came_back_whole_is_left_alone() {
+        let (app, session, _cleanup) = partly_removed("partly_reinstalled");
+        // A reinstall wrote the files again before the restore ran.
+        fs::write(app.join("a.txt"), "reinstalled").unwrap();
+        fs::create_dir_all(app.join("sub")).unwrap();
+        fs::write(app.join(r"sub\b.txt"), "reinstalled").unwrap();
+
+        for dry_run in [true, false] {
+            let items = restore(&listed(&session), dry_run).unwrap();
+            let err = items[0].result.as_ref().unwrap_err();
+            assert!(err.contains("already exists"), "{err}");
+        }
+        assert_eq!(
+            fs::read_to_string(app.join("a.txt")).unwrap(),
+            "reinstalled"
+        );
+        assert!(listed(&session).restored.is_none());
+        let copy = copy_of(&session, &app);
+        assert_eq!(fs::read_to_string(copy.join("a.txt")).unwrap(), "first");
+    }
+
     #[test]
     fn a_copy_goes_back_only_where_it_came_from() {
         let root = Path::new(r"C:\B\backups\2026-10-18 Example");
@@ -631,14 +744,17 @@ mod tests {
             Undo::MoveBack {
                 from: stranger.clone(),
                 to: elsewhere.clone(),
+                partial: false,
             },
             Undo::MoveBack {
                 from: own_copy.clone(),
                 to: elsewhere.clone(),
+                partial: false,
             },
             Undo::MoveBack {
                 from: climbing,
                 to: elsewhere.clone(),
+                partial: false,
             },
             Undo::RegImport {
                 file: root.join("anything.reg"),
