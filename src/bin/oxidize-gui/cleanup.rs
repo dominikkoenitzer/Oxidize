@@ -26,6 +26,8 @@ pub struct Cleanup {
     pub new_protected: String,
     /// A problem reading or saving the protected list.
     pub protect_error: Option<String>,
+    /// The text the protected list refused, and why.
+    pub refused: Option<(String, &'static str)>,
     /// The usage traces, cleared apart from the categories.
     pub slate: Slate,
     /// Which of the two shows: the files or the traces.
@@ -88,6 +90,7 @@ impl Cleanup {
             protected,
             new_protected: String::new(),
             protect_error,
+            refused: None,
             slate: Slate::default(),
             view: View::Files,
             show_protected: false,
@@ -199,7 +202,7 @@ impl Cleanup {
             Err(protect::NotAdded::DriveRoot) => "A whole drive cannot be protected.",
             Err(protect::NotAdded::NotFullPath) => "Not a full path, so it would protect nothing.",
         };
-        self.protect_error = Some(why.to_string());
+        self.refused = Some((self.new_protected.clone(), why));
     }
 
     fn remove_protected(&mut self, entry: &str) {
@@ -212,6 +215,8 @@ impl Cleanup {
         self.protect_error = protect::save(&self.protected)
             .err()
             .map(|e| format!("{e:#}"));
+        // A refusal such as "Already protected." may no longer hold.
+        self.refused = None;
         // An analysis made before the list changed may hold what is now
         // protected; the cleaning checks the list again, but the numbers on
         // screen would be wrong.
@@ -220,6 +225,21 @@ impl Cleanup {
             self.results = None;
         }
         self.slate.found = None;
+    }
+
+    /// The lines in red under the field: a failed read or save of the list,
+    /// then why the list refused the text, while the field still holds it.
+    fn protect_lines(&self) -> Vec<&str> {
+        let refused = self
+            .refused
+            .as_ref()
+            .filter(|(typed, _)| *typed == self.new_protected)
+            .map(|(_, why)| *why);
+        self.protect_error
+            .as_deref()
+            .into_iter()
+            .chain(refused)
+            .collect()
     }
 }
 
@@ -840,7 +860,7 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
             state.add_protected();
         }
     });
-    if let Some(e) = &state.protect_error {
+    for e in state.protect_lines() {
         ui.add(egui::Label::new(RichText::new(e).small().color(t.red)).wrap());
     }
     ui.add_space(6.0);
@@ -958,6 +978,7 @@ mod tests {
             protected: protect::Protected::default(),
             new_protected: String::new(),
             protect_error: None,
+            refused: None,
             slate: Slate::default(),
             view: View::Files,
             show_protected: false,
@@ -996,12 +1017,46 @@ mod tests {
             // user's file.
             assert!(!state.protected.clone().add(typed), "{typed}");
             state.new_protected = typed.to_string();
-            state.protect_error = None;
             state.add_protected();
             assert_eq!(state.new_protected, typed);
-            assert_eq!(state.protect_error.as_deref(), Some(why));
+            assert_eq!(state.protect_lines(), [why]);
         }
         assert_eq!(state.protected.entries(), [r"C:\Example Keep"]);
+    }
+
+    #[test]
+    fn a_refusal_goes_once_the_field_changes() {
+        let mut state = tab();
+        state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
+        for next in ["", r"C:\Example", r"C:\Example Keep\Docs"] {
+            // Refused by the list itself, so nothing is saved.
+            assert!(!state.protected.clone().add(r"C:\"));
+            state.new_protected = r"C:\".to_string();
+            state.add_protected();
+            assert_eq!(
+                state.protect_lines(),
+                ["A whole drive cannot be protected."]
+            );
+            state.new_protected = next.to_string();
+            assert!(state.protect_lines().is_empty(), "{next:?}");
+        }
+    }
+
+    #[test]
+    fn a_save_error_still_shows_after_a_later_refusal() {
+        let mut state = tab();
+        state.protected = protect::Protected::new([r"C:\Example Keep".to_string()]);
+        // The last save of the list failed.
+        state.protect_error = Some("Access is denied.".to_string());
+        assert!(!state.protected.clone().add(r"C:\Example Keep"));
+        state.new_protected = r"C:\Example Keep".to_string();
+        state.add_protected();
+        assert_eq!(
+            state.protect_lines(),
+            ["Access is denied.", "Already protected."]
+        );
+        state.new_protected.clear();
+        assert_eq!(state.protect_lines(), ["Access is denied."]);
     }
 
     #[test]
