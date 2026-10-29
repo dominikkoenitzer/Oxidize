@@ -368,7 +368,11 @@ impl Cli {
     /// Whether this command line never asks a question, so an elevated run
     /// of it has nothing to wait for in its own window.
     pub fn never_asks(&self) -> bool {
-        captures_elevated_output(self.json, self.yes) || matches!(self.command, Commands::Clean(_))
+        captures_elevated_output(self.json, self.yes)
+            || matches!(
+                self.command,
+                Commands::List(_) | Commands::Protect(_) | Commands::Clean(_)
+            )
     }
 }
 
@@ -616,6 +620,30 @@ mod tests {
         assert_eq!(a.recycle_bin_days, 90);
         assert_eq!(a.levels.threshold(), Confidence::Medium);
         assert!(!parse("orphans").never_asks());
+    }
+
+    #[test]
+    fn list_and_protect_never_ask() {
+        for args in [
+            "list --elevate",
+            "list Example --store --system --elevate",
+            "protect --elevate",
+            r"protect --check C:\Example --elevate",
+        ] {
+            assert!(parse(args).never_asks(), "{args}");
+        }
+        for args in [
+            "uninstall Example --elevate",
+            "scan Example --remove --elevate",
+            "orphans --remove --elevate",
+            "trace Example --uninstall --elevate",
+            "backups --clear --elevate",
+            "restore Example --elevate",
+        ] {
+            assert!(!parse(args).never_asks(), "{args}");
+            assert!(parse(&format!("{args} --json")).never_asks(), "{args}");
+            assert!(parse(&format!("{args} --yes")).never_asks(), "{args}");
+        }
     }
 
     #[test]
