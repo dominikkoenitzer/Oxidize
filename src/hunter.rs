@@ -56,6 +56,17 @@ fn path_under(child: &Path, parent: &Path) -> bool {
     c == p || c.starts_with(&format!("{p}\\"))
 }
 
+/// Do `a` and `b` name the same file, by their text or, when both exist, by their real names?
+fn same_file(a: &Path, b: &Path) -> bool {
+    if path_under(a, b) && path_under(b, a) {
+        return true;
+    }
+    matches!(
+        (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+        (Ok(a), Ok(b)) if a == b
+    )
+}
+
 /// Find the executable paths of running processes whose name matches `query`
 /// (with or without a `.exe` suffix).
 fn find_process_exes(query: &str) -> Vec<PathBuf> {
@@ -195,12 +206,18 @@ pub fn hunt(query: &str, programs: &[Program]) -> Vec<HunterMatch> {
                 Some((left, right)) if right.trim().parse::<i32>().is_ok() => left,
                 _ => icon.as_str(),
             };
-            if let Some(icon_base) =
-                util::file_basename_lower(&util::expand_env_vars(without_index))
-            {
-                if exe_basenames.contains(&icon_base)
-                    || query_basename.as_deref() == Some(icon_base.as_str())
-                {
+            let expanded = util::expand_env_vars(without_index);
+            let icon_path = Path::new(expanded.trim().trim_matches('"'));
+            if let Some(icon_base) = util::file_basename_lower(&icon_path.to_string_lossy()) {
+                // An icon given with its folder is that one file; one of the same name elsewhere is not it.
+                let hit = if exe_paths.is_empty() {
+                    query_basename.as_deref() == Some(icon_base.as_str())
+                } else if icon_path.is_absolute() {
+                    exe_paths.iter().any(|exe| same_file(exe, icon_path))
+                } else {
+                    exe_basenames.contains(&icon_base)
+                };
+                if hit {
                     score += 80;
                     reasons.push(format!("matches DisplayIcon ({icon_base})"));
                 }
@@ -322,6 +339,19 @@ mod tests {
             Some(r"C:\Program Files\VendorPlayer"),
         )];
         assert!(hunt(r"D:\Games\Something\game.exe", &programs).is_empty());
+    }
+
+    #[test]
+    fn an_exe_of_the_same_name_in_another_folder_is_not_the_programs_own() {
+        let mut vendor = program("Example Vendor App", None);
+        vendor.display_icon = Some(r#""C:\Program Files\Example Vendor\launcher.exe",0"#.into());
+        let programs = vec![vendor];
+        let elsewhere = r"Z:\oxidize-test-portable\launcher.exe";
+        assert!(hunt(elsewhere, &programs).is_empty());
+        // The icon's own file still counts, written in either case.
+        let matches = hunt(r"C:\PROGRAM FILES\Example Vendor\Launcher.exe", &programs);
+        assert_eq!(matches[0].program.display_name, "Example Vendor App");
+        assert!(matches[0].reason.contains("DisplayIcon"));
     }
 
     #[test]
