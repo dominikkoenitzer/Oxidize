@@ -388,7 +388,7 @@ impl OxidizeApp {
                     still_installed: uninstall::still_installed(&program),
                     program,
                 },
-                Err(e) => Msg::Error(format!("Uninstall failed: {e:#}")),
+                Err(e) => Msg::Error(window_error(&format!("Uninstall failed: {e:#}"))),
             },
             Err(e) => Msg::Error(format!("Cannot uninstall {}: {e:#}", program.display_name)),
         });
@@ -1142,10 +1142,28 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
         }
     }
     if let Some(e) = &out.error {
-        lines.push(format!("ERROR: {e}"));
+        lines.push(format!("ERROR: {}", window_error(e)));
     }
     lines.push(complete_status(name, out, false));
     lines
+}
+
+/// An error as the window shows it: the window has a button where the
+/// command line has a flag.
+fn window_error(text: &str) -> String {
+    if text.contains(uninstall::NEEDS_ADMIN) {
+        "The uninstaller needs administrator rights: Restart as administrator, then try again."
+            .to_string()
+    } else if text.contains(uninstall::UNINSTALLER_MISSING) {
+        "The uninstaller file is missing.".to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+/// The removal stopped because the uninstaller it needed did not start.
+fn never_started(out: &Outcome) -> bool {
+    out.error.is_some() && out.vendor.runs() && out.uninstaller.is_none()
 }
 
 /// One line on how a complete removal ended, for the status bar.
@@ -1157,6 +1175,10 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         )
     } else if out.complete() {
         format!("{name}: nothing left.")
+    } else if let Some(stop) = complete::still_running(&out.closed) {
+        stop
+    } else if never_started(out) {
+        format!("{name}: the uninstaller did not start. Nothing was removed.")
     } else if let Some(e) = &out.error {
         e.clone()
     } else if out.verdict.still_installed {
@@ -1228,12 +1250,46 @@ impl eframe::App for OxidizeApp {
             self.programs_tab(ui, &t, today, &mut action);
         }
 
+        focus_ring(ctx, &t);
+
         // ---- Execute the requested action (outside the panel borrows) ----
         if let Some(action) = action {
             self.act(ctx, action);
         }
     }
 }
+
+/// Outline whatever holds the keyboard focus in copper, as the search field
+/// outlines itself, so Tab never lands on something that looks untouched.
+fn focus_ring(ctx: &egui::Context, t: &Tint) {
+    // Only a widget drawn in this pass: one that just went keeps its place
+    // from the last pass, where something else may sit now.
+    let Some(response) = ctx
+        .memory(|m| m.focused())
+        .filter(|&id| ctx.viewport(|v| v.this_pass.widgets.contains(id)))
+        .and_then(|id| ctx.read_response(id))
+    else {
+        return;
+    };
+    // A text field draws its own outline.
+    if response.sense.senses_drag() {
+        return;
+    }
+    let radius = ctx
+        .data(|d| d.get_temp::<f32>(response.id.with(RING_RADIUS)))
+        .unwrap_or(4.0);
+    ctx.layer_painter(response.layer_id)
+        .with_clip_rect(response.interact_rect)
+        .rect_stroke(
+            response.rect,
+            radius,
+            egui::Stroke::new(1.0, t.copper),
+            egui::StrokeKind::Inside,
+        );
+}
+
+/// Where a widget with rounder corners leaves the radius for its focus ring.
+const RING_RADIUS: &str = "focus ring radius";
 
 impl OxidizeApp {
     /// The program overview, table and details panel.
@@ -1348,11 +1404,15 @@ impl OxidizeApp {
                     if self.dry_run {
                         match uninstall::plan(&p, self.silent) {
                             Ok(plan) => {
-                                let line = format!("[dry-run] would run: {}", plan.display());
+                                let line = format!("dry run: would run {}", plan.display());
                                 self.log.push(line.clone());
                                 self.status = line;
                             }
-                            Err(e) => self.log.push(format!("Cannot uninstall: {e:#}")),
+                            Err(e) => {
+                                let line = format!("Cannot uninstall {}: {e:#}", p.display_name);
+                                self.log.push(line.clone());
+                                self.status = line;
+                            }
                         }
                     } else {
                         self.confirm = Some(Confirm::Uninstall(p, self.silent));
@@ -1482,7 +1542,7 @@ impl OxidizeApp {
                     *action = Some(Action::RestartAdmin);
                 }
                 if self.dry_run {
-                    badge(ui, "Dry run: nothing changes", t.amber);
+                    badge(ui, t, "Dry run: nothing changes", t.amber);
                 }
             });
         });
@@ -2112,7 +2172,7 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             ))
             .color(t.weak),
         );
-    } else if v.still_installed {
+    } else if v.still_installed && !never_started(out) {
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
@@ -2126,15 +2186,16 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
     }
     if v.below_level > 0 {
         ui.label(
-            RichText::new(format!(
-                "{} lower-confidence items were kept",
-                v.below_level
+            RichText::new(count(
+                v.below_level,
+                "lower-confidence item was kept",
+                "lower-confidence items were kept",
             ))
             .color(t.weak),
         );
     }
     if let Some(e) = &out.error {
-        ui.add(egui::Label::new(RichText::new(e).color(t.red)).wrap());
+        ui.add(egui::Label::new(RichText::new(window_error(e)).color(t.red)).wrap());
     }
     if undo {
         ui.add_space(6.0);
@@ -2257,10 +2318,12 @@ fn fact(ui: &mut egui::Ui, t: &Tint, name: &str, value: &str) {
 }
 
 /// A small rounded label in `color`, such as "Administrator".
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+fn badge(ui: &mut egui::Ui, t: &Tint, text: &str, color: Color32) {
+    // Half way to the text colour, so it still reads on its own tinted fill.
+    let ink = color.lerp_to_gamma(t.text, 0.5);
     let galley =
         ui.painter()
-            .layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), color);
+            .layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), ink);
     let size = galley.size() + egui::vec2(16.0, 6.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
@@ -2268,7 +2331,7 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         ui.painter()
             .rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.16));
         ui.painter()
-            .galley(rect.center() - galley.size() / 2.0, galley, color);
+            .galley(rect.center() - galley.size() / 2.0, galley, ink);
     }
 }
 
@@ -2298,14 +2361,6 @@ fn tab_label(ui: &mut egui::Ui, t: &Tint, open: bool, label: &str) -> egui::Resp
             );
             ui.painter().rect_filled(line, 1.0, t.copper);
         }
-        if response.has_focus() {
-            ui.painter().rect_stroke(
-                rect,
-                4.0,
-                egui::Stroke::new(1.0, t.copper),
-                egui::StrokeKind::Inside,
-            );
-        }
     }
     response
 }
@@ -2319,12 +2374,15 @@ fn chip(ui: &mut egui::Ui, t: &Tint, selected: bool, label: &str, count: usize) 
     job.append(
         &count.to_string(),
         6.0,
-        egui::TextFormat::simple(font, t.weak),
+        egui::TextFormat::simple(font, color),
     );
     let galley = ui.painter().layout_job(job);
     let size = egui::vec2(galley.size().x + 22.0, 26.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
+    if response.has_focus() {
+        ui.data_mut(|d| d.insert_temp(response.id.with(RING_RADIUS), 13.0f32));
+    }
     if ui.is_rect_visible(rect) {
         let fill = if selected {
             t.button_active
@@ -2481,7 +2539,7 @@ impl Tint {
                 side: rgb(0xff, 0xff, 0xff),
                 field: rgb(0xff, 0xff, 0xff),
                 text: rgb(0x1f, 0x1c, 0x19),
-                weak: rgb(0x6e, 0x68, 0x60),
+                weak: rgb(0x6a, 0x64, 0x5c),
                 line: rgb(0xe4, 0xde, 0xd6),
                 line_strong: rgb(0xcf, 0xc6, 0xbb),
                 button: rgb(0xff, 0xff, 0xff),
@@ -4783,5 +4841,409 @@ mod tests {
         let eframe = &manifest[manifest.find("\neframe = ").unwrap()..];
         let features = &eframe[..eframe.find("] }").unwrap()];
         assert!(features.contains("\"clipboard\""), "{features}");
+    }
+
+    #[test]
+    fn one_item_is_counted_as_one_item() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            std::path::PathBuf::from(r"D:\Games\Example Player"),
+            Confidence::High,
+            "found",
+            None,
+            false,
+        );
+        let mut app = app();
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let report = ScanReport {
+            program_name: "Example Player".to_string(),
+            installed: false,
+            items: vec![item.clone()],
+        };
+        app.tx
+            .send(Msg::Scan {
+                id: program.id().to_string(),
+                report,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 leftover of Example Player.");
+
+        let dry = DeletionOutcome {
+            attempted: 1,
+            dry_run: true,
+            ..DeletionOutcome::default()
+        };
+        let lines = removal_log(&dry, true);
+        assert!(
+            lines.contains(&"dry run: 1 item would be removed".to_string()),
+            "{lines:?}"
+        );
+
+        let mut out = finished(None);
+        out.selected = vec![item.clone()];
+        assert_eq!(
+            complete_status("Example Player", &out, true),
+            "dry run: 1 item of Example Player would be removed"
+        );
+        let lines = complete_log("Example Player", &out, true);
+        assert!(
+            lines.contains(&"dry run: 1 item would be removed".to_string()),
+            "{lines:?}"
+        );
+        out.verdict.nothing_left = false;
+        out.verdict.remaining = vec![item];
+        assert_eq!(
+            complete_status("Example Player", &out, false),
+            "Example Player: 1 item is still there."
+        );
+    }
+
+    #[test]
+    fn the_assistant_skill_names_the_settings_as_the_window_shows_them() {
+        let guide = include_str!("../../site/skill/oxidize/references/window-app.md");
+        let settings = [
+            "Options",
+            "Dry run, change nothing",
+            "Back up before deleting",
+            "Uninstall silently where possible",
+            "Show system components",
+        ];
+        for label in settings {
+            assert!(guide.contains(label), "{label}");
+        }
+        // The window counts with the right noun, never "item(s)".
+        for gone in [
+            "Not elevated",
+            "Backups ticked",
+            "Silent uninstall box",
+            "item(s)",
+        ] {
+            assert!(!guide.contains(gone), "{gone}");
+        }
+    }
+
+    #[test]
+    fn a_missing_uninstaller_is_named_in_one_plain_sentence() {
+        let plan = uninstall::UninstallPlan {
+            argv: vec!["oxidize-test-no-such-uninstaller.exe".to_string()],
+            is_msi: false,
+            source: "UninstallString".to_string(),
+            unattended: false,
+        };
+        let e = uninstall::run_with(
+            &plan,
+            std::process::Stdio::null(),
+            std::process::Stdio::null(),
+        )
+        .unwrap_err();
+        let shown = window_error(&format!("Uninstall failed: {e:#}"));
+        assert_eq!(shown, "The uninstaller file is missing.");
+    }
+
+    #[test]
+    fn a_dry_run_of_the_uninstaller_reads_like_every_other_dry_run() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.dry_run = true;
+        let mut program = example_program();
+        program.uninstall_string = Some(r"D:\Apps\Example\uninstall.exe".to_string());
+        app.act(&ctx, Action::Uninstall(program));
+        assert_eq!(
+            app.status,
+            r"dry run: would run D:\Apps\Example\uninstall.exe"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_without_an_uninstaller_says_so_in_the_status_line() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.dry_run = true;
+        app.act(&ctx, Action::Uninstall(example_program()));
+        assert!(
+            app.status.starts_with("Cannot uninstall Example Player"),
+            "{}",
+            app.status
+        );
+        assert!(app.confirm.is_none());
+    }
+
+    #[test]
+    fn an_uninstaller_refused_for_rights_points_to_the_restart_button() {
+        let shown = window_error(&format!("Uninstall failed: {}", uninstall::NEEDS_ADMIN));
+        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("--elevate"), "{shown}");
+
+        // Remove completely: the uninstaller never started, nothing went.
+        let mut out = finished(None);
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = Some(uninstall::NEEDS_ADMIN.to_string());
+        let status = complete_status("Example Player", &out, false);
+        assert!(status.contains("did not start"), "{status}");
+        assert!(!status.contains("cancelled"), "{status}");
+        let log = complete_log("Example Player", &out, false).join("\n");
+        assert!(!log.contains("--elevate"), "{log}");
+    }
+
+    #[test]
+    fn an_uninstaller_that_never_started_is_not_called_cancelled_in_the_details() {
+        let mut out = finished(None);
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = Some(uninstall::NEEDS_ADMIN.to_string());
+        let done = Completed {
+            program: example_program(),
+            outcome: out,
+            dry_run: false,
+        };
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let t = Tint::of(ctx.global_style().visuals.dark_mode);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_complete(ui, &t, &done, false, true);
+        });
+        output.textures_delta.clear();
+        let mut shown = String::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                shown.push_str(text.galley.text());
+                shown.push('\n');
+            }
+        }
+        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("cancelled"), "{shown}");
+    }
+
+    /// True when `shapes` hold a copper outline drawn on `rect`.
+    fn has_ring(shapes: &[egui::Shape], rect: egui::Rect, copper: Color32) -> bool {
+        shapes.iter().any(|shape| match shape {
+            egui::Shape::Vec(inner) => has_ring(inner, rect, copper),
+            egui::Shape::Rect(r) => {
+                r.stroke.color == copper && r.stroke.width >= 1.0 && r.rect == rect
+            }
+            _ => false,
+        })
+    }
+
+    /// The contrast ratio of two opaque colours, as WCAG counts it.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let linear = |v: u8| {
+                let v = f32::from(v) / 255.0;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(c.r()) + 0.7152 * linear(c.g()) + 0.0722 * linear(c.b())
+        };
+        let (hi, lo) = (lum(a).max(lum(b)), lum(a).min(lum(b)));
+        (hi + 0.05) / (lo + 0.05)
+    }
+
+    /// Every text colour drawn by `draw`, with the fill of the shape it sits on
+    /// laid over `under`.
+    fn text_on_fill(draw: impl FnMut(&mut egui::Ui), under: Color32) -> Vec<(Color32, Color32)> {
+        let ctx = egui::Context::default();
+        let mut draw = draw;
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| draw(ui));
+        output.textures_delta.clear();
+        let mut fill = under;
+        let mut pairs = Vec::new();
+        for clipped in &output.shapes {
+            match &clipped.shape {
+                egui::Shape::Rect(r) if r.fill.a() > 0 => {
+                    let a = f32::from(r.fill.a()) / 255.0;
+                    let mix =
+                        |f: u8, u: u8| (f32::from(f) + f32::from(u) * (1.0 - a)).round() as u8;
+                    fill = Color32::from_rgb(
+                        mix(r.fill.r(), under.r()),
+                        mix(r.fill.g(), under.g()),
+                        mix(r.fill.b(), under.b()),
+                    );
+                }
+                egui::Shape::Text(text) => {
+                    for section in &text.galley.job.sections {
+                        pairs.push((section.format.color, fill));
+                    }
+                }
+                _ => {}
+            }
+        }
+        pairs
+    }
+
+    #[test]
+    fn the_selected_quick_filter_is_readable_in_both_themes() {
+        for dark in [false, true] {
+            let t = Tint::of(dark);
+            let pairs = text_on_fill(|ui| _ = chip(ui, &t, true, "All", 12), t.base);
+            assert!(!pairs.is_empty());
+            for (text, fill) in pairs {
+                let ratio = contrast(text, fill);
+                assert!(
+                    ratio >= 4.5,
+                    "dark {dark}: {text:?} on {fill:?} is {ratio:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dry_run_badge_is_readable_in_both_themes() {
+        for dark in [false, true] {
+            let t = Tint::of(dark);
+            let pairs = text_on_fill(
+                |ui| badge(ui, &t, "Dry run: nothing changes", t.amber),
+                t.chrome,
+            );
+            assert!(!pairs.is_empty());
+            for (text, fill) in pairs {
+                let ratio = contrast(text, fill);
+                assert!(
+                    ratio >= 4.5,
+                    "dark {dark}: {text:?} on {fill:?} is {ratio:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grey_text_on_the_selected_row_is_readable_in_both_themes() {
+        for dark in [false, true] {
+            let t = Tint::of(dark);
+            let ratio = contrast(t.weak, t.selected);
+            assert!(ratio >= 4.5, "dark {dark}: {ratio:.2}");
+        }
+    }
+
+    #[test]
+    fn every_stop_tab_reaches_shows_where_the_focus_is() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let mut app = app();
+        let mut other = example_program();
+        other.registry_key = "example-editor".to_string();
+        other.display_name = "Example Editor".to_string();
+        app.programs = vec![example_program(), other];
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = |tab: bool| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            events: if tab {
+                vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        };
+        let mut run = |tab: bool| {
+            let mut out = ctx.run_ui(input(tab), |ui| app.ui(ui, &mut frame));
+            out.textures_delta.clear();
+            out
+        };
+        run(false);
+        let copper = Tint::of(ctx.global_style().visuals.dark_mode).copper;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..40 {
+            run(true);
+            let out = run(false);
+            let id = ctx
+                .memory(|m| m.focused())
+                .expect("Tab gives something focus");
+            if !seen.insert(id) {
+                break;
+            }
+            let rect = ctx
+                .read_response(id)
+                .expect("the focused widget is shown")
+                .rect;
+            let shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+            assert!(has_ring(&shapes, rect, copper), "no focus ring at {rect:?}");
+        }
+        assert!(seen.len() > 5, "{}", seen.len());
+    }
+
+    #[test]
+    fn a_focused_row_that_leaves_the_list_leaves_no_ring_behind() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let mut app = app();
+        app.programs = vec![example_program()];
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = |tab: bool| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            events: if tab {
+                vec![egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..Default::default()
+        };
+        let mut run = |app: &mut OxidizeApp, tab: bool| {
+            let mut out = ctx.run_ui(input(tab), |ui| app.ui(ui, &mut frame));
+            out.textures_delta.clear();
+            out
+        };
+        run(&mut app, false);
+        let copper = Tint::of(ctx.global_style().visuals.dark_mode).copper;
+        let mut row = None;
+        for _ in 0..40 {
+            run(&mut app, true);
+            run(&mut app, false);
+            let id = ctx
+                .memory(|m| m.focused())
+                .expect("Tab gives something focus");
+            let rect = ctx
+                .read_response(id)
+                .expect("the focused widget is shown")
+                .rect;
+            // Only the table row spans the width of the table.
+            if rect.width() > 500.0 {
+                row = Some(rect);
+                break;
+            }
+        }
+        let rect = row.expect("Tab reaches the row");
+        // A refresh after an uninstall takes the row away.
+        app.programs.clear();
+        let out = run(&mut app, false);
+        let shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+        assert!(!has_ring(&shapes, rect, copper), "ring left at {rect:?}");
     }
 }

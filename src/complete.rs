@@ -353,7 +353,7 @@ pub fn remove_completely(
         Some(report) => scanner::as_footprint(report, target),
         None => pc.scan(target, true),
     };
-    let registered = opts.dry_run || pc.still_installed(program);
+    let registered = pc.still_installed(program);
     let vendor = if !registered {
         VendorStep::Skip {
             reason: "no longer registered".to_string(),
@@ -1009,6 +1009,20 @@ mod tests {
         // Only the folder: the entry that is gone is not listed again.
         assert_eq!(out.selected.len(), 1);
         assert!(out.complete(), "{out:?}");
+    }
+
+    #[test]
+    fn a_dry_run_of_a_program_already_gone_skips_the_uninstaller_as_the_removal_does() {
+        let pc = FakePc::new(per_user_footprint());
+        *pc.installed.borrow_mut() = false;
+        let p = program(Hive::LocalMachine);
+        let mut o = opts(Confidence::High);
+        let real = remove_completely(&pc, &p, &target(), &plan(false), &o).vendor;
+        o.dry_run = true;
+        let pc = FakePc::new(per_user_footprint());
+        *pc.installed.borrow_mut() = false;
+        let dry = remove_completely(&pc, &p, &target(), &plan(false), &o).vendor;
+        assert_eq!(dry, real);
     }
 
     #[test]

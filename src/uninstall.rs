@@ -15,6 +15,11 @@ use anyhow::{bail, Context, Result};
 use crate::model::Program;
 use crate::{registry, system, util};
 
+/// Why an uninstaller did not start when Windows asked for administrator rights.
+pub const NEEDS_ADMIN: &str =
+    "the uninstaller needs administrator rights. Add --elevate or use an elevated terminal.";
+pub const UNINSTALLER_MISSING: &str = "the uninstaller file is missing";
+
 #[derive(Debug, Clone)]
 pub struct UninstallPlan {
     /// `argv[0]` is the executable.
@@ -135,13 +140,17 @@ pub fn run_with(plan: &UninstallPlan, stdin: Stdio, stdout: Stdio) -> Result<Exi
         .stdin(stdin)
         .stdout(stdout)
         .status()
-        .map_err(|e| {
-        if e.raw_os_error() == Some(740) {
-            anyhow::anyhow!("the uninstaller needs administrator rights. Add --elevate or use an elevated terminal.")
-        } else {
-            anyhow::Error::new(e).context(format!("failed to launch {exe}"))
-        }
-    })
+        .map_err(|e| launch_error(e, exe))
+}
+
+fn launch_error(e: std::io::Error, exe: &str) -> anyhow::Error {
+    if e.raw_os_error() == Some(740) {
+        anyhow::anyhow!(NEEDS_ADMIN)
+    } else if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!("{UNINSTALLER_MISSING}: {exe}")
+    } else {
+        anyhow::Error::new(e).context(format!("failed to launch {exe}"))
+    }
 }
 
 /// `run_with`, but give up waiting after `max`: `Ok(None)` means it is still
@@ -158,15 +167,7 @@ pub fn run_for(
         .stdin(stdin)
         .stdout(stdout)
         .spawn()
-        .map_err(|e| {
-            if e.raw_os_error() == Some(740) {
-                anyhow::anyhow!(
-                    "the uninstaller needs administrator rights. Add --elevate or use an elevated terminal."
-                )
-            } else {
-                anyhow::Error::new(e).context(format!("failed to launch {exe}"))
-            }
-        })?;
+        .map_err(|e| launch_error(e, exe))?;
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
