@@ -508,8 +508,8 @@ impl OxidizeApp {
                 self.log.push(format!("  {stays}"));
             }
         }
-        let (count, _) = clean::traces::total(&results);
-        self.status = format!("{count} usage traces cleared.");
+        let (n, _) = clean::traces::total(&results);
+        self.status = format!("{} cleared.", count(n, "usage trace", "usage traces"));
         self.cleanup.slate.take_results(results);
     }
 
@@ -519,8 +519,10 @@ impl OxidizeApp {
         };
         self.status = "Cleaning...".to_string();
         self.cleanup.cleaning = true;
-        self.log
-            .push(format!("Cleaning {} categories", choice.categories.len()));
+        self.log.push(format!(
+            "Cleaning {}",
+            count(choice.categories.len(), "category", "categories")
+        ));
         let protected = self.cleanup.protected.clone();
         let make_backups = self.make_backups;
         self.spawn(ctx, move || {
@@ -732,7 +734,11 @@ impl OxidizeApp {
                             report.program_name
                         )
                     } else {
-                        format!("{} leftovers of {}.", report.total(), report.program_name)
+                        format!(
+                            "{} of {}.",
+                            count(report.total(), "leftover", "leftovers"),
+                            report.program_name
+                        )
                     };
                     self.scan_for = Some(id);
                     self.scan = Some(report);
@@ -1377,9 +1383,9 @@ impl OxidizeApp {
                     };
                     if self.dry_run {
                         let line = format!(
-                            "dry run: {} in {} categories would be cleaned",
+                            "dry run: {} in {} would be cleaned",
                             util::human_size(analysis.chosen_bytes(&choice)),
-                            choice.categories.len()
+                            count(choice.categories.len(), "category", "categories")
                         );
                         self.log.push(line.clone());
                         self.status = line;
@@ -1394,8 +1400,11 @@ impl OxidizeApp {
                         return;
                     };
                     if self.dry_run {
-                        let (count, _) = clean::traces::total(found);
-                        let line = format!("dry run: {count} usage traces would be cleared");
+                        let (n, _) = clean::traces::total(found);
+                        let line = format!(
+                            "dry run: {} would be cleared",
+                            count(n, "usage trace", "usage traces")
+                        );
                         self.log.push(line.clone());
                         self.status = line;
                     } else {
@@ -3684,6 +3693,18 @@ mod tests {
             app.status,
             "Uninstaller finished. The program is still registered."
         );
+    }
+
+    #[test]
+    fn one_cleared_usage_trace_is_counted_as_one() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let mut found = clean::traces::TraceFinding::new(clean::traces::Trace::RecentItems);
+        found.count = 1;
+        app.jobs = 1;
+        app.tx.send(Msg::TracesCleared(vec![found])).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 usage trace cleared.");
     }
 
     fn example_program() -> Program {
