@@ -357,9 +357,10 @@ pub enum SortKey {
     Publisher,
 }
 
-/// Whether `--elevate` brings the elevated run's stdout back. Only when
-/// nothing will be asked: with `--json` or `--yes`. Otherwise the run keeps
-/// its own window, where its questions can be answered.
+/// Whether `--json` or `--yes` alone means an elevated run asks nothing, so
+/// `--elevate` can bring its stdout back. [`Cli::never_asks`] adds the
+/// commands that never ask; any other run keeps its own window, where its
+/// questions can be answered.
 pub fn captures_elevated_output(json: bool, yes: bool) -> bool {
     json || yes
 }
