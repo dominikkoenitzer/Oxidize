@@ -42,6 +42,11 @@ pub fn target_of(path: &Path) -> Option<PathBuf> {
 const FORCE_NO_LINK_INFO: u32 = 0x100;
 
 pub fn parse_target(bytes: &[u8]) -> Option<PathBuf> {
+    parse_target_in(bytes, windows::Win32::Globalization::CP_ACP)
+}
+
+/// The same, with the ANSI paths read in `code_page`, the one Windows wrote them in.
+fn parse_target_in(bytes: &[u8], code_page: u32) -> Option<PathBuf> {
     if read_len(bytes, 0)? != HEADER_LEN || bytes.get(4..20)? != LINK_CLSID {
         return None;
     }
@@ -67,19 +72,19 @@ pub fn parse_target(bytes: &[u8]) -> Option<PathBuf> {
     let wide_suffix = if unicode { read_len(info, 32)? } else { 0 };
 
     let mut target = if wide_base != 0 {
-        text_at(info, header_size, wide_base, true)?
+        text_at(info, header_size, wide_base, true, code_page)?
     } else {
-        text_at(info, header_size, read_len(info, 16)?, false)?
+        text_at(info, header_size, read_len(info, 16)?, false, code_page)?
     };
     if target.is_empty() {
         return None;
     }
     let suffix = if wide_suffix != 0 {
-        text_at(info, header_size, wide_suffix, true)?
+        text_at(info, header_size, wide_suffix, true, code_page)?
     } else {
         match read_len(info, 24)? {
             0 => String::new(),
-            offset => text_at(info, header_size, offset, false)?,
+            offset => text_at(info, header_size, offset, false, code_page)?,
         }
     };
     if !suffix.is_empty() {
@@ -94,7 +99,13 @@ pub fn parse_target(bytes: &[u8]) -> Option<PathBuf> {
 /// Reads a NUL-terminated string at an offset into LinkInfo.
 /// The offset has to point past the LinkInfo header, and a string without its
 /// terminator gives `None`.
-fn text_at(info: &[u8], header_size: usize, offset: usize, wide: bool) -> Option<String> {
+fn text_at(
+    info: &[u8],
+    header_size: usize,
+    offset: usize,
+    wide: bool,
+    code_page: u32,
+) -> Option<String> {
     if offset < header_size {
         return None;
     }
@@ -102,7 +113,7 @@ fn text_at(info: &[u8], header_size: usize, offset: usize, wide: bool) -> Option
     if wide {
         utf16_until_nul(tail)
     } else {
-        latin1_until_nul(tail)
+        ansi_until_nul(tail, code_page)
     }
 }
 
@@ -118,12 +129,13 @@ fn utf16_until_nul(bytes: &[u8]) -> Option<String> {
     None
 }
 
-/// Decodes single bytes as Latin-1 up to the first NUL.
-/// This is exact for ASCII paths, which is what the ANSI fields hold in practice.
-fn latin1_until_nul(bytes: &[u8]) -> Option<String> {
+/// Decodes text in `code_page` up to the first NUL.
+/// The ANSI paths are in the system's code page, so they can hold more than
+/// ASCII: `ü` on a Western system, `Иван` on a Russian one.
+fn ansi_until_nul(bytes: &[u8], code_page: u32) -> Option<String> {
     let end = bytes.iter().position(|&byte| byte == 0)?;
     let text = bytes.get(..end)?;
-    Some(text.iter().map(|&byte| char::from(byte)).collect())
+    Some(crate::system::code_page_text(text, code_page))
 }
 
 fn read_u16(bytes: &[u8], at: usize) -> Option<u16> {
@@ -251,6 +263,26 @@ mod tests {
         let info = link_info(r"C:\PROGRA~1\EXAMPL~1\player.exe", Some(unicode), "");
         let bytes = shortcut(None, &info);
         assert_eq!(parse_target(&bytes), expected(unicode));
+    }
+
+    #[test]
+    fn an_ansi_path_is_read_in_the_code_page_it_was_written_in() {
+        // The bytes C8 E2 E0 ED and 96, as `ansi` writes these characters.
+        let base = "C:\\Users\\\u{C8}\u{E2}\u{E0}\u{ED}\\Foo \u{96} Bar";
+        let bytes = shortcut(None, &link_info(base, None, "foo.exe"));
+        assert_eq!(
+            parse_target_in(&bytes, 1251),
+            expected(r"C:\Users\Иван\Foo – Bar\foo.exe")
+        );
+        assert_eq!(
+            parse_target_in(&bytes, 1252),
+            expected(r"C:\Users\Èâàí\Foo – Bar\foo.exe")
+        );
+        // A shortcut on this system is read in this system's code page.
+        assert_eq!(
+            parse_target(&bytes),
+            parse_target_in(&bytes, windows::Win32::Globalization::CP_ACP)
+        );
     }
 
     #[test]
