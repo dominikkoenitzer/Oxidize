@@ -2083,9 +2083,15 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     Ok(())
 }
 
-/// The last line of `restore --dry-run` in text.
+/// The last line of `restore --dry-run` in text. An item whose check failed
+/// would not go back, so it is counted as failed, as a real run does.
 fn dry_restore_summary(items: &[restore::RestoreItem]) -> String {
-    format!("{} items would be restored", items.len())
+    let failed = items.iter().filter(|i| i.result.is_err()).count();
+    let mut line = format!("{} items would be restored", items.len() - failed);
+    if failed > 0 {
+        line.push_str(&format!(", {failed} failed"));
+    }
+    line
 }
 
 // clean
@@ -4197,5 +4203,24 @@ mod tests {
         let o = exit::outcome(&err);
         assert_eq!((o.code, o.exit), ("not_found", exit::ERROR));
         assert!(o.message.starts_with("nothing was uninstalled"));
+    }
+
+    #[test]
+    fn a_dry_restore_counts_only_the_items_that_would_go_back() {
+        let item = |path: &str, result: Result<(), String>| restore::RestoreItem {
+            path: path.to_string(),
+            result,
+        };
+        let mut items = vec![
+            item(r"C:\Example\a.txt", Ok(())),
+            item(r"C:\Example\b.txt", Err("already exists".to_string())),
+            item(r"C:\Example\c.txt", Ok(())),
+        ];
+        assert_eq!(
+            dry_restore_summary(&items),
+            "2 items would be restored, 1 failed"
+        );
+        items.remove(1);
+        assert_eq!(dry_restore_summary(&items), "2 items would be restored");
     }
 }
