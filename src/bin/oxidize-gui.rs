@@ -613,9 +613,12 @@ impl OxidizeApp {
                 }
                 self.log.extend(system::take_tool_log());
                 let mut line = if dry_run {
-                    format!("dry run: {restored} items from {name} would be restored")
+                    format!(
+                        "dry run: {} from {name} would be restored",
+                        count(restored, "item", "items")
+                    )
                 } else {
-                    format!("Restored {restored} items from {name}")
+                    format!("Restored {} from {name}", count(restored, "item", "items"))
                 };
                 if failed > 0 {
                     line.push_str(&format!(", {failed} failed"));
@@ -724,8 +727,8 @@ impl OxidizeApp {
                         .collect();
                     self.status = if report.installed {
                         format!(
-                            "{} items make up {}. It is still installed.",
-                            report.total(),
+                            "{} up {}. It is still installed.",
+                            count(report.total(), "item makes", "items make"),
                             report.program_name
                         )
                     } else {
@@ -911,11 +914,14 @@ impl OxidizeApp {
             Confirm::Remove(items, _, ctx) => {
                 if ctx.make_backups {
                     format!(
-                        "Remove {} items? A backup is kept, so this can be undone.",
-                        items.len()
+                        "Remove {}? A backup is kept, so this can be undone.",
+                        count(items.len(), "item", "items")
                     )
                 } else {
-                    format!("Remove {} items permanently?", items.len())
+                    format!(
+                        "Remove {} permanently?",
+                        count(items.len(), "item", "items")
+                    )
                 }
             }
             Confirm::Complete(p, ctx) => complete_confirm_text(&p.display_name, ctx),
@@ -1061,7 +1067,10 @@ fn removal_log(outcome: &DeletionOutcome, dry_run: bool) -> Vec<String> {
         lines.push(format!("removed {k} (emptied key)"));
     }
     lines.push(if dry_run {
-        format!("dry run: {} items would be removed", outcome.attempted)
+        format!(
+            "dry run: {} would be removed",
+            count(outcome.attempted, "item", "items")
+        )
     } else {
         let mut parts = vec![format!("{} removed", outcome.deleted)];
         if outcome.skipped > 0 {
@@ -1092,8 +1101,8 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
             }
         });
         lines.push(format!(
-            "dry run: {} items would be removed",
-            out.selected.len()
+            "dry run: {} would be removed",
+            count(out.selected.len(), "item", "items")
         ));
         return lines;
     }
@@ -1137,8 +1146,8 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
 fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
     if dry_run {
         format!(
-            "dry run: {} items of {name} would be removed",
-            out.selected.len()
+            "dry run: {} of {name} would be removed",
+            count(out.selected.len(), "item", "items")
         )
     } else if out.complete() {
         format!("{name}: nothing left.")
@@ -1150,8 +1159,8 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         )
     } else if !out.verdict.remaining.is_empty() {
         format!(
-            "{name}: {} items are still there.",
-            out.verdict.remaining.len()
+            "{name}: {} still there.",
+            count(out.verdict.remaining.len(), "item is", "items are")
         )
     } else {
         format!("{name}: some items could not be removed.")
@@ -2011,7 +2020,7 @@ fn scan_results(
         ui.add_space(4.0);
     }
     let reclaim = report.reclaimable_bytes();
-    let mut summary = format!("{} items", report.total());
+    let mut summary = count(report.total(), "item", "items");
     if reclaim > 0 {
         summary.push_str(&format!(", {} in files", util::human_size(reclaim)));
     }
@@ -2072,8 +2081,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
-                    "Dry run: {} items would be removed, {} would be closed.",
-                    out.selected.len(),
+                    "Dry run: {} would be removed, {} would be closed.",
+                    count(out.selected.len(), "item", "items"),
                     running_processes(out.would_close.len())
                 ))
                 .color(t.text),
@@ -2088,8 +2097,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
         ui.label(RichText::new("Nothing left.").size(18.0).color(t.verdigris));
         ui.label(
             RichText::new(format!(
-                "Removed {} items in {:.1} s",
-                removed_count(out),
+                "Removed {} in {:.1} s",
+                count(removed_count(out), "item", "items"),
                 out.seconds
             ))
             .color(t.weak),
@@ -3789,7 +3798,7 @@ mod tests {
         assert!(!app.busy(), "no reload was started");
         assert_eq!(
             app.status,
-            "dry run: 1 items of Example Player would be removed"
+            "dry run: 1 item of Example Player would be removed"
         );
     }
 
@@ -3858,7 +3867,7 @@ mod tests {
         assert_eq!(app.undo_backup(), Some("example-player-1"));
         assert_eq!(
             app.status,
-            "Restored 1 items from example-player-1, 1 failed"
+            "Restored 1 item from example-player-1, 1 failed"
         );
         assert!(app
             .log
@@ -3910,7 +3919,7 @@ mod tests {
         assert_eq!(*ASKED.lock().unwrap(), [true]);
         assert_eq!(
             app.status,
-            "dry run: 1 items from example-player-1 would be restored"
+            "dry run: 1 item from example-player-1 would be restored"
         );
         assert!(app
             .log
@@ -3967,7 +3976,7 @@ mod tests {
         assert!(lines.contains(&"Uninstaller finished with exit code 0".to_string()));
         assert_eq!(
             lines.last().map(String::as_str),
-            Some("Example Player: 1 items are still there.")
+            Some("Example Player: 1 item is still there.")
         );
     }
 

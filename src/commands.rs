@@ -982,9 +982,18 @@ impl ProgramRun {
         }
         let failed = self.removal.as_ref().map_or(0, |o| o.failed);
         if failed > 0 {
-            return format!("{failed} items of {} could not be removed", self.name);
+            return format!(
+                "{} of {} could not be removed",
+                plural(failed, "item", "items"),
+                self.name
+            );
         }
-        format!("{} items of {} are still there", self.left, self.name)
+        let are = if self.left == 1 { "is" } else { "are" };
+        format!(
+            "{} of {} {are} still there",
+            plural(self.left, "item", "items"),
+            self.name
+        )
     }
 
     /// [`Self::why_failed`] as a typed error: still installed (exit 3), an
@@ -1293,7 +1302,10 @@ impl complete::Pc for CliPc<'_> {
                 println!();
                 println!(
                     "{}",
-                    term::dim(&format!("dry run: {} items would be removed", items.len()))
+                    term::dim(&format!(
+                        "dry run: {} would be removed",
+                        plural(items.len(), "item", "items")
+                    ))
                 );
             }
             return Ok(outcome);
@@ -2011,7 +2023,8 @@ fn cmd_backups(args: &BackupsArgs, g: &Global) -> Result<()> {
     for b in &all {
         let items = match b.restored {
             Some(_) => "restored ".to_string(),
-            None => format!("{:>3} items", b.items),
+            // "item " keeps the column as wide as "items".
+            None => format!("{:>9}", plural(b.items, "item ", "items")),
         };
         println!(
             "{}  {items}  {:>9}",
@@ -2119,7 +2132,11 @@ fn restore_goes_ahead(dry_run: bool, yes: bool, json: bool, ask: impl FnOnce() -
 
 fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     let info = backup::find_backup(&args.name)?;
-    let question = format!("Restore {} items from {}?", info.items, info.name);
+    let question = format!(
+        "Restore {} from {}?",
+        plural(info.items, "item", "items"),
+        info.name
+    );
     if !restore_goes_ahead(g.dry_run, g.yes, g.json, || term::confirm(&question, true)) {
         if g.json {
             return Err(Failure::cancelled(
@@ -2135,7 +2152,10 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     let failed = items.iter().filter(|i| i.result.is_err()).count();
     let incomplete = || {
         Failure::incomplete(
-            format!("{failed} of {} items could not be restored", items.len()),
+            format!(
+                "{failed} of {} could not be restored",
+                plural(items.len(), "item", "items")
+            ),
             g.json,
         )
     };
@@ -2205,7 +2225,10 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
 /// would not go back, so it is counted as failed, as a real run does.
 fn dry_restore_summary(items: &[restore::RestoreItem]) -> String {
     let failed = items.iter().filter(|i| i.result.is_err()).count();
-    let mut line = format!("{} items would be restored", items.len() - failed);
+    let mut line = format!(
+        "{} would be restored",
+        plural(items.len() - failed, "item", "items")
+    );
     if failed > 0 {
         line.push_str(&format!(", {failed} failed"));
     }
@@ -2316,9 +2339,12 @@ fn cmd_clean_traces(g: &Global) -> Result<()> {
         }
         println!();
         let line = if g.dry_run {
-            format!("dry run: {count} items would be cleared")
+            format!(
+                "dry run: {} would be cleared",
+                plural(count, "item", "items")
+            )
         } else if found.iter().any(TraceFinding::actionable) {
-            format!("{count} items. Clear them: add --yes")
+            format!("{}. Clear them: add --yes", plural(count, "item", "items"))
         } else {
             "Nothing to clear.".to_string()
         };
@@ -2347,7 +2373,11 @@ fn cmd_clean_traces(g: &Global) -> Result<()> {
             print_trace(f);
         }
         println!();
-        println!("{count} items cleared, {} freed", util::human_size(bytes));
+        println!(
+            "{} cleared, {} freed",
+            plural(count, "item", "items"),
+            util::human_size(bytes)
+        );
     }
     let failed = done.iter().filter(|f| f.failed()).count();
     if failed > 0 {
@@ -2466,24 +2496,24 @@ fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
         return "nothing found".to_string();
     }
     let n = f.count;
-    let plural = |one: &str, many: &str| {
-        if n == 1 {
-            format!("1 {one}")
-        } else {
-            format!("{n} {many}")
-        }
-    };
     match f.category {
-        Category::Temp | Category::CrashDumps | Category::BrowserCache => plural("file", "files"),
-        Category::DeliveryOptimization if f.actionable() => plural("file", "files"),
-        Category::RecycleBin => plural("item", "items"),
+        Category::Temp | Category::CrashDumps | Category::BrowserCache => {
+            plural(n, "file", "files")
+        }
+        Category::DeliveryOptimization if f.actionable() => plural(n, "file", "files"),
+        Category::RecycleBin => plural(n, "item", "items"),
         Category::Orphans => match choice {
             Some(c) => format!("{} of {n} folders", c.folders.len()),
-            None => plural("folder", "folders"),
+            None => plural(n, "folder", "folders"),
         },
         Category::WindowsOld if f.actionable() => "1 folder".to_string(),
         _ => String::new(),
     }
+}
+
+/// `n` and the noun that goes with it: "1 file", "20 files".
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool) {
@@ -2731,7 +2761,7 @@ fn render_report(report: &ScanReport) {
 
     println!();
     let reclaim = report.reclaimable_bytes();
-    let mut summary = format!("{} items", report.total());
+    let mut summary = plural(report.total(), "item", "items");
     if reclaim > 0 {
         summary.push_str(&format!(", {} in files", util::human_size(reclaim)));
     }
@@ -2778,7 +2808,11 @@ fn removal_verdict(selected: usize, removal: Option<&DeletionOutcome>, g: &Globa
         return Err(Failure::cancelled("Cancelled.", true).into());
     }
     if o.failed > 0 {
-        let message = format!("{} of {} items could not be removed", o.failed, o.attempted);
+        let message = format!(
+            "{} of {} could not be removed",
+            o.failed,
+            plural(o.attempted, "item", "items")
+        );
         return Err(Failure::incomplete(message, g.json).into());
     }
     Ok(())
@@ -2809,8 +2843,8 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
             println!(
                 "{}",
                 term::dim(&format!(
-                    "dry run: {} items would be removed",
-                    selected.len()
+                    "dry run: {} would be removed",
+                    plural(selected.len(), "item", "items")
                 ))
             );
         }
@@ -2822,11 +2856,14 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
     }
     let question = if ctx.make_backups {
         format!(
-            "Remove {} items? Backups are kept for restore.",
-            selected.len()
+            "Remove {}? Backups are kept for restore.",
+            plural(selected.len(), "item", "items")
         )
     } else {
-        format!("Remove {} items permanently?", selected.len())
+        format!(
+            "Remove {} permanently?",
+            plural(selected.len(), "item", "items")
+        )
     };
     // Enter means yes while a backup is kept, and no when it is not.
     if !g.confirm(&question, ctx.make_backups) {
@@ -3769,7 +3806,7 @@ mod tests {
         assert!(!r.failed(false));
         r.left = 1;
         assert!(r.failed(false));
-        assert_eq!(r.why_failed(), "1 items of Example Player are still there");
+        assert_eq!(r.why_failed(), "1 item of Example Player is still there");
         // A dry run removes nothing, so nothing left over counts against it.
         assert!(!r.failed(true));
     }
@@ -3787,7 +3824,7 @@ mod tests {
         assert_eq!((partly.code, partly.exit), ("incomplete", exit::INCOMPLETE));
         assert_eq!(
             partly.message,
-            "1 items of Example Player could not be removed"
+            "1 item of Example Player could not be removed"
         );
         assert!(!partly.reported);
 
@@ -4333,6 +4370,31 @@ mod tests {
         assert_eq!(kinds(3, 0), "3 programs");
         assert_eq!(kinds(0, 1), "1 Store app");
         assert_eq!(kinds(2, 2), "2 programs and 2 Store apps");
+    }
+
+    #[test]
+    fn a_dry_restore_of_one_item_says_item() {
+        let root = std::env::temp_dir().join("oxidize_commands_one_item");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("settings.ini");
+        std::fs::write(&file, "x=1").unwrap();
+        let mut session = backup::BackupSession::new("Oxidize One Item Test").unwrap();
+        let _cleanup = backup::TestCleanup(vec![root.clone(), session.root().to_path_buf()]);
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        let info = backup::list_backups()
+            .unwrap()
+            .into_iter()
+            .find(|b| b.path == session.root())
+            .unwrap();
+
+        let items = restore::restore(&info, true).unwrap();
+        assert_eq!(dry_restore_summary(&items), "1 item would be restored");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            0,
+            "a dry run puts nothing back"
+        );
     }
 
     fn row_names(rows: &[Listed]) -> Vec<&str> {
