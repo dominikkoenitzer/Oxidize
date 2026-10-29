@@ -303,8 +303,9 @@ one flag: `--level high`, `--level medium` or `--level low`.
 | `--no-backup` | delete permanently instead of quarantining |
 
 `--dry-run` lists every item a removal would take. `--elevate` waits for the
-elevated run and exits with its code. With `--json` or `-y` it also prints that
-run's output; otherwise the run keeps its own window for its questions.
+elevated run and exits with its code. It also prints that run's output for
+`list`, `protect` and `clean`, which never ask a question, and for any command
+with `--json` or `-y`; otherwise the run keeps its own window for its questions.
 
 ### Exit codes
 
