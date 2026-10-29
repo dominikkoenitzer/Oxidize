@@ -1513,7 +1513,7 @@ impl OxidizeApp {
                     *action = Some(Action::RestartAdmin);
                 }
                 if self.dry_run {
-                    badge(ui, "Dry run: nothing changes", t.amber);
+                    badge(ui, t, "Dry run: nothing changes", t.amber);
                 }
             });
         });
@@ -2288,10 +2288,12 @@ fn fact(ui: &mut egui::Ui, t: &Tint, name: &str, value: &str) {
 }
 
 /// A small rounded label in `color`, such as "Administrator".
-fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
+fn badge(ui: &mut egui::Ui, t: &Tint, text: &str, color: Color32) {
+    // Half way to the text colour, so it still reads on its own tinted fill.
+    let ink = color.lerp_to_gamma(t.text, 0.5);
     let galley =
         ui.painter()
-            .layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), color);
+            .layout_no_wrap(text.to_string(), egui::FontId::proportional(12.0), ink);
     let size = galley.size() + egui::vec2(16.0, 6.0);
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::hover());
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, text));
@@ -2299,7 +2301,7 @@ fn badge(ui: &mut egui::Ui, text: &str, color: Color32) {
         ui.painter()
             .rect_filled(rect, rect.height() / 2.0, color.gamma_multiply(0.16));
         ui.painter()
-            .galley(rect.center() - galley.size() / 2.0, galley, color);
+            .galley(rect.center() - galley.size() / 2.0, galley, ink);
     }
 }
 
@@ -4980,6 +4982,25 @@ mod tests {
         for dark in [false, true] {
             let t = Tint::of(dark);
             let pairs = text_on_fill(|ui| _ = chip(ui, &t, true, "All", 12), t.base);
+            assert!(!pairs.is_empty());
+            for (text, fill) in pairs {
+                let ratio = contrast(text, fill);
+                assert!(
+                    ratio >= 4.5,
+                    "dark {dark}: {text:?} on {fill:?} is {ratio:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_dry_run_badge_is_readable_in_both_themes() {
+        for dark in [false, true] {
+            let t = Tint::of(dark);
+            let pairs = text_on_fill(
+                |ui| badge(ui, &t, "Dry run: nothing changes", t.amber),
+                t.chrome,
+            );
             assert!(!pairs.is_empty());
             for (text, fill) in pairs {
                 let ratio = contrast(text, fill);
