@@ -1491,9 +1491,19 @@ fn other_program_install_dirs(
 /// gone, and the trailing dots and spaces Windows itself ignores taken off
 /// every part. `C:/Windows`, `C:\PROGRA~1` and `C:\Windows.` all name a
 /// protected directory, and a guard that compares raw strings misses all
-/// three.
+/// three. A path that does not exist yet is read the same way without its
+/// real name: `C:\\Windows`, `C:\.\Windows` and `C:\Temp\..\Windows` are
+/// `C:\Windows` too.
 fn resolve_for_guard(p: &Path) -> String {
-    let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let real = std::fs::canonicalize(p)
+        .or_else(|e| {
+            if p.is_absolute() {
+                std::path::absolute(p)
+            } else {
+                Err(e)
+            }
+        })
+        .unwrap_or_else(|_| p.to_path_buf());
     let s = real.to_string_lossy().to_lowercase().replace('/', "\\");
     let s = s
         .strip_prefix("\\\\?\\unc\\")
@@ -3450,6 +3460,28 @@ mod tests {
         assert!(!is_protected_path(Path::new(
             r"C:\Program Files\Some Vendor\Some App"
         )));
+    }
+
+    #[test]
+    fn a_path_not_there_yet_is_read_the_way_windows_will_read_it() {
+        let windir = env_dir("windir").unwrap().to_string_lossy().to_string();
+        let (drive, rest) = windir.split_at(2);
+        let rest = rest.trim_start_matches('\\');
+        let new_file = "oxidize-guard-test.dll";
+        for written in [
+            format!(r"{drive}\\{rest}\System32\{new_file}"),
+            format!(r"{drive}\.\{rest}\System32\{new_file}"),
+            format!(r"{drive}\{rest}\.\System32\{new_file}"),
+            format!(r"{drive}\oxidize-no-such-folder\..\{rest}\System32\{new_file}"),
+            format!(r"{drive}/{rest}//System32/{new_file}"),
+        ] {
+            assert!(!Path::new(&written).exists(), "{written}");
+            assert!(is_protected_path(Path::new(&written)), "{written}");
+        }
+        // Cleaned up, a path outside the protected trees stays outside them.
+        assert!(!is_protected_path(Path::new(&format!(
+            r"{drive}\Program Files\\Some Vendor\.\Some App"
+        ))));
     }
 
     #[test]
