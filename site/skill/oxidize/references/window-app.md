@@ -35,7 +35,7 @@ Remove completely always takes high-confidence items only and ignores Uninstall 
 4. Go through the ticked items with the user. Check High, Check all and Uncheck all change the ticks. Untick anything the user is not sure about.
 5. The user clicks Remove N checked items and confirms in the question. The log lists each item, then a line `Undo from the command line: oxidize restore "<name>"`. Ask the user to note that backup name.
 
-With Dry run ticked, Run uninstaller only logs the command it would run, and the remove button reads Preview removal of N item(s), asks nothing and changes nothing.
+With Dry run ticked, Run uninstaller only logs the command it would run, and the remove button reads Preview removal of N items, asks nothing and changes nothing.
 
 ## Clean up
 

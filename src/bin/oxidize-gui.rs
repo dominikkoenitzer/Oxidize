@@ -4812,7 +4812,13 @@ mod tests {
         for label in settings {
             assert!(guide.contains(label), "{label}");
         }
-        for gone in ["Not elevated", "Backups ticked", "Silent uninstall box"] {
+        // The window counts with the right noun, never "item(s)".
+        for gone in [
+            "Not elevated",
+            "Backups ticked",
+            "Silent uninstall box",
+            "item(s)",
+        ] {
             assert!(!guide.contains(gone), "{gone}");
         }
     }
