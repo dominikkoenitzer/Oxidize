@@ -373,6 +373,49 @@ impl Drop for TestCleanup {
     }
 }
 
+/// `<name>_<process id>` in TEMP: a test's name for this run, so two runs at once never share it.
+#[cfg(test)]
+pub(crate) fn test_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{name}_{}", std::process::id()))
+}
+
+/// A test's own folder at `test_path`, removed when the test ends, passed or failed.
+#[cfg(test)]
+pub(crate) struct TestDir(PathBuf);
+
+#[cfg(test)]
+impl TestDir {
+    /// Clears the path; the test creates the folder when it needs it.
+    pub(crate) fn new(name: &str) -> TestDir {
+        let path = test_path(name);
+        let _ = fs::remove_dir_all(&path);
+        TestDir(path)
+    }
+}
+
+#[cfg(test)]
+impl std::ops::Deref for TestDir {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl AsRef<Path> for TestDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 /// One existing backup folder.
 #[derive(Debug, Clone, Serialize)]
 pub struct BackupInfo {
@@ -801,13 +844,13 @@ mod tests {
         for unit in content.encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
-        let path = std::env::temp_dir().join("oxidize_validate_test.reg");
+        let dir = TestDir::new("oxidize_validate_test");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("export.reg");
         fs::write(&path, &bytes).unwrap();
 
         assert!(validate_reg_file(&path, Hive::CurrentUser, r"SOFTWARE\OxidizeTest").is_ok());
         assert!(validate_reg_file(&path, Hive::CurrentUser, r"SOFTWARE\Other").is_err());
-
-        let _ = fs::remove_file(&path);
     }
 
     #[test]
@@ -826,7 +869,7 @@ mod tests {
     fn two_sessions_in_one_second_get_their_own_folder() {
         // The clock decides whether two real sessions share a stamp, so the
         // numbering is checked on a stamp that is taken for certain.
-        let taken = std::env::temp_dir().join("oxidize_taken_root_test");
+        let taken = test_path("oxidize_taken_root_test");
         let _ = fs::remove_dir_all(&taken);
         let mut cleanup = TestCleanup(vec![taken.clone()]);
         fs::create_dir_all(taken.join("2026-01-01 120000 X")).unwrap();
@@ -868,7 +911,8 @@ mod tests {
 
     #[test]
     fn a_move_that_fails_partway_keeps_the_copy() {
-        let root = std::env::temp_dir().join("oxidize_partial_move_test");
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_partial_move_test");
         let (src, held) = folder_with_a_locked_file(&root);
         let dst = root.join("dst");
 
@@ -880,14 +924,13 @@ mod tests {
         assert_eq!(fs::read_to_string(dst.join("z.txt")).unwrap(), "last");
 
         drop(held);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_move_that_deletes_nothing_rolls_the_copy_back() {
         use std::os::windows::fs::OpenOptionsExt;
-        let root = std::env::temp_dir().join("oxidize_untouched_move_test");
-        let _ = fs::remove_dir_all(&root);
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_untouched_move_test");
         let src = root.join("src");
         fs::create_dir_all(&src).unwrap();
         fs::write(src.join("only.txt"), "only").unwrap();
@@ -904,12 +947,11 @@ mod tests {
         assert!(!dst.exists());
 
         drop(held);
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn a_partial_quarantine_is_recorded_and_reported() {
-        let root = std::env::temp_dir().join("oxidize_partial_quarantine_test");
+        let root = test_path("oxidize_partial_quarantine_test");
         // Declared before the held file, so it is closed when the guard runs.
         let mut cleanup = TestCleanup(vec![root.clone()]);
         let (src, held) = folder_with_a_locked_file(&root);

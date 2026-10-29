@@ -685,8 +685,7 @@ mod tests {
 
     #[test]
     fn only_a_vendor_folder_left_empty_goes_with_the_product() {
-        let base = std::env::temp_dir().join("oxidize_emptied_parent_test");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_emptied_parent_test");
         let vendor = base.join("Example Vendor");
         let busy = base.join("Busy Vendor");
         std::fs::create_dir_all(&vendor).unwrap();
@@ -721,14 +720,12 @@ mod tests {
         assert_eq!(outcome.emptied_parents, std::slice::from_ref(&vendor));
         assert!(!vendor.exists());
         assert!(busy.join("other product.txt").exists());
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
     fn a_folder_the_user_made_in_downloads_stays_when_emptied() {
         // A stand-in for Downloads, holding the folder an installer was in.
-        let base = std::env::temp_dir().join("oxidize_user_files_guard_test");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_user_files_guard_test");
         let downloads = base.join("Downloads");
         let installers = downloads.join("Installers");
         std::fs::create_dir_all(&installers).unwrap();
@@ -737,7 +734,6 @@ mod tests {
         assert!(!may_remove_emptied_beside(&downloads, &user_files));
         // The same empty folder anywhere else is a vendor's and goes.
         assert!(may_remove_emptied_beside(&installers, &[]));
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -366,7 +366,6 @@ pub(crate) mod tests {
         ] {
             assert!(bin.join(stays).exists(), "{stays}");
         }
-        let _ = fs::remove_dir_all(&bin);
     }
 
     #[test]

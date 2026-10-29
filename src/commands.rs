@@ -3137,10 +3137,9 @@ mod tests {
 
     #[test]
     fn a_protect_check_expands_variables_and_reads_relative_paths_from_here() {
-        let base = std::env::temp_dir().join("oxidize_protect_check_test");
-        let _ = std::fs::remove_dir_all(&base);
+        let base = crate::backup::TestDir::new("oxidize_protect_check_test");
         std::fs::create_dir_all(base.join(r"keep\inner")).unwrap();
-        std::env::set_var("OXIDIZE_CHECK_TEST", &base);
+        std::env::set_var("OXIDIZE_CHECK_TEST", &*base);
         let list = clean::protect::Protected::new([r"%OXIDIZE_CHECK_TEST%\keep".to_string()]);
 
         let inside = protect_check(&list, r"%OXIDIZE_CHECK_TEST%\keep\inner");
@@ -3170,7 +3169,6 @@ mod tests {
         let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["by", "holds", "path", "protected", "resolved"]);
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     fn program(name: &str, key: &str, uninstall: Option<&str>) -> Program {
@@ -4454,7 +4452,7 @@ mod tests {
 
     #[test]
     fn a_dry_run_lists_every_item_it_would_remove() {
-        let dir = std::env::temp_dir().join("oxidize_dry_run_list_test");
+        let dir = crate::backup::TestDir::new("oxidize_dry_run_list_test");
         let selected = vec![
             Leftover::fs(
                 LeftoverKind::Directory,

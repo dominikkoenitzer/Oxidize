@@ -1169,8 +1169,7 @@ mod tests {
 
     #[test]
     fn an_unquoted_path_with_spaces_is_never_cut_at_the_first_space() {
-        let dir = std::env::temp_dir().join("oxidize audit command exe");
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::backup::TestDir::new("oxidize audit command exe");
         fs::create_dir_all(&dir).unwrap();
         let script = dir.join("start.bat");
         fs::write(&script, "@echo off").unwrap();
@@ -1203,7 +1202,6 @@ mod tests {
             command_exe(r"C:\Gone\Vendor\start"),
             Some(PathBuf::from(r"C:\Gone\Vendor\start"))
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
