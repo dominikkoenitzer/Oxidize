@@ -4795,6 +4795,24 @@ mod tests {
     }
 
     #[test]
+    fn the_assistant_skill_names_the_settings_as_the_window_shows_them() {
+        let guide = include_str!("../../site/skill/oxidize/references/window-app.md");
+        let settings = [
+            "Options",
+            "Dry run, change nothing",
+            "Back up before deleting",
+            "Uninstall silently where possible",
+            "Show system components",
+        ];
+        for label in settings {
+            assert!(guide.contains(label), "{label}");
+        }
+        for gone in ["Not elevated", "Backups ticked", "Silent uninstall box"] {
+            assert!(!guide.contains(gone), "{gone}");
+        }
+    }
+
+    #[test]
     fn a_missing_uninstaller_is_named_in_one_plain_sentence() {
         let plan = uninstall::UninstallPlan {
             argv: vec!["oxidize-test-no-such-uninstaller.exe".to_string()],
