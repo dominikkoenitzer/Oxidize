@@ -123,7 +123,8 @@ pub fn significant_tokens(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     for raw in s.split(|c: char| !c.is_alphanumeric()) {
         let t = raw.to_lowercase();
-        if t.len() >= 3
+        // count the characters as written, since a non-ASCII letter takes more than one byte
+        if raw.chars().count() >= 3
             && !is_stopword(&t)
             && !t.chars().all(|c| c.is_ascii_digit())
             && !out.contains(&t)
@@ -490,6 +491,23 @@ mod tests {
         // Version numbers and "x64" are dropped.
         assert!(!toks.iter().any(|t| t == "x64"));
         assert!(!toks.iter().any(|t| t.chars().all(|c| c.is_ascii_digit())));
+    }
+
+    #[test]
+    fn token_floor_counts_characters_not_bytes() {
+        assert_eq!(significant_tokens("Ré Player"), Vec::<String>::new());
+        assert_eq!(significant_tokens("Ré Studio"), vec!["studio".to_string()]);
+        assert_eq!(
+            significant_tokens("音乐 Studio"),
+            vec!["studio".to_string()]
+        );
+        assert_eq!(significant_tokens("Ñu"), Vec::<String>::new());
+        // "İş" lowercases to three characters, but two were written
+        assert_eq!(significant_tokens("İş Studio"), vec!["studio".to_string()]);
+        assert_eq!(
+            significant_tokens("Été Мир 音乐盒"),
+            vec!["été".to_string(), "мир".to_string(), "音乐盒".to_string()]
+        );
     }
 
     #[test]
