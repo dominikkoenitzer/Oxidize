@@ -761,10 +761,8 @@ mod tests {
 
     /// An empty `Packages` folder below a fresh folder standing in for
     /// `%LOCALAPPDATA%`.
-    fn local_appdata(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("oxidize_package_{tag}_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+    fn local_appdata(tag: &str) -> crate::backup::TestDir {
+        let dir = crate::backup::TestDir::new(&format!("oxidize_package_{tag}"));
         std::fs::create_dir_all(dir.join("Packages")).unwrap();
         dir
     }
@@ -819,7 +817,6 @@ mod tests {
         assert_eq!(data_folder(&local, r"..\Packages_8wekyb3d8bbwe"), None);
         assert_eq!(data_folder(&local, "Packages"), None);
         assert_eq!(data_folder(&local, ""), None);
-        let _ = std::fs::remove_dir_all(&local);
     }
 
     fn found(path: &str, confidence: Confidence) -> Leftover {
@@ -862,7 +859,7 @@ mod tests {
                 "name match",
             ),
         ];
-        let items = leftovers(&notes, Some(&local), by_name);
+        let items = leftovers(&notes, Some(&*local), by_name);
         let summary: Vec<(String, Confidence)> = items
             .iter()
             .map(|l| (l.path.clone(), l.confidence))
@@ -883,9 +880,8 @@ mod tests {
 
         // Gone with the package: nothing of it is reported.
         std::fs::remove_dir_all(&folder).unwrap();
-        assert!(leftovers(&notes, Some(&local), Vec::new()).is_empty());
+        assert!(leftovers(&notes, Some(&*local), Vec::new()).is_empty());
         assert!(leftovers(&notes, None, Vec::new()).is_empty());
-        let _ = std::fs::remove_dir_all(&local);
     }
 
     #[test]
