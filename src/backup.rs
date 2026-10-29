@@ -37,7 +37,14 @@ pub enum Undo {
         key: Option<String>,
     },
     /// Move a quarantined path back to where it was.
-    MoveBack { from: PathBuf, to: PathBuf },
+    MoveBack {
+        from: PathBuf,
+        to: PathBuf,
+        /// The delete stopped partway, so part of the original stayed where
+        /// it was. Older manifests have none and read as a whole move.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        partial: bool,
+    },
     /// Re-create a task from its XML.
     TaskImport { name: String, file: PathBuf },
     /// Put an entry back on the `Path` variable, where it was.
@@ -288,6 +295,7 @@ impl BackupSession {
                 Undo::MoveBack {
                     from: dest.clone(),
                     to: original.to_path_buf(),
+                    partial: true,
                 },
             )?;
             return Err(e).context("partially removed");
@@ -300,6 +308,7 @@ impl BackupSession {
             Undo::MoveBack {
                 from: dest.clone(),
                 to: original.to_path_buf(),
+                partial: false,
             },
         ) {
             let _ = move_path(&dest, original);
@@ -778,7 +787,7 @@ pub fn move_path(from: &Path, to: &Path) -> Result<()> {
 
 /// Everything in the copy is still at the original. Anything missing, or
 /// anything that cannot be read, counts as a delete that got started.
-fn still_whole(original: &Path, copy: &Path) -> bool {
+pub(crate) fn still_whole(original: &Path, copy: &Path) -> bool {
     if fs::symlink_metadata(original).is_err() {
         return false;
     }
@@ -1031,7 +1040,8 @@ mod tests {
         let manifest = read_manifest(session.root()).unwrap();
         assert_eq!(manifest.entries.len(), 1);
         match &manifest.entries[0].undo {
-            Undo::MoveBack { from, to } => {
+            Undo::MoveBack { from, to, partial } => {
+                assert!(partial);
                 assert_eq!(to, &src);
                 assert!(from.join("a.txt").exists());
                 assert!(from.join("z.txt").exists());
@@ -1114,6 +1124,24 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_move_back_written_before_partial_moves_were_marked_reads_as_whole() {
+        let old = r#"{"MoveBack":{"from":"C:\\B\\files\\C\\Foo","to":"C:\\Foo"}}"#;
+        let undo: Undo = serde_json::from_str(old).unwrap();
+        assert!(matches!(undo, Undo::MoveBack { partial: false, .. }));
+        // A whole move is written as before; only a partial one carries the mark.
+        assert_eq!(serde_json::to_string(&undo).unwrap(), old);
+        let partial = Undo::MoveBack {
+            from: r"C:\B\files\C\Foo".into(),
+            to: r"C:\Foo".into(),
+            partial: true,
+        };
+        let json = serde_json::to_string(&partial).unwrap();
+        assert!(json.contains(r#""partial":true"#), "{json}");
+        let back: Undo = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, Undo::MoveBack { partial: true, .. }));
     }
 
     fn info(name: &str, program: &str, created: &str) -> BackupInfo {

@@ -153,6 +153,18 @@ fn classify(e: &std::io::Error) -> Probe {
 /// Walk `root`, a folder or a single file, under `rule`. `root` itself is
 /// never a candidate: the folder stays, only what is in it goes.
 pub fn walk(root: &Path, rule: &Rule, protected: &Protected, now: SystemTime) -> Walk {
+    walk_except(root, rule, protected, now, None)
+}
+
+/// [`walk`], passing over the folder whose key is `skip` and all it holds,
+/// as if it were not there.
+pub fn walk_except(
+    root: &Path,
+    rule: &Rule,
+    protected: &Protected,
+    now: SystemTime,
+    skip: Option<&str>,
+) -> Walk {
     let mut out = Walk::default();
     let Ok(meta) = fs::symlink_metadata(root) else {
         return out;
@@ -184,6 +196,9 @@ pub fn walk(root: &Path, rule: &Rule, protected: &Protected, now: SystemTime) ->
         for entry in entries.flatten() {
             let path = entry.path();
             let child = protect::child_key(&key, &entry.file_name());
+            if skip == Some(child.as_str()) {
+                continue;
+            }
             if protected.covers_key(&child) {
                 add(&mut out.kept, KeptReason::Protected, 1, 0);
                 continue;
