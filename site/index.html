@@ -467,9 +467,9 @@ footer p { margin: 0.3rem 0; }
 <h2 id="new-h" class="vh">Details</h2>
 <div class="grid2">
 <div class="card">
-<div class="num">Version 0.2.10</div>
+<div class="num">Version 0.2.11</div>
 <h3>What's new</h3>
-<ul><li>Before a Store app is removed, what runs from its folder is closed the way a program's processes are, and a helper with no window is named when it is ended.</li><li>The vendor's key and folders stay while a Store app of the same vendor is installed.</li><li>Leftovers are kept while a program's uninstaller is still running.</li><li>A clean counts as freed only what is really gone, for Windows.old, Delivery Optimization files and Recycle Bin items alike.</li><li>In the window, Undo stays a dry run when dry run is on, and stays available after a restore where some items failed.</li></ul>
+<ul><li>A running program is never ended. Its windows are asked to close, and when something still runs three seconds later, or has no window, the removal stops before anything goes and names it.</li><li>The questions before Remove completely and Run uninstaller say that what a program's own uninstaller removes is not in the backup.</li></ul>
 </div>
 <div class="card">
 <div class="num">Requirements</div>

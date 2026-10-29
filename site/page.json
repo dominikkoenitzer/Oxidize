@@ -198,13 +198,10 @@
     }
   },
   "new": {
-    "version": "0.2.10",
+    "version": "0.2.11",
     "items": [
-      "Before a Store app is removed, what runs from its folder is closed the way a program's processes are, and a helper with no window is named when it is ended.",
-      "The vendor's key and folders stay while a Store app of the same vendor is installed.",
-      "Leftovers are kept while a program's uninstaller is still running.",
-      "A clean counts as freed only what is really gone, for Windows.old, Delivery Optimization files and Recycle Bin items alike.",
-      "In the window, Undo stays a dry run when dry run is on, and stays available after a restore where some items failed."
+      "A running program is never ended. Its windows are asked to close, and when something still runs three seconds later, or has no window, the removal stops before anything goes and names it.",
+      "The questions before Remove completely and Run uninstaller say that what a program's own uninstaller removes is not in the backup."
     ]
   },
   "requirements": [
