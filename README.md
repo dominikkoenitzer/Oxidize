@@ -86,7 +86,9 @@ Naming categories cleans exactly those: `--temp`, `--crash-dumps`,
 tab does the same: Analyse, tick, clean.
 
 Temporary files go only when they were neither written nor created for 7
-days, in your temp folder and in Windows' own. Crash dumps are the `.dmp`
+days, in your temp folder and in Windows' own. A git repository stays
+whole, however old: a folder with a `.git` folder or file, or a bare
+repository, is never entered. Crash dumps are the `.dmp`
 files Windows and programs write, and the error reports Windows keeps
 queued. Windows' own temp folder and dumps need administrator rights; without
 them they are counted and listed as such, and `--elevate` includes them.
@@ -342,8 +344,9 @@ has a `kind`, `program` or `store`.
 `bytes`, `count`, `kept`, `notes`, `needs_admin` and `preselected`, and the
 `folders` of removed programs with their confidence), `chosen`,
 `chosen_folders` and `chosen_bytes`. Each `kept` entry has a `code`
-(`recent`, `recently_deleted`, `in_use`, `protected`, `access_denied`,
-`unreadable`, `needs_admin`, `running`, `failed`), the `reason` in words, a
+(`recent`, `recently_deleted`, `in_use`, `protected`, `repository`,
+`access_denied`, `unreadable`, `needs_admin`, `running`, `failed`), the
+`reason` in words, a
 `count` and `bytes`. With `--yes` it prints `cleaned`, one entry per category
 with `freed`, `removed`, `kept`, `backup` and `notes`, and the total `freed`;
 a category that did not clean fully exits with 4. Both carry a `summary` to
