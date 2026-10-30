@@ -814,6 +814,287 @@ pub fn remove_path(p: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Delete a file or folder that has no backup: all of a folder, or none of
+/// it. Each file in it is opened alone and marked for deletion before any
+/// of it goes, so a file another program has open, or a program file that
+/// runs, keeps the whole folder. Links inside go as links.
+///
+/// Once the files go, there is no way back: a file made in the folder after
+/// it was listed, or a mark that cannot be taken back, leaves the folder
+/// partly gone, and the error says so.
+#[cfg(windows)]
+pub fn remove_whole(p: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(p)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return remove_path(p);
+    }
+    let (mut dirs, mut marked) = (Vec::new(), Vec::new());
+    if let Err(e) = hold(p, &mut dirs, &mut marked) {
+        // A file whose mark stays goes when it is closed.
+        let mut stuck = None;
+        for f in &marked {
+            if let Err(u) = mark(f, false) {
+                stuck = stuck.or(Some(u));
+            }
+        }
+        return Err(stuck.map_or(e, partly_gone));
+    }
+    let mut gone = !marked.is_empty();
+    // Closing the last handle deletes each file.
+    drop(marked);
+    // A folder comes after everything in it, so the last one held goes first.
+    while let Some(d) = dirs.pop() {
+        match mark(&d, true) {
+            Ok(()) => gone = true,
+            Err(e) if gone => return Err(partly_gone(e)),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn partly_gone(e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(e.kind(), format!("part of the folder is gone already: {e}"))
+}
+
+#[cfg(not(windows))]
+pub fn remove_whole(p: &Path) -> std::io::Result<()> {
+    remove_path(p)
+}
+
+/// Test seams in the whole delete. Each test runs on its own thread.
+#[cfg(all(test, windows))]
+pub(crate) mod hooks {
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+
+    type Hook = Box<dyn Fn(&Path)>;
+
+    thread_local! {
+        static BEFORE_OPEN: RefCell<Option<Hook>> = RefCell::new(None);
+        static NO_POSIX: Cell<bool> = const { Cell::new(false) };
+        static NO_UNMARK: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Run `f` on each folder right before it is opened for deletion.
+    pub(crate) fn before_open(f: impl Fn(&Path) + 'static) {
+        BEFORE_OPEN.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    /// Act as a file system without POSIX delete.
+    pub(crate) fn refuse_posix() {
+        NO_POSIX.with(|c| c.set(true));
+    }
+
+    pub(super) fn posix_refused() -> bool {
+        NO_POSIX.with(Cell::get)
+    }
+
+    /// Make every take-back of a mark fail.
+    pub(crate) fn refuse_unmark() {
+        NO_UNMARK.with(|c| c.set(true));
+    }
+
+    pub(super) fn unmark_refused() -> bool {
+        NO_UNMARK.with(Cell::get)
+    }
+
+    pub(super) fn opening(dir: &Path) {
+        BEFORE_OPEN.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(dir);
+            }
+        });
+    }
+}
+
+/// Open the folder `dir` and everything in it for deletion, each folder
+/// before what it holds, and mark every file. Stops at the first that will
+/// not open or take the mark.
+#[cfg(windows)]
+fn hold(dir: &Path, dirs: &mut Vec<fs::File>, marked: &mut Vec<fs::File>) -> std::io::Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        #[cfg(test)]
+        hooks::opening(&d);
+        // Read sharing lets the folder be listed; a program working in it
+        // holds it without delete sharing, and the open fails.
+        let held = open_for_delete(&d, 1)?;
+        // Held without delete sharing, it can no longer be swapped for a link.
+        real_folder(&held, (d == dir).then_some(dir))?;
+        dirs.push(held);
+        for entry in fs::read_dir(&d)? {
+            let path = entry?.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(path);
+                continue;
+            }
+            let file = open_for_delete(&path, 0)?;
+            mark(&file, true)?;
+            marked.push(file);
+        }
+    }
+    Ok(())
+}
+
+/// Refuse a held folder that is a link or no folder, and the top folder
+/// when the handle leads to another place than the path `top`.
+#[cfg(windows)]
+fn real_folder(held: &fs::File, top: Option<&Path>) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_NAME_NORMALIZED,
+    };
+    let handle = HANDLE(held.as_raw_handle());
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    if info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+        || info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+    {
+        return Err(std::io::Error::other(
+            "the folder changed while it was being deleted",
+        ));
+    }
+    let Some(top) = top else {
+        return Ok(());
+    };
+    let mut buf = vec![0u16; 32_768];
+    let n = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) } as usize;
+    if n == 0 || n >= buf.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    if same_place(&String::from_utf16_lossy(&buf[..n]), &long_name(top)?) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "the path to the folder goes through a link",
+        ))
+    }
+}
+
+/// `p` as a full path with its short 8.3 names spelled out.
+#[cfg(windows)]
+fn long_name(p: &Path) -> std::io::Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    let full = std::path::absolute(p)?;
+    let wide: Vec<u16> = full
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buf = vec![0u16; 32_768];
+    let n = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(String::from_utf16_lossy(&buf[..n]))
+}
+
+/// Whether two full paths name the same place, with or without the `\\?\`
+/// prefix, in any case.
+#[cfg(windows)]
+fn same_place(a: &str, b: &str) -> bool {
+    fn plain(s: &str) -> String {
+        let s = s.replace('/', r"\");
+        let s = match s.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_string(),
+        };
+        s.trim_end_matches('\\').to_lowercase()
+    }
+    plain(a) == plain(b)
+}
+
+/// Open `path` itself for deletion, never what a link points to.
+#[cfg(windows)]
+fn open_for_delete(path: &Path, share: u32) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(share)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Mark an open file or folder to go when it is closed, read-only or not,
+/// or take the mark back. A program file that runs refuses the mark.
+/// Where the file system has no POSIX delete, such as FAT, the plain mark
+/// is used, and a read-only file refuses it.
+#[cfg(windows)]
+fn mark(file: &fs::File, delete: bool) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{FileDispositionInfoEx, SetFileInformationByHandle};
+    const DELETE: u32 = 0x1;
+    const POSIX_SEMANTICS: u32 = 0x2;
+    const IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
+    let handle = HANDLE(file.as_raw_handle());
+    let flags: u32 = if delete {
+        DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+    } else {
+        0
+    };
+    #[cfg(test)]
+    if !delete && hooks::unmark_refused() {
+        return Err(std::io::Error::from_raw_os_error(5));
+    }
+    #[cfg(test)]
+    if hooks::posix_refused() {
+        return plain_mark(handle, delete);
+    }
+    let posix = unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfoEx,
+            (&flags as *const u32).cast(),
+            4,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF));
+    // The codes for a request the file system does not know.
+    match posix {
+        Err(e) if matches!(e.raw_os_error(), Some(87 | 50 | 1)) => plain_mark(handle, delete),
+        other => other,
+    }
+}
+
+/// The mark every file system knows. The file goes when its last handle
+/// closes, and the mark can be taken back until then.
+#[cfg(windows)]
+fn plain_mark(handle: windows::Win32::Foundation::HANDLE, delete: bool) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+    let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
+    unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+}
+
 fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
     if meta.is_dir() {
@@ -1022,6 +1303,218 @@ mod tests {
         assert!(!dst.exists());
 
         drop(held);
+    }
+
+    #[test]
+    fn a_folder_with_a_file_held_open_is_not_deleted_at_all() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_locked_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        remove_whole(&src).unwrap_err();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        drop(held);
+
+        // Open with delete sharing, as most programs open files.
+        let shared = fs::File::open(src.join("z.txt")).unwrap();
+        remove_whole(&src).unwrap_err();
+        assert!(src.join("a.txt").exists() && src.join("z.txt").exists());
+        drop(shared);
+
+        remove_whole(&src).unwrap();
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn a_folder_a_program_runs_from_is_not_deleted_at_all() {
+        let root = TestDir::new("oxidize_whole_running_test");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("data")).unwrap();
+        fs::write(src.join(r"data\a.txt"), "first").unwrap();
+        let exe = src.join("quill.exe");
+        fs::copy(crate::system::system32("PING.EXE"), &exe).unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let result = remove_whole(&src);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        result.unwrap_err();
+        assert_eq!(
+            fs::read_to_string(src.join(r"data\a.txt")).unwrap(),
+            "first"
+        );
+        assert!(exe.exists());
+    }
+
+    #[test]
+    fn a_whole_folder_goes_with_read_only_files_and_links_left_unfollowed() {
+        let root = TestDir::new("oxidize_whole_test");
+        let src = root.join("src");
+        let outside = root.join("outside");
+        fs::create_dir_all(src.join(r"a\b")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("kept.txt"), "kept").unwrap();
+        let locked = src.join(r"a\b\locked.txt");
+        fs::write(&locked, "read only").unwrap();
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&locked, perms).unwrap();
+        let made = std::process::Command::new(crate::system::system32("cmd.exe"))
+            .args(["/c", "mklink", "/J"])
+            .arg(src.join(r"a\link"))
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+
+        remove_whole(&src).unwrap();
+        assert!(!src.exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "kept"
+        );
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new(crate::system::system32("cmd.exe"))
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_during_the_delete_is_not_followed() {
+        let root = TestDir::new("oxidize_whole_swap_test");
+        let src = root.join("src");
+        let outside = root.join("outside");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("kept.txt"), "kept").unwrap();
+        // After `src` is listed, `sub` turns into a link to `outside`.
+        let swap = outside.clone();
+        hooks::before_open(move |d| {
+            if d.ends_with("sub") && !d.is_symlink() {
+                fs::remove_dir(d).unwrap();
+                junction(d, &swap);
+            }
+        });
+
+        remove_whole(&src).unwrap_err();
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "kept"
+        );
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+    }
+
+    #[test]
+    fn a_folder_reached_through_a_link_is_not_deleted() {
+        let root = TestDir::new("oxidize_whole_through_test");
+        let real = root.join("real");
+        fs::create_dir_all(real.join("src")).unwrap();
+        fs::write(real.join(r"src\a.txt"), "first").unwrap();
+        junction(&root.join("link"), &real);
+
+        remove_whole(&root.join(r"link\src")).unwrap_err();
+        assert_eq!(
+            fs::read_to_string(real.join(r"src\a.txt")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn without_posix_delete_a_whole_folder_still_goes() {
+        let root = TestDir::new("oxidize_whole_plain_test");
+        let src = root.join("src");
+        fs::create_dir_all(src.join(r"a\b")).unwrap();
+        fs::write(src.join("top.txt"), "top").unwrap();
+        fs::write(src.join(r"a\b\deep.txt"), "deep").unwrap();
+        hooks::refuse_posix();
+
+        remove_whole(&src).unwrap();
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn without_posix_delete_a_folder_with_a_file_held_open_stays_whole() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_plain_locked_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        hooks::refuse_posix();
+
+        remove_whole(&src).unwrap_err();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        drop(held);
+    }
+
+    #[test]
+    fn without_posix_delete_a_read_only_file_keeps_the_folder_whole() {
+        let root = TestDir::new("oxidize_whole_plain_read_only_test");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        let locked = src.join("z.txt");
+        fs::write(&locked, "read only").unwrap();
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&locked, perms.clone()).unwrap();
+        hooks::refuse_posix();
+
+        remove_whole(&src).unwrap_err();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        assert!(locked.exists());
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&locked, perms).unwrap();
+    }
+
+    #[test]
+    fn a_mark_that_cannot_be_taken_back_is_reported() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_unmark_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        hooks::refuse_unmark();
+
+        let err = remove_whole(&src).unwrap_err();
+        assert!(err.to_string().contains("gone already"), "{err}");
+        assert!(!src.join("a.txt").exists());
+        assert!(src.join("z.txt").exists());
+        drop(held);
+    }
+
+    #[test]
+    fn a_file_made_after_the_folder_was_listed_is_reported_as_partly_gone() {
+        let root = TestDir::new("oxidize_whole_late_test");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::write(src.join(r"sub\f.txt"), "inner").unwrap();
+        // After `src` is listed, a program writes a new file into it.
+        let late = src.join("late.txt");
+        let write = late.clone();
+        hooks::before_open(move |d| {
+            if d.ends_with("sub") {
+                fs::write(&write, "late").unwrap();
+            }
+        });
+
+        let err = remove_whole(&src).unwrap_err();
+        assert!(err.to_string().contains("gone already"), "{err}");
+        assert!(!src.join("a.txt").exists());
+        assert_eq!(fs::read_to_string(&late).unwrap(), "late");
+    }
+
+    #[test]
+    fn the_same_place_is_found_under_any_spelling() {
+        assert!(same_place(r"\\?\C:\Users\Ann\Temp\", "c:/users/ann/temp"));
+        assert!(same_place(r"\\?\UNC\server\share\x", r"\\server\share\x"));
+        assert!(!same_place(r"\\?\D:\dev\x", r"C:\dev\x"));
     }
 
     #[test]

@@ -22,6 +22,15 @@ struct FakeTools {
     windows_old: Mutex<Option<PathBuf>>,
     /// What runs by the time the cleaning starts.
     running: Mutex<Vec<PathBuf>>,
+    /// What git says about each checkout: uncommitted work or not, or None
+    /// when it cannot tell.
+    uncommitted: Mutex<Option<bool>>,
+    /// What git says about each tagged folder: ignored or not, or None when
+    /// it cannot tell.
+    ignored: Mutex<Option<bool>>,
+    /// A path whose presence is noted each time git is asked.
+    watched: Mutex<Option<PathBuf>>,
+    seen: Mutex<Vec<bool>>,
 }
 
 impl FakeTools {
@@ -73,6 +82,17 @@ impl Tools for FakeTools {
     fn running_exes(&self) -> Vec<PathBuf> {
         self.running.lock().unwrap().clone()
     }
+    fn uncommitted(&self, _dir: &Path) -> Option<bool> {
+        self.call("uncommitted");
+        if let Some(path) = self.watched.lock().unwrap().as_ref() {
+            self.seen.lock().unwrap().push(path.exists());
+        }
+        *self.uncommitted.lock().unwrap()
+    }
+    fn ignored(&self, _dir: &Path) -> Option<bool> {
+        self.call("ignored");
+        *self.ignored.lock().unwrap()
+    }
 }
 
 /// A PC in a folder: temp folders, dumps, a Recycle Bin, a browser and a
@@ -115,6 +135,7 @@ impl Pc {
             roaming_appdata: Some(root.join("Roaming")),
             windows_old: Some(root.join("Windows.old")),
             system_drive: Some(root.to_path_buf()),
+            build_roots: vec![root.to_path_buf()],
         };
         Pc { root, places }
     }
@@ -216,6 +237,10 @@ fn analyse_with(
             recycle_bin_days: RECYCLE_DAYS,
             tools,
             orphans,
+            asked: Asked {
+                build_output: true,
+                dead: true,
+            },
         },
     )
 }
@@ -627,6 +652,7 @@ fn the_recycle_bin_goes_only_when_chosen_and_only_old_items() {
             recycle_bin_days: 1,
             tools: &tools,
             orphans: &no_orphans,
+            asked: Asked::default(),
         },
     );
     assert_eq!(a.finding(Category::RecycleBin).unwrap().count, 1);
@@ -970,6 +996,7 @@ fn a_temp_folder_that_is_no_temp_folder_is_never_walked_or_cleaned() {
         let chosen = Choice {
             categories: vec![Category::Temp],
             folders: Vec::new(),
+            outright: Vec::new(),
         };
         let done = clean_with(&pc, &a, &chosen, &Protected::default(), true, &tools);
         assert_eq!((done[0].removed, done[0].freed), (0, 0), "{name}");
@@ -1000,5 +1027,638 @@ fn a_temp_folder_that_is_no_temp_folder_is_never_walked_or_cleaned() {
         r"AppData\Local\Oxidize\backups\one\manifest.json",
     ] {
         assert!(me.join(kept).exists(), "{kept}");
+    }
+}
+
+fn tools_uncommitted(answer: Option<bool>) -> FakeTools {
+    let tools = FakeTools::default();
+    *tools.uncommitted.lock().unwrap() = answer;
+    tools
+}
+
+/// Two dumps of each of two programs: dump files in CrashDumps, and an
+/// error report in the report queue.
+fn dumps_of_two_programs(pc: &Pc) -> [PathBuf; 4] {
+    let l = pc.local();
+    let app = l.join(r"CrashDumps\app.exe.1234.dmp");
+    let app_late = l.join(r"CrashDumps\app.exe.999.dmp");
+    let tool = l.join(r"CrashDumps\tool.exe.77.dmp");
+    let report = l.join(r"Microsoft\Windows\WER\ReportQueue\AppCrash_tool.exe_5e1_9a2");
+    file_aged(&app, 400, 2);
+    file_aged(&app_late, 50, 2);
+    file_aged(&tool, 100, 2);
+    file_aged(&report.join("Report.wer"), 60, 2);
+    file_aged(&report.join("memory.hdmp"), 40, 2);
+    [app, app_late, tool, report]
+}
+
+#[test]
+fn each_dump_is_listed_with_the_program_it_belongs_to() {
+    let pc = Pc::new("dumps_listed");
+    let [app, app_late, tool, report] = dumps_of_two_programs(&pc);
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::CrashDumps).unwrap();
+    assert_eq!((f.count, f.bytes), (5, 650));
+    let mut listed: Vec<_> = f
+        .dumps
+        .iter()
+        .map(|d| (d.path.clone(), d.bytes, d.files, d.program.clone()))
+        .collect();
+    listed.sort();
+    let mut want: Vec<(PathBuf, u64, usize, Option<String>)> = vec![
+        (app, 400, 1, Some("app.exe".to_string())),
+        (app_late, 50, 1, Some("app.exe".to_string())),
+        (tool, 100, 1, Some("tool.exe".to_string())),
+        (report, 100, 2, Some("tool.exe".to_string())),
+    ];
+    want.sort();
+    assert_eq!(listed, want);
+}
+
+#[test]
+fn the_dumps_of_one_program_can_be_left_out() {
+    let pc = Pc::new("dumps_skip");
+    let [app, app_late, tool, report] = dumps_of_two_programs(&pc);
+    let tools = FakeTools::default();
+    let mut a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    a.narrow_dumps(&[], &["TOOL".to_string(), "nothing.exe".to_string()]);
+    let f = a.finding(Category::CrashDumps).unwrap();
+    assert_eq!((f.count, f.bytes), (2, 450));
+    assert_eq!(kept(&f.kept, &KeptReason::LeftOut), (3, 200));
+    assert!(f
+        .dumps
+        .iter()
+        .all(|d| d.program.as_deref() == Some("app.exe")));
+    assert_eq!(f.notes, ["no dumps of nothing.exe were found"]);
+    let choice = a.choice(&[Category::CrashDumps], Confidence::High);
+    assert_eq!(a.chosen_bytes(&choice), 450);
+
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (2, 450));
+    assert_eq!(kept(&done[0].kept, &KeptReason::LeftOut), (3, 200));
+    assert!(!app.exists() && !app_late.exists());
+    assert!(tool.exists() && report.join("memory.hdmp").exists());
+}
+
+#[test]
+fn single_dumps_can_be_picked() {
+    let pc = Pc::new("dumps_pick");
+    let [app, app_late, tool, report] = dumps_of_two_programs(&pc);
+    let tools = FakeTools::default();
+    let mut a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let missing = pc.local().join(r"CrashDumps\gone.exe.1.dmp");
+    // A path is matched whatever its case.
+    let picked = PathBuf::from(report.display().to_string().to_uppercase());
+    a.narrow_dumps(&[app_late.clone(), picked, missing.clone()], &[]);
+    let f = a.finding(Category::CrashDumps).unwrap();
+    assert_eq!((f.count, f.bytes), (3, 150));
+    assert_eq!(kept(&f.kept, &KeptReason::LeftOut), (2, 500));
+    assert_eq!(
+        f.notes,
+        [format!(
+            "{} is not among the dumps found",
+            missing.display()
+        )]
+    );
+
+    let choice = a.choice(&[Category::CrashDumps], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (3, 150));
+    assert!(!app_late.exists() && !report.join("Report.wer").exists());
+    assert!(app.exists() && tool.exists());
+}
+
+/// Folders of two removed programs, both matched at high confidence, and
+/// the analysis of them.
+fn two_removed_programs(
+    pc: &Pc,
+    tools: &FakeTools,
+    living: bool,
+) -> (OrphanFolder, OrphanFolder, Analysis) {
+    let quill = pc.orphan("Quillmark Studio", 120);
+    let ink = pc.orphan("Inkwell Studio", 80);
+    file_aged(&ink.path.join(r"bin\inkwell.exe"), 30, 100);
+    if living {
+        file_aged(&ink.path.join("today.log"), 5, 0);
+    }
+    let removed = vec![
+        ("Quillmark Studio".to_string(), None),
+        ("Inkwell Studio".to_string(), None),
+    ];
+    let snap = scanner::Snapshot::with_programs(Vec::new());
+    let scored = score_orphans(&[quill.clone(), ink.clone()], &removed, &snap);
+    assert!(scored.iter().all(|o| o.confidence == Confidence::High));
+    let source = move || scored.clone();
+    let a = analyse_with(pc, &Protected::default(), false, &[], tools, &source);
+    (quill, ink, a)
+}
+
+#[test]
+fn a_dead_folder_is_deleted_outright_and_a_living_one_goes_into_the_backup() {
+    let pc = Pc::new("orphans_dead");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, true);
+    let f = a.finding(Category::Orphans).unwrap();
+    let dead = |p: &Path| f.folders.iter().find(|o| o.path == p).unwrap().proven_dead;
+    assert!(dead(&quill.path));
+    assert!(!dead(&ink.path));
+
+    let mut choice = a.choice(&[Category::Orphans], Confidence::High);
+    assert!(choice.outright.is_empty(), "outright only when asked");
+    a.delete_dead(&mut choice);
+    assert_eq!(choice.outright, std::slice::from_ref(&quill.path));
+
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(!quill.path.exists() && !ink.path.exists());
+    assert!(o
+        .notes
+        .contains(&"1 proven dead, deleted without a backup".to_string()));
+
+    // Only the living folder is in the backup.
+    let info = crate::backup::find_backup(o.backup.as_ref().expect("a backup")).unwrap();
+    let restored = crate::restore::restore(&info, false).unwrap();
+    assert!(restored.iter().all(|r| r.result.is_ok()));
+    assert!(ink.path.join("today.log").exists());
+    assert!(!quill.path.exists());
+    crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
+fn a_folder_that_came_alive_since_the_analysis_goes_into_the_backup() {
+    let pc = Pc::new("orphans_revived");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, false);
+    let f = a.finding(Category::Orphans).unwrap();
+    assert!(f.folders.iter().all(|o| o.proven_dead));
+    let mut choice = a.choice(&[Category::Orphans], Confidence::High);
+    a.delete_dead(&mut choice);
+    assert_eq!(choice.outright.len(), 2);
+
+    // One was written to, and the other's program started again.
+    file_aged(&quill.path.join("new.txt"), 5, 0);
+    *tools.running.lock().unwrap() = vec![ink.path.join(r"bin\inkwell.exe")];
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(o
+        .notes
+        .contains(&"2 no longer proven dead, so into the backup instead".to_string()));
+    assert!(!o.notes.iter().any(|n| n.contains("without a backup")));
+
+    let info = crate::backup::find_backup(o.backup.as_ref().expect("a backup")).unwrap();
+    let restored = crate::restore::restore(&info, false).unwrap();
+    assert!(restored.iter().all(|r| r.result.is_ok()));
+    assert!(quill.path.join("new.txt").exists());
+    assert!(ink.path.join(r"bin\inkwell.exe").exists());
+    crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
+fn a_plain_analysis_does_not_look_for_build_output_or_prove_folders_dead() {
+    use super::build::tests::cache;
+    let pc = Pc::new("plain_analysis");
+    let checkout = pc.root.join(r"Profile\code\work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    cache(&checkout.join(r"app\target"), 30, 60);
+    let quill = pc.orphan("Quillmark Studio", 120);
+    let removed = vec![("Quillmark Studio".to_string(), None)];
+    let snap = scanner::Snapshot::with_programs(Vec::new());
+    let scored = score_orphans(std::slice::from_ref(&quill), &removed, &snap);
+    let source = move || scored.clone();
+    let tools = tools_uncommitted(Some(false));
+    let a = analyse(
+        &pc.places,
+        &Options {
+            protected: &Protected::default(),
+            elevated: false,
+            now: SystemTime::now(),
+            running: &[],
+            recycle_bin_days: RECYCLE_DAYS,
+            tools: &tools,
+            orphans: &source,
+            asked: Asked::default(),
+        },
+    );
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert!(f.skipped);
+    assert!(!f.actionable());
+    assert_eq!((f.count, f.bytes), (0, 0));
+    assert!(f.build_folders.is_empty() && f.kept.is_empty());
+    assert!(!tools.calls().contains(&"uncommitted"), "git is not run");
+    let o = a.finding(Category::Orphans).unwrap();
+    assert_eq!(o.folders.len(), 1);
+    assert!(!o.folders[0].proven_dead);
+    let mut choice = a.choice(&[Category::Orphans], Confidence::High);
+    a.delete_dead(&mut choice);
+    assert!(choice.outright.is_empty());
+}
+
+#[test]
+fn each_dead_folder_is_checked_after_the_one_before_it_went() {
+    let pc = Pc::new("orphans_in_turn");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, false);
+    let mut choice = a.choice(&[Category::Orphans], Confidence::High);
+    a.delete_dead(&mut choice);
+    assert_eq!(choice.outright.len(), 2);
+
+    // Whichever goes first, the other one is written to as it goes.
+    let (q, i) = (quill.path.clone(), ink.path.clone());
+    crate::backup::hooks::before_open(move |d| {
+        let other = if d == q {
+            &i
+        } else if d == i {
+            &q
+        } else {
+            return;
+        };
+        fs::write(other.join("new.txt"), "fresh").unwrap();
+    });
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(o
+        .notes
+        .contains(&"1 proven dead, deleted without a backup".to_string()));
+    assert!(o
+        .notes
+        .contains(&"1 no longer proven dead, so into the backup instead".to_string()));
+
+    let info = crate::backup::find_backup(o.backup.as_ref().expect("a backup")).unwrap();
+    let restored = crate::restore::restore(&info, false).unwrap();
+    assert!(restored.iter().all(|r| r.result.is_ok()));
+    assert!(quill.path.join("new.txt").exists() != ink.path.join("new.txt").exists());
+    crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
+fn only_a_high_confidence_folder_is_ever_deleted_outright() {
+    let pc = Pc::new("orphans_unsure");
+    let tools = FakeTools::default();
+    let medium = pc.orphan("Quillmark Studio", 120);
+    let low = pc.orphan("Inkwell Studio", 80);
+    let items: Vec<OrphanItem> = [(&medium, Confidence::Medium), (&low, Confidence::Low)]
+        .into_iter()
+        .map(|(f, confidence)| OrphanItem {
+            path: f.path.clone(),
+            bytes: f.size_bytes,
+            modified: f.modified.clone(),
+            confidence,
+            reason: "a plausible match".to_string(),
+            needs_admin: false,
+            proven_dead: false,
+        })
+        .collect();
+    let source = move || items.clone();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &source);
+    let f = a.finding(Category::Orphans).unwrap();
+    assert_eq!(f.folders.len(), 2);
+    assert!(f.folders.iter().all(|o| !o.proven_dead));
+    let mut choice = a.choice(&[Category::Orphans], Confidence::Low);
+    assert_eq!(choice.folders.len(), 2);
+    a.delete_dead(&mut choice);
+    assert!(choice.outright.is_empty());
+
+    // A choice made by hand that names them outright still backs them up.
+    choice.outright = choice.folders.clone();
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(!o.notes.iter().any(|n| n.contains("without a backup")));
+    let info = crate::backup::find_backup(o.backup.as_ref().expect("a backup")).unwrap();
+    let restored = crate::restore::restore(&info, false).unwrap();
+    assert!(restored.iter().all(|r| r.result.is_ok()));
+    assert!(medium.path.join("data.bin").exists());
+    assert!(low.path.join("data.bin").exists());
+    crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
+fn stale_build_output_goes_for_good_and_the_rest_stays_with_its_reason() {
+    use super::build::tests::{age_tree, cache};
+    let pc = Pc::new("build_output");
+    let code = pc.root.join(r"Profile\code");
+    let stale = code.join(r"app\target");
+    let stale_bytes = cache(&stale, 300, 60);
+    let fresh = code.join(r"new\target");
+    let fresh_bytes = cache(&fresh, 50, 2);
+    let nested = code.join(r"vendored\target");
+    cache(&nested, 20, 60);
+    fs::create_dir_all(nested.join(r"src\.git")).unwrap();
+    age_tree(&nested, 60);
+    let in_temp = pc.temp().join(r"build\target");
+    cache(&in_temp, 70, 60);
+    let checkout = code.join("work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    let dirty = checkout.join("target");
+    let dirty_bytes = cache(&dirty, 40, 60);
+    let tools = tools_uncommitted(Some(true));
+
+    let before = pc.snapshot();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    assert_eq!(
+        pc.snapshot(),
+        before,
+        "an analysis must not change anything"
+    );
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert!(!f.preselected && f.actionable());
+    assert!(!a
+        .default_choice()
+        .categories
+        .contains(&Category::BuildOutput));
+    assert_eq!((f.count, f.bytes), (1, stale_bytes));
+    assert_eq!(f.build_folders[0].path, stale);
+    assert!(f.build_folders[0].unchanged_days >= 59);
+    assert_eq!(f.build_folders[0].checkout, None);
+    assert_eq!(kept(&f.kept, &KeptReason::Recent(30)), (1, fresh_bytes));
+    assert_eq!(kept(&f.kept, &KeptReason::Uncommitted), (1, dirty_bytes));
+    assert_eq!(kept(&f.kept, &KeptReason::Repository).0, 1);
+    let mut calls = tools.calls();
+    calls.sort_unstable();
+    assert_eq!(calls, ["delivery_cache", "uncommitted"]);
+
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let b = &done[0];
+    assert_eq!((b.removed, b.freed), (1, stale_bytes));
+    assert_eq!(b.backup, None);
+    assert!(!stale.exists());
+    assert!(code.join("app").exists(), "only the tagged folder goes");
+    for stays in [&fresh, &nested, &in_temp, &dirty] {
+        assert!(stays.join("CACHEDIR.TAG").exists(), "{}", stays.display());
+    }
+}
+
+#[test]
+fn build_output_in_a_clean_checkout_goes_and_git_is_asked_once_per_checkout() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_clean_checkout");
+    let checkout = pc.root.join(r"Profile\code\work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    let one = cache(&checkout.join(r"app\target"), 30, 60);
+    let two = cache(&checkout.join(r"lib\target"), 20, 60);
+    let tools = tools_uncommitted(Some(false));
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert_eq!((f.count, f.bytes), (2, one + two));
+    assert!(f
+        .build_folders
+        .iter()
+        .all(|b| b.checkout.as_deref() == Some(checkout.as_path())));
+    let asked = |t: &FakeTools| t.calls().iter().filter(|c| **c == "uncommitted").count();
+    assert_eq!(asked(&tools), 1);
+
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (2, one + two));
+    assert_eq!(asked(&tools), 2, "asked again right before");
+    assert!(checkout.join(".git").exists());
+}
+
+#[test]
+fn a_tagged_folder_that_is_a_repository_or_a_link_stays() {
+    use super::build::tests::{age_tree, cache};
+    let pc = Pc::new("build_own_repository");
+    let worktree = pc.root.join(r"Profile\code\app\target");
+    cache(&worktree, 30, 60);
+    fs::write(worktree.join(".git"), "gitdir: ../.git/worktrees/target").unwrap();
+    age_tree(&worktree, 60);
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert_eq!(f.count, 0);
+    assert_eq!(kept(&f.kept, &KeptReason::Repository).0, 1);
+
+    let real = pc.root.join(r"Elsewhere\target");
+    cache(&real, 30, 60);
+    let link = pc.root.join(r"Profile\code\lib\target");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let made = std::process::Command::new(crate::system::system32("cmd.exe"))
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&real)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let protected = Protected::default();
+    let mut check = build::Check {
+        now: SystemTime::now(),
+        protected: &protected,
+        elevated: false,
+        tools: &tools,
+        checkouts: Default::default(),
+        ignored: Default::default(),
+        running: &[],
+        probe: false,
+    };
+    assert!(build::assess(&real, &mut check).is_ok());
+    assert!(matches!(
+        build::assess(&link, &mut check),
+        Err((KeptReason::Failed(_), 0))
+    ));
+}
+
+#[test]
+fn each_build_folder_is_checked_after_the_one_before_it_went() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_one_by_one");
+    let code = pc.root.join(r"Profile\code");
+    for name in ["one", "two"] {
+        fs::create_dir_all(code.join(name).join(".git")).unwrap();
+        cache(&code.join(name).join("target"), 30, 60);
+    }
+    let tools = tools_uncommitted(Some(false));
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    assert_eq!(a.finding(Category::BuildOutput).unwrap().count, 2);
+
+    *tools.watched.lock().unwrap() = Some(code.join(r"one\target"));
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!(done[0].removed, 2);
+    // The second checkout is asked about only once the first folder is gone.
+    assert_eq!(*tools.seen.lock().unwrap(), [true, false]);
+}
+
+#[test]
+fn with_administrator_rights_git_is_never_run_and_checkout_output_stays() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_elevated");
+    let checkout = pc.root.join(r"Profile\code\work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    let inside = checkout.join("target");
+    let inside_bytes = cache(&inside, 30, 60);
+    let outside = pc.root.join(r"Profile\packages\tool");
+    let outside_bytes = cache(&outside, 20, 60);
+    let tools = tools_uncommitted(Some(false));
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert_eq!((f.count, f.bytes), (1, outside_bytes));
+    assert_eq!(
+        kept(&f.kept, &KeptReason::CheckoutUnknown),
+        (1, inside_bytes)
+    );
+    assert!(f.notes.iter().any(|n| n.contains("administrator rights")));
+
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), true, &tools);
+    assert_eq!(done[0].removed, 1);
+    assert!(!outside.exists() && inside.exists());
+    assert!(!tools.calls().contains(&"uncommitted"));
+}
+
+#[test]
+fn a_tagged_folder_counts_only_beside_a_project_or_ignored_by_git() {
+    use super::build::tests::bare_cache;
+    let pc = Pc::new("build_project");
+    let code = pc.root.join(r"Profile\code");
+    let bare = pc.root.join(r"Profile\viewer\cache");
+    bare_cache(&bare, 40, 60);
+    let dotnet = code.join(r"tool\obj");
+    let dotnet_bytes = bare_cache(&dotnet, 30, 60);
+    fs::write(code.join(r"tool\Tool.CSPROJ"), "").unwrap();
+    let odd = code.join(r"odd\target");
+    bare_cache(&odd, 20, 60);
+    fs::create_dir_all(code.join(r"odd\Cargo.toml")).unwrap();
+    let checkout = code.join("work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    let ignored = checkout.join("out");
+    let ignored_bytes = bare_cache(&ignored, 10, 60);
+    let rows = [
+        (r"kts\build", "BUILD.GRADLE.KTS"),
+        (r"gradle\build", "Settings.Gradle"),
+        (r"fsharp\obj", "Tool.FSPROJ"),
+        (r"vb\obj", "Tool.VbProj"),
+        (r"cpp\x64", "Tool.VCXPROJ"),
+        (r"meson\builddir", "Meson.Build"),
+        (r"python\build", "SETUP.PY"),
+    ];
+    let mut projects = Vec::new();
+    let mut projects_bytes = 0;
+    for (dir, file) in rows {
+        let out = code.join(dir);
+        projects_bytes += bare_cache(&out, 10, 60);
+        fs::write(out.parent().unwrap().join(file), "").unwrap();
+        projects.push(out);
+    }
+    let tools = tools_uncommitted(Some(false));
+    *tools.ignored.lock().unwrap() = Some(true);
+    let asked = |t: &FakeTools| t.calls().iter().filter(|c| **c == "ignored").count();
+
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BuildOutput).unwrap();
+    let mut found: Vec<&Path> = f.build_folders.iter().map(|b| b.path.as_path()).collect();
+    found.sort();
+    let mut want = vec![dotnet.as_path(), ignored.as_path()];
+    want.extend(projects.iter().map(|p| p.as_path()));
+    want.sort();
+    assert_eq!(found, want);
+    assert_eq!(f.bytes, dotnet_bytes + ignored_bytes + projects_bytes);
+    assert!(f.kept.is_empty(), "the others are not build output at all");
+    assert_eq!(asked(&tools), 1, "git is asked only in a checkout");
+
+    // Git is asked again right before: no longer ignored, so it stays.
+    *tools.ignored.lock().unwrap() = Some(false);
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!(
+        (done[0].removed, done[0].freed),
+        (1 + rows.len(), dotnet_bytes + projects_bytes)
+    );
+    let gone_off = KeptReason::Failed("no longer looks like build output".into());
+    assert_eq!(kept(&done[0].kept, &gone_off).0, 1);
+    assert!(!dotnet.exists());
+    for gone in &projects {
+        assert!(!gone.exists(), "{}", gone.display());
+    }
+    for stays in [&bare, &odd, &ignored] {
+        assert!(stays.join("CACHEDIR.TAG").exists(), "{}", stays.display());
+    }
+
+    // With administrator rights git is not asked, so the one in the
+    // checkout is not build output.
+    let tools = tools_uncommitted(Some(false));
+    *tools.ignored.lock().unwrap() = Some(true);
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    assert!(a
+        .finding(Category::BuildOutput)
+        .unwrap()
+        .build_folders
+        .is_empty());
+    assert_eq!(asked(&tools), 0);
+}
+
+#[test]
+fn build_output_written_to_or_protected_since_the_analysis_stays() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_changed");
+    let used = pc.root.join(r"Profile\code\app\target");
+    cache(&used, 30, 60);
+    let kept_dir = pc.root.join(r"Profile\code\lib\target");
+    cache(&kept_dir, 20, 60);
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    assert_eq!(a.finding(Category::BuildOutput).unwrap().count, 2);
+
+    file_aged(&used.join(r"debug\fresh.bin"), 10, 0);
+    let protected = Protected::new([kept_dir.display().to_string()]);
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &protected, false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (0, 0));
+    assert_eq!(kept(&done[0].kept, &KeptReason::Recent(30)).0, 1);
+    assert_eq!(kept(&done[0].kept, &KeptReason::Protected).0, 1);
+    assert!(used.join("CACHEDIR.TAG").exists());
+    assert!(kept_dir.join("CACHEDIR.TAG").exists());
+}
+
+#[test]
+fn build_output_a_program_runs_from_or_holds_open_stays_whole() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_in_use");
+    let code = pc.root.join(r"Profile\code");
+    let ran = code.join(r"one\target");
+    let open = code.join(r"two\target");
+    let runs = code.join(r"three\target");
+    for dir in [&ran, &open, &runs] {
+        cache(dir, 30, 60);
+    }
+    let tools = FakeTools::default();
+    let at_analysis = [ran.join(r"debug\tool.exe")];
+    let a = analyse_with(
+        &pc,
+        &Protected::default(),
+        false,
+        &at_analysis,
+        &tools,
+        &no_orphans,
+    );
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert_eq!(f.count, 2);
+    assert_eq!(kept(&f.kept, &KeptReason::InUse).0, 1);
+
+    let _held = fs::File::open(open.join(r"debug\deps\out.bin")).unwrap();
+    *tools.running.lock().unwrap() = vec![runs.join(r"debug\tool.exe")];
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (0, 0));
+    // The one kept at the analysis is reported with the two kept now.
+    assert_eq!(kept(&done[0].kept, &KeptReason::InUse).0, 3);
+    for dir in [&ran, &open, &runs] {
+        assert!(
+            dir.join(r"debug\deps\out.bin").exists(),
+            "{}",
+            dir.display()
+        );
     }
 }

@@ -10,6 +10,9 @@
 //! like any other leftover, so they can be put back.
 
 pub mod browsers;
+pub mod build;
+pub mod dead;
+pub mod dumps;
 pub mod files;
 pub mod jumplist;
 pub mod protect;
@@ -64,10 +67,11 @@ pub enum Category {
     DeliveryOptimization,
     WindowsOld,
     Orphans,
+    BuildOutput,
 }
 
 impl Category {
-    pub const ALL: [Category; 8] = [
+    pub const ALL: [Category; 9] = [
         Category::Temp,
         Category::CrashDumps,
         Category::RecycleBin,
@@ -76,6 +80,7 @@ impl Category {
         Category::DeliveryOptimization,
         Category::WindowsOld,
         Category::Orphans,
+        Category::BuildOutput,
     ];
 
     /// The id in JSON, also the command-line flag without its dashes.
@@ -89,6 +94,7 @@ impl Category {
             Category::DeliveryOptimization => "delivery-optimization",
             Category::WindowsOld => "windows-old",
             Category::Orphans => "orphans",
+            Category::BuildOutput => "build-output",
         }
     }
 
@@ -102,6 +108,7 @@ impl Category {
             Category::DeliveryOptimization => "Delivery Optimization cache",
             Category::WindowsOld => "Previous Windows installation",
             Category::Orphans => "Folders of removed programs",
+            Category::BuildOutput => "Stale build output",
         }
     }
 
@@ -124,6 +131,9 @@ impl Category {
                 "the Windows from before the last upgrade; once it is gone there is no going back to it"
             }
             Category::Orphans => "folders no installed program claims, moved into a backup",
+            Category::BuildOutput => {
+                "folders build and package tools mark as their cache, unchanged for 30 days and not in use; never in a git checkout with uncommitted work"
+            }
         }
     }
 
@@ -151,6 +161,12 @@ pub enum KeptReason {
     Running(String),
     /// A jump list with pinned items; only its other items go.
     Pinned,
+    /// Left out on the command line.
+    LeftOut,
+    /// In a git checkout that holds uncommitted work.
+    Uncommitted,
+    /// In a git checkout git could not be asked about.
+    CheckoutUnknown,
     Failed(String),
 }
 
@@ -168,6 +184,9 @@ impl KeptReason {
             KeptReason::NeedsAdmin => "needs_admin",
             KeptReason::Running(_) => "running",
             KeptReason::Pinned => "pinned",
+            KeptReason::LeftOut => "left_out",
+            KeptReason::Uncommitted => "uncommitted",
+            KeptReason::CheckoutUnknown => "checkout_unknown",
             KeptReason::Failed(_) => "failed",
         }
     }
@@ -184,6 +203,9 @@ impl KeptReason {
             KeptReason::NeedsAdmin => "needs administrator rights".to_string(),
             KeptReason::Running(name) => format!("{name} is running"),
             KeptReason::Pinned => "with pinned items".to_string(),
+            KeptReason::LeftOut => "left out as asked".to_string(),
+            KeptReason::Uncommitted => "in a git checkout with uncommitted work".to_string(),
+            KeptReason::CheckoutUnknown => "in a git checkout git could not check".to_string(),
             KeptReason::Failed(e) => e.clone(),
         }
     }
@@ -251,6 +273,9 @@ pub struct OrphanItem {
     pub confidence: Confidence,
     pub reason: String,
     pub needs_admin: bool,
+    /// Proven dead by the analysis, as `dead` tells it, and so free to be
+    /// deleted outright.
+    pub proven_dead: bool,
 }
 
 /// What the analysis found in one category.
@@ -272,9 +297,18 @@ pub struct Finding {
     pub needs_admin: bool,
     /// Part of the safe set that is chosen unless the user says otherwise.
     pub preselected: bool,
+    /// Not looked into, as it was not asked for.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
     /// Orphans only: each folder with how sure the match is.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<OrphanItem>,
+    /// Crash dumps only: each dump that would go, with its program.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dumps: Vec<dumps::Dump>,
+    /// Stale build output only: each folder that would go.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub build_folders: Vec<build::BuildFolder>,
     #[serde(skip)]
     work: Work,
     /// Browser caches only: the browsers whose caches it holds, asked again
@@ -294,7 +328,10 @@ impl Finding {
             notes: Vec::new(),
             needs_admin: false,
             preselected: false,
+            skipped: false,
             folders: Vec::new(),
+            dumps: Vec::new(),
+            build_folders: Vec::new(),
             work: Work::None,
             browsers: Vec::new(),
         }
@@ -324,6 +361,72 @@ impl Finding {
             other => *other = Work::Files(vec![(walk.candidates, rule)]),
         }
     }
+
+    /// The groups of files taken so far.
+    fn groups_taken(&self) -> usize {
+        match &self.work {
+            Work::Files(groups) => groups.len(),
+            _ => 0,
+        }
+    }
+
+    /// List the dumps among the groups taken since `from`, all walks of
+    /// `root`.
+    fn list_dumps(&mut self, root: &Path, from: usize) {
+        if let Work::Files(groups) = &self.work {
+            for (candidates, _) in groups.iter().skip(from) {
+                self.dumps.extend(dumps::group(root, candidates));
+            }
+        }
+    }
+
+    /// Keep only the dumps named in `only`, when it names any, and leave
+    /// the dumps of the programs in `skip`. What is left out stays, and is
+    /// counted with its reason.
+    fn narrow_dumps(&mut self, only: &[PathBuf], skip: &[String]) {
+        let same =
+            |a: &Path, b: &Path| crate::system::path_under(a, b) && crate::system::path_under(b, a);
+        let of = |d: &dumps::Dump, name: &str| {
+            d.program
+                .as_deref()
+                .is_some_and(|p| dumps::same_program(p, name))
+        };
+        for p in only {
+            if !self.dumps.iter().any(|d| same(p, &d.path)) {
+                self.notes
+                    .push(format!("{} is not among the dumps found", p.display()));
+            }
+        }
+        for name in skip {
+            if !self.dumps.iter().any(|d| of(d, name)) {
+                self.notes.push(format!("no dumps of {name} were found"));
+            }
+        }
+        let leave = |d: &dumps::Dump| {
+            (!only.is_empty() && !only.iter().any(|p| same(p, &d.path)))
+                || skip.iter().any(|name| of(d, name))
+        };
+        let (left, staying): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.dumps).into_iter().partition(leave);
+        self.dumps = staying;
+        if left.is_empty() {
+            return;
+        }
+        for d in &left {
+            self.bytes = self.bytes.saturating_sub(d.bytes);
+            self.count = self.count.saturating_sub(d.files);
+            self.keep(KeptReason::LeftOut, d.files, d.bytes);
+        }
+        if let Work::Files(groups) = &mut self.work {
+            for (candidates, _) in groups.iter_mut() {
+                candidates.retain(|c| {
+                    !left
+                        .iter()
+                        .any(|d| crate::system::path_under(&c.path, &d.path))
+                });
+            }
+        }
+    }
 }
 
 /// What the cleaning works from, kept out of the JSON.
@@ -338,6 +441,8 @@ enum Work {
     Tool(Option<PathBuf>),
     /// The chosen folders of `Finding::folders`.
     Folders,
+    /// The folders of `Finding::build_folders`.
+    Build,
 }
 
 /// The whole analysis.
@@ -353,6 +458,22 @@ pub struct Analysis {
 impl Analysis {
     pub fn finding(&self, c: Category) -> Option<&Finding> {
         self.findings.iter().find(|f| f.category == c)
+    }
+
+    /// Narrow the crash dumps to those named in `only`, when it names any,
+    /// less those of the programs in `skip`, by file name with or without
+    /// `.exe`. The rest stays, as left out.
+    pub fn narrow_dumps(&mut self, only: &[PathBuf], skip: &[String]) {
+        if only.is_empty() && skip.is_empty() {
+            return;
+        }
+        if let Some(f) = self
+            .findings
+            .iter_mut()
+            .find(|f| f.category == Category::CrashDumps)
+        {
+            f.narrow_dumps(only, skip);
+        }
     }
 
     /// The safe set: what is chosen when the user picks nothing.
@@ -390,7 +511,24 @@ impl Analysis {
                 .filter(|c| self.finding(*c).is_some_and(Finding::actionable))
                 .collect(),
             folders,
+            outright: Vec::new(),
         }
+    }
+
+    /// Have the chosen orphan folders that the analysis proved dead deleted
+    /// outright, so their space comes back at once. The others still go
+    /// into a backup.
+    pub fn delete_dead(&self, choice: &mut Choice) {
+        choice.outright = self
+            .finding(Category::Orphans)
+            .map(|f| {
+                f.folders
+                    .iter()
+                    .filter(|o| o.proven_dead && choice.folders.contains(&o.path))
+                    .map(|o| o.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     /// The bytes a choice would free, where they are known.
@@ -485,6 +623,9 @@ pub struct Choice {
     pub categories: Vec<Category>,
     /// The orphan folders, when `Orphans` is among the categories.
     pub folders: Vec<PathBuf>,
+    /// Those of `folders` that are deleted outright instead of moved into a
+    /// backup, each proven dead.
+    pub outright: Vec<PathBuf>,
 }
 
 /// Where everything is. `this_pc` reads it from the environment; tests point
@@ -509,6 +650,8 @@ pub struct Places {
     pub windows_old: Option<PathBuf>,
     /// The drive Windows is on, for measuring what a Windows tool freed.
     pub system_drive: Option<PathBuf>,
+    /// Where stale build output is looked for: the user's profile.
+    pub build_roots: Vec<PathBuf>,
 }
 
 /// A folder or file of dumps, and which of its files count.
@@ -573,6 +716,7 @@ impl Places {
             roaming_appdata: env("APPDATA"),
             windows_old: windows::windows_old(),
             system_drive: windir.ancestors().last().map(Path::to_path_buf),
+            build_roots: env("USERPROFILE").into_iter().collect(),
         }
     }
 }
@@ -588,6 +732,19 @@ pub struct Options<'a> {
     pub tools: &'a dyn Tools,
     /// The unclaimed folders, already scored.
     pub orphans: &'a (dyn Fn() -> Vec<OrphanItem> + Sync),
+    pub asked: Asked,
+}
+
+/// What the analysis looks into only when asked, as it walks, runs git or
+/// opens files for more than a count.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Asked {
+    /// Build output: the walk of the profile, with git for the folders in a
+    /// checkout.
+    pub build_output: bool,
+    /// Whether the high-confidence orphan folders are proven dead, which
+    /// opens each file in them alone.
+    pub dead: bool,
 }
 
 /// Look at every category. Changes nothing.
@@ -602,6 +759,7 @@ pub fn analyse(places: &Places, opts: &Options) -> Analysis {
             s.spawn(|| delivery_optimization(opts)),
             s.spawn(|| windows_old(places, opts)),
             s.spawn(|| orphans(opts)),
+            s.spawn(|| build_output(places, opts)),
         ];
         jobs.into_iter()
             .zip(Category::ALL)
@@ -702,8 +860,10 @@ fn crash_dumps(places: &Places, opts: &Options) -> Finding {
             extensions: spot.extensions,
             probe_in_use: true,
         };
+        let from = f.groups_taken();
         let walk = files::walk(&spot.path, &rule, opts.protected, opts.now);
         f.take_walk(walk, rule);
+        f.list_dumps(&spot.path, from);
     }
     for spot in &places.machine_dumps {
         let rule = Rule {
@@ -712,7 +872,9 @@ fn crash_dumps(places: &Places, opts: &Options) -> Finding {
             probe_in_use: true,
         };
         if spot.path.exists() {
+            let from = f.groups_taken();
             admin_walk(&mut f, &spot.path, rule, opts, None);
+            f.list_dumps(&spot.path, from);
         }
     }
     f
@@ -872,11 +1034,14 @@ fn windows_old(places: &Places, opts: &Options) -> Finding {
 
 fn orphans(opts: &Options) -> Finding {
     let mut f = Finding::new(Category::Orphans);
-    for item in (opts.orphans)() {
+    for mut item in (opts.orphans)() {
         if opts.protected.touches(&item.path) {
             f.keep(KeptReason::Protected, 1, item.bytes);
             continue;
         }
+        item.proven_dead = opts.asked.dead
+            && item.confidence == Confidence::High
+            && dead::proven_dead(&item.path, opts.now, opts.running);
         f.folders.push(item);
     }
     f.count = f.folders.len();
@@ -895,6 +1060,58 @@ fn orphans(opts: &Options) -> Finding {
     f.preselected = high > 0;
     f.needs_admin = !opts.elevated && f.folders.iter().any(|o| o.needs_admin);
     f.work = Work::Folders;
+    f
+}
+
+fn build_output(places: &Places, opts: &Options) -> Finding {
+    let mut f = Finding::new(Category::BuildOutput);
+    f.work = Work::Build;
+    if !opts.asked.build_output {
+        f.skipped = true;
+        return f;
+    }
+    let skip: Vec<PathBuf> = [&places.user_temp, &places.windows_temp]
+        .into_iter()
+        .flatten()
+        .cloned()
+        .collect();
+    let mut check = build::Check {
+        now: opts.now,
+        protected: opts.protected,
+        elevated: opts.elevated,
+        tools: opts.tools,
+        checkouts: Default::default(),
+        ignored: Default::default(),
+        running: opts.running,
+        probe: false,
+    };
+    for dir in build::find(&places.build_roots, &skip, opts.protected) {
+        // Some other program's tagged cache is not build output at all.
+        if !build::made_by_a_tool(&dir, &mut check) {
+            continue;
+        }
+        match build::assess(&dir, &mut check) {
+            Ok(b) => f.build_folders.push(b),
+            Err((reason, bytes)) => f.keep(reason, 1, bytes),
+        }
+    }
+    f.count = f.build_folders.len();
+    f.bytes = f.build_folders.iter().map(|b| b.bytes).sum();
+    if f.count > 0 || !f.kept.is_empty() {
+        f.notes.push(format!(
+            "only folders with nothing changed for {} days",
+            build::BUILD_DAYS
+        ));
+    }
+    if opts.elevated
+        && f.kept
+            .iter()
+            .any(|k| k.reason == KeptReason::CheckoutUnknown)
+    {
+        f.notes.push(
+            "git is not asked with administrator rights, so folders in git checkouts stay".into(),
+        );
+    }
     f
 }
 
@@ -937,6 +1154,7 @@ pub fn score_orphans(
                 modified: f.modified.clone(),
                 confidence,
                 reason,
+                proven_dead: false,
             }
         })
         .collect()
@@ -1148,6 +1366,7 @@ pub fn clean(analysis: &Analysis, choice: &Choice, opts: &CleanOptions) -> Vec<C
             }
             Work::Tool(dir) => run_tool(f, dir.as_deref(), &mut c, opts),
             Work::Folders => clean_folders(f, choice, &mut c, opts),
+            Work::Build => clean_build(f, &mut c, opts),
         }
         // What the analysis left out stays too, and is reported with what
         // the cleaning itself had to leave.
@@ -1222,8 +1441,14 @@ fn run_tool(f: &Finding, dir: Option<&Path>, c: &mut Cleaned, opts: &CleanOption
 }
 
 fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOptions) {
-    let mut items = Vec::new();
-    let mut sizes = Vec::new();
+    // Whether a folder is still dead is asked again now, with what runs now.
+    let running = if choice.outright.is_empty() {
+        Vec::new()
+    } else {
+        opts.tools.running_exes()
+    };
+    let mut backed = Vec::new();
+    let (mut gone, mut revived) = (0, 0);
     for o in f
         .folders
         .iter()
@@ -1233,54 +1458,123 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
             c.keep(KeptReason::Protected, 1, o.bytes);
             continue;
         }
-        items.push(Leftover::fs(
+        let item = Leftover::fs(
             LeftoverKind::Directory,
             o.path.clone(),
             o.confidence,
             o.reason.clone(),
             Some(o.bytes),
             o.bytes == 0,
-        ));
-        sizes.push(o.bytes);
+        );
+        if choice.outright.contains(&o.path) {
+            if o.confidence == Confidence::High && dead::proven_dead(&o.path, opts.now, &running) {
+                gone += remove_dirs(&[(item, o.bytes)], false, false, c);
+                continue;
+            }
+            revived += 1;
+        }
+        backed.push((item, o.bytes));
     }
+    let moved = remove_dirs(&backed, opts.make_backups, false, c);
+    if moved > 0 && c.backup.is_some() {
+        c.notes.push(
+            "moved into the backup; the space comes back once the backup is deleted".to_string(),
+        );
+    }
+    if revived > 0 && opts.make_backups {
+        c.notes.push(format!(
+            "{revived} no longer proven dead, so into the backup instead"
+        ));
+    }
+    if gone > 0 {
+        c.notes
+            .push(format!("{gone} proven dead, deleted without a backup"));
+    }
+}
+
+/// Build output is made again by the tool that made it, so it is deleted
+/// outright, each folder checked again right before it goes.
+fn clean_build(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
+    let running = opts.tools.running_exes();
+    let mut check = build::Check {
+        now: opts.now,
+        protected: opts.protected,
+        elevated: opts.elevated,
+        tools: opts.tools,
+        checkouts: Default::default(),
+        ignored: Default::default(),
+        running: &running,
+        probe: true,
+    };
+    for b in &f.build_folders {
+        match build::assess(&b.path, &mut check) {
+            Ok(now) => {
+                let item = Leftover::fs(
+                    LeftoverKind::Directory,
+                    now.path,
+                    Confidence::High,
+                    "stale build output",
+                    Some(now.bytes),
+                    now.bytes == 0,
+                );
+                remove_dirs(&[(item, now.bytes)], false, true, c);
+            }
+            Err((reason, bytes)) => c.keep(reason, 1, bytes),
+        }
+    }
+}
+
+/// Remove whole folders, each with its size, into a backup or for good.
+/// Says how many went.
+fn remove_dirs(
+    items: &[(Leftover, u64)],
+    make_backups: bool,
+    keep_emptied_parents: bool,
+    c: &mut Cleaned,
+) -> usize {
     if items.is_empty() {
-        return;
+        return 0;
     }
     let ctx = SafetyContext {
         dry_run: false,
-        make_backups: opts.make_backups,
+        make_backups,
+        keep_emptied_parents,
     };
-    match safety::remove_leftovers(&items, BACKUP_LABEL, &ctx) {
+    let leftovers: Vec<Leftover> = items.iter().map(|(l, _)| l.clone()).collect();
+    let mut removed = 0;
+    match safety::remove_leftovers(&leftovers, BACKUP_LABEL, &ctx) {
         Ok(outcome) => {
-            for (item, bytes) in outcome.items.iter().zip(&sizes) {
+            for (item, (_, bytes)) in outcome.items.iter().zip(items) {
                 match &item.status {
                     ItemStatus::Removed | ItemStatus::RemovedAfterRestart => {
                         c.freed += bytes;
-                        c.removed += 1;
+                        removed += 1;
                     }
                     ItemStatus::Failed(e) => c.keep(KeptReason::Failed(e.clone()), 1, *bytes),
                     ItemStatus::AlreadyGone | ItemStatus::WouldRemove => {}
                 }
             }
-            c.backup = outcome.backup_name;
-            if c.backup.is_some() && c.removed > 0 {
-                c.notes.push(
-                    "moved into the backup; the space comes back once the backup is deleted"
-                        .to_string(),
-                );
+            if outcome.backup_name.is_some() {
+                c.backup = outcome.backup_name;
             }
         }
         Err(e) => c.keep(
             KeptReason::Failed(format!("{e:#}")),
             items.len(),
-            sizes.iter().sum(),
+            items.iter().map(|(_, b)| b).sum(),
         ),
     }
+    c.removed += removed;
+    removed
 }
 
 /// The analysis of this PC, read the way the command line and the window
 /// both do it.
-pub fn analyse_this_pc(protected: &Protected, recycle_bin_days: u64) -> (Places, Analysis) {
+pub fn analyse_this_pc(
+    protected: &Protected,
+    recycle_bin_days: u64,
+    asked: Asked,
+) -> (Places, Analysis) {
     let places = Places::this_pc();
     let running = crate::system::running_exes();
     let tools = windows::WindowsTools;
@@ -1299,9 +1593,29 @@ pub fn analyse_this_pc(protected: &Protected, recycle_bin_days: u64) -> (Places,
         recycle_bin_days,
         tools: &tools,
         orphans: &source,
+        asked,
     };
     let analysis = analyse(&places, &opts);
     (places, analysis)
+}
+
+/// Build output in `places` alone, for an analysis that left it out.
+pub fn build_output_this_pc(places: &Places, protected: &Protected) -> Finding {
+    let running = crate::system::running_exes();
+    let opts = Options {
+        protected,
+        elevated: safety::is_elevated(),
+        now: SystemTime::now(),
+        running: &running,
+        recycle_bin_days: RECYCLE_DAYS,
+        tools: &windows::WindowsTools,
+        orphans: &Vec::<OrphanItem>::new,
+        asked: Asked {
+            build_output: true,
+            dead: false,
+        },
+    };
+    build_output(places, &opts)
 }
 
 /// Clean on this PC.

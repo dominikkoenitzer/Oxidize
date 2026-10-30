@@ -53,8 +53,8 @@ pub struct StoreReport {
     pub cleanup_recommended: Option<bool>,
 }
 
-/// The Windows tools the cleaner calls, behind a trait so tests never run
-/// them.
+/// The Windows tools the cleaner calls, and git, behind a trait so tests
+/// never run them.
 pub trait Tools: Send + Sync {
     fn component_store(&self) -> Result<StoreReport>;
     fn component_cleanup(&self) -> Result<()>;
@@ -66,7 +66,32 @@ pub trait Tools: Send + Sync {
     fn free_bytes(&self, path: &Path) -> Option<u64>;
     /// The executables running now.
     fn running_exes(&self) -> Vec<std::path::PathBuf>;
+    /// Whether the git checkout at `dir` holds uncommitted work: changed,
+    /// staged or untracked files. None when git cannot tell.
+    fn uncommitted(&self, dir: &Path) -> Option<bool>;
+    /// Whether git ignores the folder `dir` in its checkout. None when git
+    /// cannot tell.
+    fn ignored(&self, dir: &Path) -> Option<bool>;
 }
+
+/// `git status` in its short form, for scripts. Its file system monitor,
+/// a program a checkout's settings can name, is never started, and no
+/// lock is taken that a running git would trip over. Untracked files and
+/// submodules are shown whatever the checkout's settings say.
+pub const GIT_STATUS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "--no-optional-locks",
+    "status",
+    "--porcelain",
+    "--untracked-files=normal",
+    "--ignore-submodules=none",
+];
+
+/// Asked inside a folder: exit code 0 when git ignores it, 1 when not, and
+/// any other code when git cannot tell. As with the status, the file system
+/// monitor is never started.
+pub const GIT_IGNORED: &[&str] = &["-c", "core.fsmonitor=false", "check-ignore", "-q", "."];
 
 /// The real tools.
 pub struct WindowsTools;
@@ -113,6 +138,53 @@ impl Tools for WindowsTools {
     fn running_exes(&self) -> Vec<std::path::PathBuf> {
         system::running_exes()
     }
+
+    fn uncommitted(&self, dir: &Path) -> Option<bool> {
+        let mut cmd = Command::new(git_on(&std::env::var_os("PATH")?)?);
+        cmd.arg("-C").arg(dir).args(GIT_STATUS);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.stdin(std::process::Stdio::null()).output().ok()?;
+        out.status
+            .success()
+            .then(|| out.stdout.iter().any(|b| !b.is_ascii_whitespace()))
+    }
+
+    fn ignored(&self, dir: &Path) -> Option<bool> {
+        let mut cmd = Command::new(git_on(&std::env::var_os("PATH")?)?);
+        cmd.arg("-C").arg(dir).args(GIT_IGNORED);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let status = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        match status.code() {
+            Some(0) => Some(true),
+            Some(1) => Some(false),
+            _ => None,
+        }
+    }
+}
+
+/// git.exe in the first absolute folder on `path` that holds one. Run by
+/// bare name, Windows would look in the program's own folder and the
+/// current one first.
+fn git_on(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("git.exe"))
+        .find(|exe| exe.is_file())
 }
 
 fn dism() -> String {
@@ -305,6 +377,66 @@ The operation completed successfully.
         );
         assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
         assert_eq!(tool_text(b"14 2254147166\r\n"), "14 2254147166\r\n");
+    }
+
+    #[test]
+    fn git_shows_untracked_work_the_checkout_hides() {
+        let root = super::super::files::tests::fixture("git_hidden");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&*root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(WindowsTools.uncommitted(&root), Some(false));
+        std::fs::write(root.join("notes.txt"), "work").unwrap();
+        assert_eq!(WindowsTools.uncommitted(&root), Some(true));
+    }
+
+    #[test]
+    fn git_says_which_folders_it_ignores() {
+        let root = super::super::files::tests::fixture("git_ignored");
+        let repo = root.join("repo");
+        for dir in [r"app\target\debug", r"app\cache"] {
+            std::fs::create_dir_all(repo.join(dir)).unwrap();
+        }
+        let made = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        std::fs::write(repo.join(r"app\.gitignore"), "target/\n").unwrap();
+        std::fs::write(repo.join(r"app\target\debug\out.bin"), "x").unwrap();
+        std::fs::write(repo.join(r"app\cache\data.bin"), "y").unwrap();
+        assert_eq!(WindowsTools.ignored(&repo.join(r"app\target")), Some(true));
+        assert_eq!(WindowsTools.ignored(&repo.join(r"app\cache")), Some(false));
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(WindowsTools.ignored(&outside), None);
+    }
+
+    #[test]
+    fn git_is_found_only_by_a_full_path() {
+        let root = super::super::files::tests::fixture("git_path");
+        let (empty, first, second) = (root.join("empty"), root.join("first"), root.join("second"));
+        for dir in [&empty, &first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(first.join("git.exe"), "").unwrap();
+        std::fs::write(second.join("git.exe"), "").unwrap();
+        // The same folder without its drive is not a full path.
+        let no_drive = PathBuf::from(&first.to_str().unwrap()[2..]);
+        let path = std::env::join_paths([no_drive, empty.clone(), second.clone(), first]).unwrap();
+        assert_eq!(git_on(&path), Some(second.join("git.exe")));
+        let path = std::env::join_paths([empty, PathBuf::from("bin")]).unwrap();
+        assert_eq!(git_on(&path), None);
     }
 
     #[test]
