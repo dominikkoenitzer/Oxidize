@@ -1,8 +1,9 @@
 //! Stale build output: folders a build or package tool marked as a cache
-//! with a `CACHEDIR.TAG` file, outside the temp folders, with nothing in
-//! them changed for `BUILD_DAYS` days. The tool makes them again when it
-//! needs them. One inside a git checkout goes only while git says the
-//! checkout holds no uncommitted work.
+//! with a `CACHEDIR.TAG` file, beside a project file or ignored by git,
+//! outside the temp folders, with nothing in them changed for `BUILD_DAYS`
+//! days. The tool makes them again when it needs them. One inside a git
+//! checkout goes only while git says the checkout holds no uncommitted
+//! work.
 
 use std::collections::HashMap;
 use std::fs;
@@ -28,6 +29,18 @@ const TAG: &str = "CACHEDIR.TAG";
 /// What a cache directory tag starts with, as the Cache Directory Tagging
 /// convention has it.
 const SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
+
+/// Files that make the folder they are in a project, so a tagged folder
+/// beside them is that project's build output. Project files ending in
+/// `.csproj` count too.
+const PROJECT_FILES: [&str; 6] = [
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "CMakeLists.txt",
+    "build.gradle",
+    "go.mod",
+];
 
 /// A build folder that would go.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -55,6 +68,40 @@ pub fn is_tagged(dir: &Path) -> bool {
         .and_then(|mut f| f.read_exact(&mut head))
         .is_ok()
         && &head == SIGNATURE
+}
+
+/// Does `dir` hold a project file? Links do not count.
+fn holds_a_project(dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let name = e.file_name();
+        let named = PROJECT_FILES.iter().any(|p| name.eq_ignore_ascii_case(p))
+            || Path::new(&name)
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("csproj"));
+        named && e.file_type().is_ok_and(|t| t.is_file())
+    })
+}
+
+/// Is the tagged folder `dir` a build tool's output? A tag alone does not
+/// say so, as any program may tag its cache: a project file beside it
+/// does, or git ignoring it in its checkout. Git is asked once per folder,
+/// and never with administrator rights.
+pub fn made_by_a_tool(dir: &Path, check: &mut Check) -> bool {
+    if dir.parent().is_some_and(holds_a_project) {
+        return true;
+    }
+    if check.elevated || files::repository_above(dir, &mut HashMap::new()).is_none() {
+        return false;
+    }
+    let tools = check.tools;
+    *check
+        .ignored
+        .entry(dir.to_path_buf())
+        .or_insert_with(|| tools.ignored(dir))
+        == Some(true)
 }
 
 /// The tagged folders under `roots`, at most `DEPTH` folders down. Links
@@ -157,6 +204,8 @@ pub struct Check<'a> {
     pub tools: &'a dyn Tools,
     /// Each checkout's answer, asked once.
     pub checkouts: HashMap<PathBuf, Option<bool>>,
+    /// Whether git ignores each tagged folder, asked once.
+    pub ignored: HashMap<PathBuf, Option<bool>>,
     /// Executables of the running processes.
     pub running: &'a [PathBuf],
     /// Open each file for deletion as well, right before the folder goes.
@@ -175,6 +224,12 @@ pub fn assess(dir: &Path, check: &mut Check) -> Result<BuildFolder, (KeptReason,
     if !meta.is_dir() || files::is_link(&meta) || !is_tagged(dir) {
         return Err((
             KeptReason::Failed("no longer marked as a cache".to_string()),
+            0,
+        ));
+    }
+    if !made_by_a_tool(dir, check) {
+        return Err((
+            KeptReason::Failed("no longer looks like build output".to_string()),
             0,
         ));
     }
@@ -225,9 +280,18 @@ pub(crate) mod tests {
     use super::super::files::tests::{age, file_aged, fixture, mark};
     use super::*;
 
-    /// A build folder at `dir`: a tag and `bytes` of output, everything in it
-    /// last changed `days` ago. Says how many bytes it holds.
+    /// A build folder at `dir` beside a project file: a tag and `bytes` of
+    /// output, everything in it last changed `days` ago. Says how many bytes
+    /// it holds.
     pub fn cache(dir: &Path, bytes: usize, days: u64) -> u64 {
+        let made = bare_cache(dir, bytes, days);
+        fs::write(dir.parent().unwrap().join("Cargo.toml"), "").unwrap();
+        made
+    }
+
+    /// A tagged folder at `dir` as `cache` makes it, with no project file
+    /// beside it.
+    pub fn bare_cache(dir: &Path, bytes: usize, days: u64) -> u64 {
         let mut tag = SIGNATURE.to_vec();
         tag.extend_from_slice(b"\n# made by a build tool\n");
         fs::create_dir_all(dir).unwrap();

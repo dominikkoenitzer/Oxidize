@@ -1081,10 +1081,15 @@ fn build_output(places: &Places, opts: &Options) -> Finding {
         elevated: opts.elevated,
         tools: opts.tools,
         checkouts: Default::default(),
+        ignored: Default::default(),
         running: opts.running,
         probe: false,
     };
     for dir in build::find(&places.build_roots, &skip, opts.protected) {
+        // Some other program's tagged cache is not build output at all.
+        if !build::made_by_a_tool(&dir, &mut check) {
+            continue;
+        }
         match build::assess(&dir, &mut check) {
             Ok(b) => f.build_folders.push(b),
             Err((reason, bytes)) => f.keep(reason, 1, bytes),
@@ -1497,6 +1502,7 @@ fn clean_build(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
         elevated: opts.elevated,
         tools: opts.tools,
         checkouts: Default::default(),
+        ignored: Default::default(),
         running: &running,
         probe: true,
     };
