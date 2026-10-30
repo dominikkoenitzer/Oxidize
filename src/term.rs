@@ -1,21 +1,46 @@
 //! Terminal output: colour with a global switch, VT enabling on older
 //! consoles, and a yes/no prompt.
 //!
-//! Colour is off when stdout is not a terminal, when `NO_COLOR` is set, or
-//! with `--no-color`, so piped output is plain text.
+//! stdout and stderr each have colour only while they are a terminal
+//! themselves, and neither has it when `NO_COLOR` is set or with
+//! `--no-color`, so piped or redirected output is plain text.
 
 use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static COLOR_ENABLED: AtomicBool = AtomicBool::new(false);
+static ERR_COLOR_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Colour on or off for stdout and for stderr.
+#[derive(Debug, PartialEq, Eq)]
+struct Colors {
+    out: bool,
+    err: bool,
+}
+
+fn colors(force_off: bool, no_color: bool, out_terminal: bool, err_terminal: bool) -> Colors {
+    let allowed = !force_off && !no_color;
+    Colors {
+        out: allowed && out_terminal,
+        err: allowed && err_terminal,
+    }
+}
 
 pub fn init(force_off: bool) {
-    let enabled =
-        !force_off && std::env::var_os("NO_COLOR").is_none() && io::stdout().is_terminal();
-    if enabled {
-        enable_virtual_terminal();
+    let colors = colors(
+        force_off,
+        std::env::var_os("NO_COLOR").is_some(),
+        io::stdout().is_terminal(),
+        io::stderr().is_terminal(),
+    );
+    if colors.out {
+        enable_virtual_terminal(Stream::Out);
     }
-    COLOR_ENABLED.store(enabled, Ordering::Relaxed);
+    if colors.err {
+        enable_virtual_terminal(Stream::Err);
+    }
+    COLOR_ENABLED.store(colors.out, Ordering::Relaxed);
+    ERR_COLOR_ENABLED.store(colors.err, Ordering::Relaxed);
 }
 
 fn color_on() -> bool {
@@ -23,7 +48,16 @@ fn color_on() -> bool {
 }
 
 fn paint(text: &str, code: &str) -> String {
-    if color_on() {
+    paint_if(color_on(), text, code)
+}
+
+/// For text bound for stderr, which has its own switch.
+fn paint_err(text: &str, code: &str) -> String {
+    paint_if(ERR_COLOR_ENABLED.load(Ordering::Relaxed), text, code)
+}
+
+fn paint_if(on: bool, text: &str, code: &str) -> String {
+    if on {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
         text.to_string()
@@ -53,12 +87,12 @@ pub fn info(msg: &str) {
 
 /// `warning: ...` on stderr.
 pub fn warn(msg: &str) {
-    eprintln!("{} {msg}", yellow("warning:"));
+    eprintln!("{} {msg}", paint_err("warning:", "33"));
 }
 
 /// `error: ...` on stderr.
 pub fn error(msg: &str) {
-    eprintln!("{} {msg}", red("error:"));
+    eprintln!("{} {msg}", paint_err("error:", "31"));
 }
 
 /// Ask a yes/no question. Empty input picks the default. When stdin is not a
@@ -82,15 +116,25 @@ pub fn confirm(question: &str, default_yes: bool) -> bool {
     }
 }
 
-/// Turn on ANSI escape handling so colour works on `conhost` too.
+enum Stream {
+    Out,
+    Err,
+}
+
+/// Turn on ANSI escape handling for one stream's console so colour works
+/// on `conhost` too.
 #[cfg(windows)]
-fn enable_virtual_terminal() {
+fn enable_virtual_terminal(stream: Stream) {
     use windows::Win32::System::Console::{
         GetConsoleMode, GetStdHandle, SetConsoleMode, CONSOLE_MODE,
-        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_OUTPUT_HANDLE,
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
+    };
+    let which = match stream {
+        Stream::Out => STD_OUTPUT_HANDLE,
+        Stream::Err => STD_ERROR_HANDLE,
     };
     unsafe {
-        let Ok(handle) = GetStdHandle(STD_OUTPUT_HANDLE) else {
+        let Ok(handle) = GetStdHandle(which) else {
             return;
         };
         let mut mode = CONSOLE_MODE(0);
@@ -101,4 +145,53 @@ fn enable_virtual_terminal() {
 }
 
 #[cfg(not(windows))]
-fn enable_virtual_terminal() {}
+fn enable_virtual_terminal(_stream: Stream) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_redirected_stderr_is_plain_while_stdout_is_a_terminal() {
+        assert_eq!(
+            colors(false, false, true, false),
+            Colors {
+                out: true,
+                err: false
+            }
+        );
+    }
+
+    #[test]
+    fn a_console_stderr_keeps_colour_while_stdout_is_redirected() {
+        assert_eq!(
+            colors(false, false, false, true),
+            Colors {
+                out: false,
+                err: true
+            }
+        );
+    }
+
+    #[test]
+    fn no_color_and_the_flag_turn_off_both_streams() {
+        let off = Colors {
+            out: false,
+            err: false,
+        };
+        assert_eq!(colors(true, false, true, true), off);
+        assert_eq!(colors(false, true, true, true), off);
+    }
+
+    #[test]
+    fn stdout_follows_its_own_terminal_as_before() {
+        assert!(colors(false, false, true, true).out);
+        assert!(!colors(false, false, false, false).out);
+    }
+
+    #[test]
+    fn only_a_stream_with_colour_gets_escape_codes() {
+        assert_eq!(paint_if(true, "error:", "31"), "\x1b[31merror:\x1b[0m");
+        assert_eq!(paint_if(false, "error:", "31"), "error:");
+    }
+}
