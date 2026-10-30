@@ -2255,7 +2255,11 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     if !g.json {
         term::info("Analysing...");
     }
-    let (places, mut analysis) = clean::analyse_this_pc(&protected, args.recycle_bin_days);
+    let asked = clean::Asked {
+        build_output: args.build_output,
+        dead: args.delete_dead,
+    };
+    let (places, mut analysis) = clean::analyse_this_pc(&protected, args.recycle_bin_days, asked);
     analysis.narrow_dumps(&args.dumps(), &args.skip_dumps_of);
     let named = args.named();
     let mut choice = if named.is_empty() {
@@ -2533,6 +2537,9 @@ fn print_finding(f: &Finding, choice: Option<&Choice>) {
 }
 
 fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
+    if f.skipped {
+        return "not looked for".to_string();
+    }
     if !f.actionable() && f.kept.is_empty() && f.notes.is_empty() {
         return "nothing found".to_string();
     }

@@ -123,7 +123,7 @@ impl Cleanup {
     pub fn refusal(&self, action: &Action) -> Option<String> {
         let needs_list = matches!(
             action,
-            Action::Analyse | Action::Clean(_) | Action::ClearTraces
+            Action::Analyse | Action::FindBuildOutput | Action::Clean(_) | Action::ClearTraces
         );
         let why = self.unreadable.as_ref().filter(|_| needs_list)?;
         Some(format!("Cannot clean up: {why}"))
@@ -149,6 +149,25 @@ impl Cleanup {
             .or(analysis.findings.first())
             .map(|f| f.category);
         self.analysis = Some((places, analysis));
+    }
+
+    /// Take in the build output looked for after the analysis. With none
+    /// to clean, its tick goes.
+    pub fn take_build_output(&mut self, found: Finding) {
+        let Some((_, analysis)) = &mut self.analysis else {
+            return;
+        };
+        if !found.actionable() {
+            self.ticked.retain(|c| *c != found.category);
+        }
+        match analysis
+            .findings
+            .iter_mut()
+            .find(|f| f.category == found.category)
+        {
+            Some(f) => *f = found,
+            None => analysis.findings.push(found),
+        }
     }
 
     /// What the ticks amount to: only categories that can be cleaned, and
@@ -501,7 +520,7 @@ pub fn view(
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for f in &analysis.findings {
-                    category_row(ui, t, state, f);
+                    category_row(ui, t, state, f, busy, action);
                 }
             });
             ui.add_space(16.0);
@@ -616,7 +635,15 @@ const ROW_HEIGHT: f32 = 34.0;
 
 /// One category on one line, like a program in the table: its tick, its
 /// title and its size. A click shows it in the panel beside the list.
-fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
+/// Ticking a category the analysis did not look into looks into it.
+fn category_row(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    f: &Finding,
+    busy: bool,
+    action: &mut Option<Action>,
+) {
     let focused = state.focus == Some(f.category);
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), ROW_HEIGHT),
@@ -644,13 +671,16 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
         egui::pos2(rect.left() + 22.0, rect.center().y),
         egui::vec2(20.0, 20.0),
     );
-    let mut on = state.ticked.contains(&f.category) && f.actionable();
+    let mut on = state.ticked.contains(&f.category) && (f.actionable() || f.skipped);
     let mut cell = ui.new_child(egui::UiBuilder::new().max_rect(tick));
-    if !f.actionable() {
+    if !(f.actionable() || (f.skipped && !busy)) {
         cell.disable();
     }
     if cell.add(egui::Checkbox::without_text(&mut on)).changed() {
         state.set(f, on);
+        if on && f.skipped {
+            *action = Some(Action::FindBuildOutput);
+        }
     }
     let font = egui::TextStyle::Body.resolve(ui.style());
     let color = if f.actionable() { t.text } else { t.weak };
@@ -671,7 +701,16 @@ fn category_row(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
         egui::Align::Min,
     );
     let bytes = shown_bytes(state, f);
-    if !f.size_known && bytes == 0 {
+    if f.skipped {
+        cell_text(
+            &painter,
+            size,
+            "tick to look",
+            font,
+            t.weak,
+            egui::Align::Max,
+        );
+    } else if !f.size_known && bytes == 0 {
         cell_text(
             &painter,
             size,
@@ -702,7 +741,9 @@ fn category_detail(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding
     ui.add(egui::Label::new(RichText::new(f.category.about()).color(t.weak)).wrap());
     ui.add_space(10.0);
     let bytes = shown_bytes(state, f);
-    let size = if !f.size_known && bytes == 0 {
+    let size = if f.skipped {
+        "not looked for yet".to_string()
+    } else if !f.size_known && bytes == 0 {
         "measured afterwards".to_string()
     } else {
         util::human_size(bytes)
@@ -1015,6 +1056,7 @@ mod tests {
                 recycle_bin_days: clean::RECYCLE_DAYS,
                 tools: &NoTools,
                 orphans: &orphans,
+                asked: clean::Asked::default(),
             },
         )
     }
@@ -1086,11 +1128,41 @@ mod tests {
     }
 
     #[test]
+    fn build_output_is_cleaned_only_once_it_was_looked_for() {
+        let mut state = tab();
+        let a = analysis();
+        let skipped = a.finding(Category::BuildOutput).unwrap().clone();
+        assert!(skipped.skipped);
+        assert!(!skipped.actionable());
+        state.take_analysis(Places::default(), a);
+        assert!(!state.ticked.contains(&Category::BuildOutput));
+
+        state.set(&skipped, true);
+        assert!(!state.choice().categories.contains(&Category::BuildOutput));
+
+        let mut found = skipped.clone();
+        found.skipped = false;
+        found.count = 2;
+        found.bytes = 300;
+        state.take_build_output(found.clone());
+        assert!(state.choice().categories.contains(&Category::BuildOutput));
+        let (_, now) = state.analysis.as_ref().unwrap();
+        assert!(!now.finding(Category::BuildOutput).unwrap().skipped);
+
+        // Looked for again and nothing found: the tick goes.
+        found.count = 0;
+        found.bytes = 0;
+        state.take_build_output(found);
+        assert!(!state.ticked.contains(&Category::BuildOutput));
+    }
+
+    #[test]
     fn nothing_that_needs_the_protected_list_runs_while_it_cannot_be_read() {
         let mut state = tab();
         let needs_list = || {
             [
                 Action::Analyse,
+                Action::FindBuildOutput,
                 Action::Clean(Choice::default()),
                 Action::ClearTraces,
             ]
