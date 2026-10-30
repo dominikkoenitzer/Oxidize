@@ -170,6 +170,19 @@ impl Cleanup {
         }
     }
 
+    /// A look for build output that was refused or stopped: the tick goes
+    /// while the row is still waiting to be looked at.
+    pub fn drop_look_tick(&mut self) {
+        let waiting = self
+            .analysis
+            .as_ref()
+            .and_then(|(_, analysis)| analysis.finding(Category::BuildOutput))
+            .is_some_and(|f| f.skipped);
+        if waiting {
+            self.ticked.retain(|c| *c != Category::BuildOutput);
+        }
+    }
+
     /// What the ticks amount to: only categories that can be cleaned, and
     /// the folders only while their category is ticked.
     #[cfg(test)]
@@ -993,7 +1006,7 @@ pub fn protected_panel(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use oxidize::clean::windows::{StoreReport, Tools};
     use oxidize::clean::{analyse, Options, OrphanItem};
@@ -1044,7 +1057,7 @@ mod tests {
 
     /// An analysis of an empty PC with three unclaimed folders, elevated so
     /// the Windows tools count.
-    fn analysis() -> Analysis {
+    pub(crate) fn analysis() -> Analysis {
         let orphans = || {
             vec![
                 folder("Quillmark", Confidence::High),
