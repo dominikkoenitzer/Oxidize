@@ -25,6 +25,9 @@ struct FakeTools {
     /// What git says about each checkout: uncommitted work or not, or None
     /// when it cannot tell.
     uncommitted: Mutex<Option<bool>>,
+    /// A path whose presence is noted each time git is asked.
+    watched: Mutex<Option<PathBuf>>,
+    seen: Mutex<Vec<bool>>,
 }
 
 impl FakeTools {
@@ -78,6 +81,9 @@ impl Tools for FakeTools {
     }
     fn uncommitted(&self, _dir: &Path) -> Option<bool> {
         self.call("uncommitted");
+        if let Some(path) = self.watched.lock().unwrap().as_ref() {
+            self.seen.lock().unwrap().push(path.exists());
+        }
         *self.uncommitted.lock().unwrap()
     }
 }
@@ -1327,6 +1333,27 @@ fn build_output_in_a_clean_checkout_goes_and_git_is_asked_once_per_checkout() {
     assert_eq!((done[0].removed, done[0].freed), (2, one + two));
     assert_eq!(asked(&tools), 2, "asked again right before");
     assert!(checkout.join(".git").exists());
+}
+
+#[test]
+fn each_build_folder_is_checked_after_the_one_before_it_went() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_one_by_one");
+    let code = pc.root.join(r"Profile\code");
+    for name in ["one", "two"] {
+        fs::create_dir_all(code.join(name).join(".git")).unwrap();
+        cache(&code.join(name).join("target"), 30, 60);
+    }
+    let tools = tools_uncommitted(Some(false));
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    assert_eq!(a.finding(Category::BuildOutput).unwrap().count, 2);
+
+    *tools.watched.lock().unwrap() = Some(code.join(r"one\target"));
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!(done[0].removed, 2);
+    // The second checkout is asked about only once the first folder is gone.
+    assert_eq!(*tools.seen.lock().unwrap(), [true, false]);
 }
 
 #[test]
