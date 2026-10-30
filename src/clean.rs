@@ -132,7 +132,7 @@ impl Category {
             }
             Category::Orphans => "folders no installed program claims, moved into a backup",
             Category::BuildOutput => {
-                "folders build and package tools mark as their cache, unchanged for 30 days; never in a git checkout with uncommitted work"
+                "folders build and package tools mark as their cache, unchanged for 30 days and not in use; never in a git checkout with uncommitted work"
             }
         }
     }
@@ -1058,6 +1058,8 @@ fn build_output(places: &Places, opts: &Options) -> Finding {
         elevated: opts.elevated,
         tools: opts.tools,
         checkouts: Default::default(),
+        running: opts.running,
+        probe: false,
     };
     for dir in build::find(&places.build_roots, &skip, opts.protected) {
         match build::assess(&dir, &mut check) {
@@ -1467,12 +1469,15 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
 /// Build output is made again by the tool that made it, so it is deleted
 /// outright, each folder checked again right before it goes.
 fn clean_build(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
+    let running = opts.tools.running_exes();
     let mut check = build::Check {
         now: opts.now,
         protected: opts.protected,
         elevated: opts.elevated,
         tools: opts.tools,
         checkouts: Default::default(),
+        running: &running,
+        probe: true,
     };
     let mut items = Vec::new();
     for b in &f.build_folders {

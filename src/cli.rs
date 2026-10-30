@@ -275,7 +275,8 @@ pub struct CleanArgs {
 
     /// Stale build output in your profile: folders build and package tools
     /// mark as their cache with a CACHEDIR.TAG file, nothing in them changed
-    /// for 30 days, never in a git checkout with uncommitted work. The tool
+    /// for 30 days or held open, nothing running from them, never in a git
+    /// checkout with uncommitted work. The tool
     /// makes them again when needed; they are deleted without a backup.
     #[arg(long)]
     pub build_output: bool,
