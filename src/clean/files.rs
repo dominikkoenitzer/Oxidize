@@ -327,6 +327,50 @@ pub(super) fn is_link(meta: &fs::Metadata) -> bool {
     false
 }
 
+/// What a file or folder is to a proof that it may go without a backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// A symbolic link or a junction: removing it removes only the link.
+    Link,
+    /// A reparse point that holds the data itself, such as a cloud
+    /// placeholder, or a file kept offline, pinned or fetched on access.
+    /// Its data may live elsewhere, so it is never proven and never entered.
+    StandIn,
+    Plain,
+}
+
+pub(super) fn kind(meta: &fs::Metadata) -> Kind {
+    #[cfg(windows)]
+    let attributes = {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+    };
+    #[cfg(not(windows))]
+    let attributes = 0;
+    kind_of(attributes, meta.file_type().is_symlink())
+}
+
+/// `name_surrogate` is what the standard library calls a symbolic link: a
+/// reparse point whose tag names another file, a junction included.
+fn kind_of(attributes: u32, name_surrogate: bool) -> Kind {
+    const REPARSE_POINT: u32 = 0x400;
+    const OFFLINE: u32 = 0x1000;
+    const RECALL_ON_OPEN: u32 = 0x4_0000;
+    const PINNED: u32 = 0x8_0000;
+    const UNPINNED: u32 = 0x10_0000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+    if name_surrogate {
+        Kind::Link
+    } else if attributes
+        & (REPARSE_POINT | OFFLINE | RECALL_ON_OPEN | PINNED | UNPINNED | RECALL_ON_DATA_ACCESS)
+        != 0
+    {
+        Kind::StandIn
+    } else {
+        Kind::Plain
+    }
+}
+
 /// Delete the candidates of a walk. Files go first; a folder goes only when
 /// it is empty afterwards.
 pub fn delete(
@@ -457,6 +501,17 @@ pub(crate) mod tests {
             .unwrap();
         f.set_times(FileTimes::new().set_modified(t).set_created(t))
             .unwrap();
+    }
+
+    /// Give a file one of the attributes `attrib` sets, by its letter: `O`
+    /// for offline, `P` for pinned.
+    pub fn mark(path: &Path, letter: char) {
+        let done = std::process::Command::new(crate::system::system32("attrib.exe"))
+            .arg(format!("+{letter}"))
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "attrib +{letter}");
     }
 
     fn week() -> Rule {
@@ -774,5 +829,19 @@ pub(crate) mod tests {
         );
         assert_eq!(done.files, 1);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn only_a_name_surrogate_counts_as_a_link() {
+        // A symbolic link or a junction: the tag names another file.
+        assert_eq!(kind_of(0x400, true), Kind::Link);
+        // A cloud placeholder or another reparse point that is the data.
+        assert_eq!(kind_of(0x400, false), Kind::StandIn);
+        // Offline, recalled on open, pinned, unpinned, recalled on access.
+        for attributes in [0x1000, 0x4_0000, 0x8_0000, 0x10_0000, 0x40_0000] {
+            assert_eq!(kind_of(attributes | 0x20, false), Kind::StandIn);
+        }
+        assert_eq!(kind_of(0x20, false), Kind::Plain);
+        assert_eq!(kind_of(0x10, false), Kind::Plain);
     }
 }
