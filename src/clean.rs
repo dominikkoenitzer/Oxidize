@@ -1438,7 +1438,7 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
             o.bytes == 0,
         );
         if choice.outright.contains(&o.path) {
-            if dead::proven_dead(&o.path, opts.now, &running) {
+            if o.confidence == Confidence::High && dead::proven_dead(&o.path, opts.now, &running) {
                 outright.push((item, o.bytes));
                 continue;
             }
