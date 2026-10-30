@@ -74,7 +74,7 @@ pub struct Deleted {
 /// The time the file last changed in place: written or created, whichever
 /// is later. A file unpacked from an archive keeps the old write time of
 /// the archive's copy, but its creation time says when it arrived.
-fn last_change(meta: &fs::Metadata) -> Option<SystemTime> {
+pub(super) fn last_change(meta: &fs::Metadata) -> Option<SystemTime> {
     let written = meta.modified().ok();
     let created = meta.created().ok();
     match (written, created) {
@@ -85,7 +85,7 @@ fn last_change(meta: &fs::Metadata) -> Option<SystemTime> {
 
 /// Is a file with this metadata old enough for the rule? A file whose times
 /// cannot be read is not.
-fn old_enough(meta: &fs::Metadata, rule: &Rule, now: SystemTime) -> bool {
+pub(super) fn old_enough(meta: &fs::Metadata, rule: &Rule, now: SystemTime) -> bool {
     let Some(min) = rule.min_age else {
         return true;
     };
@@ -285,7 +285,7 @@ fn consider_file(
 /// linked worktree or a submodule, a file, or a bare repository. Its files
 /// only work together, and an old one is often the one still needed, so it
 /// is kept whole and never entered.
-fn is_repository(dir: &Path) -> bool {
+pub(super) fn is_repository(dir: &Path) -> bool {
     if fs::symlink_metadata(dir.join(".git")).is_ok() {
         return true;
     }
@@ -299,7 +299,7 @@ fn is_repository(dir: &Path) -> bool {
 
 /// The git repository `path` lies in, if one of the folders above it is
 /// one. Answers are kept in `seen`, since files share their folders.
-fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<PathBuf> {
+pub(super) fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<PathBuf> {
     path.ancestors()
         .skip(1)
         .find(|dir| {
@@ -312,7 +312,7 @@ fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<Pa
 
 /// A symbolic link, a junction or another reparse point. Never followed,
 /// never deleted.
-fn is_link(meta: &fs::Metadata) -> bool {
+pub(super) fn is_link(meta: &fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
     }

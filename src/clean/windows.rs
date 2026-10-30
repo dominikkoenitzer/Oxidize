@@ -53,8 +53,8 @@ pub struct StoreReport {
     pub cleanup_recommended: Option<bool>,
 }
 
-/// The Windows tools the cleaner calls, behind a trait so tests never run
-/// them.
+/// The Windows tools the cleaner calls, and git, behind a trait so tests
+/// never run them.
 pub trait Tools: Send + Sync {
     fn component_store(&self) -> Result<StoreReport>;
     fn component_cleanup(&self) -> Result<()>;
@@ -66,7 +66,21 @@ pub trait Tools: Send + Sync {
     fn free_bytes(&self, path: &Path) -> Option<u64>;
     /// The executables running now.
     fn running_exes(&self) -> Vec<std::path::PathBuf>;
+    /// Whether the git checkout at `dir` holds uncommitted work: changed,
+    /// staged or untracked files. None when git cannot tell.
+    fn uncommitted(&self, dir: &Path) -> Option<bool>;
 }
+
+/// `git status` in its short form, for scripts. Its file system monitor,
+/// a program a checkout's settings can name, is never started, and no
+/// lock is taken that a running git would trip over.
+pub const GIT_STATUS: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "--no-optional-locks",
+    "status",
+    "--porcelain",
+];
 
 /// The real tools.
 pub struct WindowsTools;
@@ -112,6 +126,21 @@ impl Tools for WindowsTools {
 
     fn running_exes(&self) -> Vec<std::path::PathBuf> {
         system::running_exes()
+    }
+
+    fn uncommitted(&self, dir: &Path) -> Option<bool> {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(dir).args(GIT_STATUS);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.stdin(std::process::Stdio::null()).output().ok()?;
+        out.status
+            .success()
+            .then(|| out.stdout.iter().any(|b| !b.is_ascii_whitespace()))
     }
 }
 
