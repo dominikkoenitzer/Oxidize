@@ -318,6 +318,9 @@ pub fn confirm_text(analysis: &Analysis, choice: &Choice, make_backups: bool) ->
             " Backups are off, so the folders of removed programs are deleted for good."
         });
     }
+    if choice.categories.contains(&Category::BuildOutput) {
+        text.push_str(" Build output is deleted for good, without a backup.");
+    }
     if choice.categories.contains(&Category::WindowsOld) {
         text.push_str(
             " The previous Windows installation is removed too; after that there is no going back to it.",
@@ -1380,5 +1383,9 @@ mod tests {
         assert!(confirm_text(&a, &choice, false).contains("deleted for good"));
         choice.categories.push(Category::WindowsOld);
         assert!(confirm_text(&a, &choice, true).contains("no going back"));
+        let build = "Build output is deleted for good, without a backup.";
+        assert!(!confirm_text(&a, &choice, true).contains(build));
+        choice.categories.push(Category::BuildOutput);
+        assert!(confirm_text(&a, &choice, true).contains(build));
     }
 }
