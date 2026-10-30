@@ -836,14 +836,15 @@ impl OxidizeApp {
                 }
                 Msg::Analysed(found) => {
                     let (places, analysis) = *found;
-                    self.status = analysed_status(&analysis);
+                    self.status = analysed_status(&analysis, &analysis.default_choice());
                     self.cleanup.take_analysis(places, analysis);
                     self.job_done();
                 }
                 Msg::BuildFound(found) => {
                     self.cleanup.take_build_output(*found);
+                    // The look comes after the ticks, so the status sums the ticks.
                     if let Some((_, analysis)) = &self.cleanup.analysis {
-                        self.status = analysed_status(analysis);
+                        self.status = analysed_status(analysis, &self.cleanup.choice());
                     }
                     self.job_done();
                 }
@@ -1507,12 +1508,11 @@ impl OxidizeApp {
     }
 }
 
-/// The status line after an analysis.
-fn analysed_status(analysis: &clean::Analysis) -> String {
-    let chosen = analysis.default_choice();
+/// The status line after an analysis, summing what `chosen` ticks.
+fn analysed_status(analysis: &clean::Analysis, chosen: &clean::Choice) -> String {
     format!(
         "Analysed. The ticked categories hold {}.",
-        util::human_size(analysis.chosen_bytes(&chosen))
+        util::human_size(analysis.chosen_bytes(chosen))
     )
 }
 
@@ -3688,6 +3688,36 @@ mod tests {
             .unwrap();
         app.drain_messages(&ctx);
         assert!(app.cleanup.ticked.contains(&clean::Category::BuildOutput));
+    }
+
+    #[test]
+    fn the_status_after_a_look_for_build_output_counts_the_ticks() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        ticked_to_look(&mut app);
+        let (_, analysis) = app.cleanup.analysis.as_ref().unwrap();
+        let unticked = analysis.finding(clean::Category::Orphans).unwrap().clone();
+        let mut found = analysis
+            .finding(clean::Category::BuildOutput)
+            .unwrap()
+            .clone();
+        app.cleanup.set(&unticked, false);
+        found.skipped = false;
+        found.count = 2;
+        found.bytes = 300;
+        app.jobs = 1;
+        app.tx.send(Msg::BuildFound(Box::new(found))).unwrap();
+        app.drain_messages(&ctx);
+        let (_, analysis) = app.cleanup.analysis.as_ref().unwrap();
+        let ticked = analysis.chosen_bytes(&app.cleanup.choice());
+        assert_ne!(ticked, analysis.chosen_bytes(&analysis.default_choice()));
+        assert_eq!(
+            app.status,
+            format!(
+                "Analysed. The ticked categories hold {}.",
+                util::human_size(ticked)
+            )
+        );
     }
 
     #[test]
