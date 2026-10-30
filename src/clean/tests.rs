@@ -1336,6 +1336,48 @@ fn build_output_in_a_clean_checkout_goes_and_git_is_asked_once_per_checkout() {
 }
 
 #[test]
+fn a_tagged_folder_that_is_a_repository_or_a_link_stays() {
+    use super::build::tests::{age_tree, cache};
+    let pc = Pc::new("build_own_repository");
+    let worktree = pc.root.join(r"Profile\code\app\target");
+    cache(&worktree, 30, 60);
+    fs::write(worktree.join(".git"), "gitdir: ../.git/worktrees/target").unwrap();
+    age_tree(&worktree, 60);
+    let tools = FakeTools::default();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert_eq!(f.count, 0);
+    assert_eq!(kept(&f.kept, &KeptReason::Repository).0, 1);
+
+    let real = pc.root.join(r"Elsewhere\target");
+    cache(&real, 30, 60);
+    let link = pc.root.join(r"Profile\code\lib\target");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let made = std::process::Command::new(crate::system::system32("cmd.exe"))
+        .args(["/c", "mklink", "/J"])
+        .arg(&link)
+        .arg(&real)
+        .output()
+        .unwrap();
+    assert!(made.status.success());
+    let protected = Protected::default();
+    let mut check = build::Check {
+        now: SystemTime::now(),
+        protected: &protected,
+        elevated: false,
+        tools: &tools,
+        checkouts: Default::default(),
+        running: &[],
+        probe: false,
+    };
+    assert!(build::assess(&real, &mut check).is_ok());
+    assert!(matches!(
+        build::assess(&link, &mut check),
+        Err((KeptReason::Failed(_), 0))
+    ));
+}
+
+#[test]
 fn each_build_folder_is_checked_after_the_one_before_it_went() {
     use super::build::tests::cache;
     let pc = Pc::new("build_one_by_one");
