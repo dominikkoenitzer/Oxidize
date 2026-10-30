@@ -152,6 +152,21 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_that_is_a_repository_or_lies_in_one_stays_alive() {
+        let root = fixture("dead_checkout");
+        let own = root.join("Quillmark");
+        file_aged(&own.join(r"bin\quill.dll"), 10, 90);
+        // A linked worktree: its .git is a file, old like the rest.
+        file_aged(&own.join(".git"), 10, 90);
+        assert!(!proven_dead(&own, SystemTime::now(), &[]));
+
+        let under = root.join(r"work\Inkpad");
+        file_aged(&under.join("ink.dll"), 10, 90);
+        fs::create_dir_all(root.join(r"work\.git")).unwrap();
+        assert!(!proven_dead(&under, SystemTime::now(), &[]));
+    }
+
+    #[test]
     fn an_offline_or_pinned_file_keeps_the_folder_from_being_proven() {
         for (name, letter) in [("dead_offline", 'O'), ("dead_pinned", 'P')] {
             let root = fixture(name);
