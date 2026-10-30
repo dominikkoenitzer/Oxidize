@@ -41,7 +41,7 @@ With Dry run ticked, Run uninstaller only logs the command it would run, and the
 
 1. The user clicks Clean up in the top bar, then Analyse. The analysis changes nothing and can take a minute. With Restart as administrator first, Windows' own temp folder and dumps, the component store and the Delivery Optimization cache count too.
 2. Each category shows its size, what it is, and what stays and why. The safe set is ticked: temporary files, crash dumps, browser caches, and folders of removed programs at high confidence. The folders of removed programs open into a list with a tick, a confidence tag and a reason for each.
-3. Go through the ticks with the user. The Recycle Bin, the component store, the Delivery Optimization cache and the previous Windows installation are never ticked by themselves. Before the user ticks the previous Windows installation, say that it cannot come back afterwards.
+3. Go through the ticks with the user. The Recycle Bin, the component store, the Delivery Optimization cache, the previous Windows installation and stale build output are never ticked by themselves. Before the user ticks the previous Windows installation, say that it cannot come back afterwards.
 4. The user clicks Clean N ticked categories and confirms with Clean. With Dry run ticked, the button only logs what would be cleaned.
 5. The result shows what was freed per category and what stayed. Folders of removed programs went into a backup, and Undo beside them puts them back. Nothing else comes back.
 
@@ -52,6 +52,7 @@ The panel on the right is the list of protected folders: a folder or file typed 
 - It lists programs from the Windows uninstall list only. Store apps are not shown.
 - It cannot scan a program that is no longer installed, except the one it just removed while that one stays selected.
 - It has no trace view, and it shows the dangling references of `orphans` nowhere. The Clean up tab lists the folders no program claims.
+- It cannot pick single crash dumps or leave one program's, and it puts every folder of a removed program into a backup; `oxidize clean` with `--dump`, `--skip-dumps-of` and `--delete-dead` does those.
 - It cannot list backups. It restores only through Undo, right after Remove completely.
 
 For any of these the user needs `oxidize.exe`, the command line, which is published with every release next to the window app. To undo an earlier removal, the user runs `oxidize restore "<name>"` with the name from the log, as described in [../SKILL.md](../SKILL.md).

@@ -203,10 +203,10 @@ Without `--yes`, or with `--dry-run`:
 
 ```
 { "analysis": { "findings": [Finding], "elevated": bool, "recycle_bin_days": number, "protected": [string] },
-  "chosen": [category], "chosen_folders": [path], "chosen_bytes": number }
+  "chosen": [category], "chosen_folders": [path], "chosen_outright": [path], "chosen_bytes": number }
 ```
 
-`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin" }`. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"repository"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"failed"`.
+`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`, `"build-output"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin", "proven_dead" }`, `"dumps"` for `crash-dumps`: each `{ "path", "bytes", "files", "program" }`, with `program` null where the name does not say it, and `"build_folders"` for `build-output`: each `{ "path", "bytes", "unchanged_days", "checkout" }`, with `checkout` the git checkout it lies in or null. Each of the three is left out when empty. `chosen_outright` holds the chosen folders that go without a backup, filled only with `--delete-dead`. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"repository"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"pinned"`, `"left_out"`, `"uncommitted"`, `"checkout_unknown"`, `"failed"`.
 
 With `--yes`:
 
