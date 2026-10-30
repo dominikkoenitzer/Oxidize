@@ -16,6 +16,7 @@ Rules:
 
 - Anything destructive goes through `safety::remove_leftovers`, honours
   `--dry-run` and is backed up first. Do not add another delete path.
+  `clean --delete-dead` and `clean --build-output` skip the backup on purpose.
 - The matcher, the command-line parser and the backup validation have unit
   tests. Extend them when you change behaviour, and try changes in a
   throwaway VM.
