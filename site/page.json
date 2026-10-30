@@ -147,7 +147,7 @@
       "label": "Clean up",
       "title": "Clear out what Windows piles up",
       "body": [
-        "The Clean up tab measures temporary files, crash dumps, the Recycle Bin, browser caches, Windows' component store, the Delivery Optimization cache, an old Windows installation and folders of removed programs.",
+        "The Clean up tab measures temporary files, crash dumps, the Recycle Bin, browser caches, Windows' component store, the Delivery Optimization cache, an old Windows installation, folders of removed programs and stale build output.",
         "The safe ones start ticked. Recent files, a running browser and folders you protect stay, and caches never take cookies, history or logins with them."
       ],
       "main": {

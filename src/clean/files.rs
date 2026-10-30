@@ -74,7 +74,7 @@ pub struct Deleted {
 /// The time the file last changed in place: written or created, whichever
 /// is later. A file unpacked from an archive keeps the old write time of
 /// the archive's copy, but its creation time says when it arrived.
-fn last_change(meta: &fs::Metadata) -> Option<SystemTime> {
+pub(super) fn last_change(meta: &fs::Metadata) -> Option<SystemTime> {
     let written = meta.modified().ok();
     let created = meta.created().ok();
     match (written, created) {
@@ -85,7 +85,7 @@ fn last_change(meta: &fs::Metadata) -> Option<SystemTime> {
 
 /// Is a file with this metadata old enough for the rule? A file whose times
 /// cannot be read is not.
-fn old_enough(meta: &fs::Metadata, rule: &Rule, now: SystemTime) -> bool {
+pub(super) fn old_enough(meta: &fs::Metadata, rule: &Rule, now: SystemTime) -> bool {
     let Some(min) = rule.min_age else {
         return true;
     };
@@ -124,12 +124,27 @@ pub enum Probe {
 /// read or written.
 #[cfg(windows)]
 pub fn probe(path: &Path) -> Probe {
-    use std::os::windows::fs::OpenOptionsExt;
     const DELETE: u32 = 0x0001_0000;
+    open_alone(path, DELETE)
+}
+
+/// [`probe`] for a file that goes without a backup. Write access is asked
+/// too: a program file that runs or is loaded refuses it, though no
+/// program holds it open. A read-only file is refused as well.
+#[cfg(windows)]
+pub fn probe_for_good(path: &Path) -> Probe {
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_WRITE_DATA: u32 = 0x0002;
+    open_alone(path, DELETE | FILE_WRITE_DATA)
+}
+
+#[cfg(windows)]
+fn open_alone(path: &Path, access: u32) -> Probe {
+    use std::os::windows::fs::OpenOptionsExt;
     // Opens the reparse point itself, never what it points to.
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     match fs::OpenOptions::new()
-        .access_mode(DELETE)
+        .access_mode(access)
         .share_mode(0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -141,6 +156,11 @@ pub fn probe(path: &Path) -> Probe {
 
 #[cfg(not(windows))]
 pub fn probe(_path: &Path) -> Probe {
+    Probe::Free
+}
+
+#[cfg(not(windows))]
+pub fn probe_for_good(_path: &Path) -> Probe {
     Probe::Free
 }
 
@@ -285,7 +305,7 @@ fn consider_file(
 /// linked worktree or a submodule, a file, or a bare repository. Its files
 /// only work together, and an old one is often the one still needed, so it
 /// is kept whole and never entered.
-fn is_repository(dir: &Path) -> bool {
+pub(super) fn is_repository(dir: &Path) -> bool {
     if fs::symlink_metadata(dir.join(".git")).is_ok() {
         return true;
     }
@@ -299,7 +319,7 @@ fn is_repository(dir: &Path) -> bool {
 
 /// The git repository `path` lies in, if one of the folders above it is
 /// one. Answers are kept in `seen`, since files share their folders.
-fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<PathBuf> {
+pub(super) fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<PathBuf> {
     path.ancestors()
         .skip(1)
         .find(|dir| {
@@ -312,7 +332,7 @@ fn repository_above(path: &Path, seen: &mut HashMap<PathBuf, bool>) -> Option<Pa
 
 /// A symbolic link, a junction or another reparse point. Never followed,
 /// never deleted.
-fn is_link(meta: &fs::Metadata) -> bool {
+pub(super) fn is_link(meta: &fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
     }
@@ -325,6 +345,50 @@ fn is_link(meta: &fs::Metadata) -> bool {
         }
     }
     false
+}
+
+/// What a file or folder is to a proof that it may go without a backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// A symbolic link or a junction: removing it removes only the link.
+    Link,
+    /// A reparse point that holds the data itself, such as a cloud
+    /// placeholder, or a file kept offline, pinned or fetched on access.
+    /// Its data may live elsewhere, so it is never proven and never entered.
+    StandIn,
+    Plain,
+}
+
+pub(super) fn kind(meta: &fs::Metadata) -> Kind {
+    #[cfg(windows)]
+    let attributes = {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes()
+    };
+    #[cfg(not(windows))]
+    let attributes = 0;
+    kind_of(attributes, meta.file_type().is_symlink())
+}
+
+/// `name_surrogate` is what the standard library calls a symbolic link: a
+/// reparse point whose tag names another file, a junction included.
+fn kind_of(attributes: u32, name_surrogate: bool) -> Kind {
+    const REPARSE_POINT: u32 = 0x400;
+    const OFFLINE: u32 = 0x1000;
+    const RECALL_ON_OPEN: u32 = 0x4_0000;
+    const PINNED: u32 = 0x8_0000;
+    const UNPINNED: u32 = 0x10_0000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x40_0000;
+    if name_surrogate {
+        Kind::Link
+    } else if attributes
+        & (REPARSE_POINT | OFFLINE | RECALL_ON_OPEN | PINNED | UNPINNED | RECALL_ON_DATA_ACCESS)
+        != 0
+    {
+        Kind::StandIn
+    } else {
+        Kind::Plain
+    }
 }
 
 /// Delete the candidates of a walk. Files go first; a folder goes only when
@@ -457,6 +521,17 @@ pub(crate) mod tests {
             .unwrap();
         f.set_times(FileTimes::new().set_modified(t).set_created(t))
             .unwrap();
+    }
+
+    /// Give a file one of the attributes `attrib` sets, by its letter: `O`
+    /// for offline, `P` for pinned.
+    pub fn mark(path: &Path, letter: char) {
+        let done = std::process::Command::new(crate::system::system32("attrib.exe"))
+            .arg(format!("+{letter}"))
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(done.status.success(), "attrib +{letter}");
     }
 
     fn week() -> Rule {
@@ -774,5 +849,19 @@ pub(crate) mod tests {
         );
         assert_eq!(done.files, 1);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn only_a_name_surrogate_counts_as_a_link() {
+        // A symbolic link or a junction: the tag names another file.
+        assert_eq!(kind_of(0x400, true), Kind::Link);
+        // A cloud placeholder or another reparse point that is the data.
+        assert_eq!(kind_of(0x400, false), Kind::StandIn);
+        // Offline, recalled on open, pinned, unpinned, recalled on access.
+        for attributes in [0x1000, 0x4_0000, 0x8_0000, 0x10_0000, 0x40_0000] {
+            assert_eq!(kind_of(attributes | 0x20, false), Kind::StandIn);
+        }
+        assert_eq!(kind_of(0x20, false), Kind::Plain);
+        assert_eq!(kind_of(0x10, false), Kind::Plain);
     }
 }

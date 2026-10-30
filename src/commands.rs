@@ -39,6 +39,7 @@ impl Global {
         SafetyContext {
             dry_run: self.dry_run,
             make_backups: !self.no_backup,
+            keep_emptied_parents: false,
         }
     }
 
@@ -2254,13 +2255,21 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     if !g.json {
         term::info("Analysing...");
     }
-    let (places, analysis) = clean::analyse_this_pc(&protected, args.recycle_bin_days);
+    let asked = clean::Asked {
+        build_output: args.build_output,
+        dead: args.delete_dead,
+    };
+    let (places, mut analysis) = clean::analyse_this_pc(&protected, args.recycle_bin_days, asked);
+    analysis.narrow_dumps(&args.dumps(), &args.skip_dumps_of);
     let named = args.named();
-    let choice = if named.is_empty() {
+    let mut choice = if named.is_empty() {
         analysis.default_choice()
     } else {
         analysis.choice(&named, args.levels.threshold())
     };
+    if args.delete_dead {
+        analysis.delete_dead(&mut choice);
+    }
     let run = g.yes && !g.dry_run;
 
     if g.json && !run {
@@ -2429,6 +2438,7 @@ pub(crate) fn clean_plan_json(analysis: &Analysis, choice: &Choice) -> serde_jso
         "analysis": analysis,
         "chosen": choice.categories,
         "chosen_folders": choice.folders,
+        "chosen_outright": choice.outright,
         "chosen_bytes": analysis.chosen_bytes(choice),
         "summary": analysis.summary(),
     })
@@ -2490,19 +2500,46 @@ fn print_finding(f: &Finding, choice: Option<&Choice>) {
     if let Some(stays) = clean::stays_text(&f.kept) {
         println!("{INDENT}{}", term::dim(&stays));
     }
-    if let Some(c) = choice {
-        for o in f.folders.iter().filter(|o| c.folders.contains(&o.path)) {
-            println!(
-                "{INDENT}{}  {}  {}",
-                conf_tag(o.confidence),
-                o.path.display(),
-                term::dim(&format!("{}, {}", util::human_size(o.bytes), o.reason))
-            );
+    let Some(c) = choice else {
+        return;
+    };
+    for o in f.folders.iter().filter(|o| c.folders.contains(&o.path)) {
+        let how = if c.outright.contains(&o.path) {
+            ", proven dead, deleted outright"
+        } else {
+            ""
+        };
+        println!(
+            "{INDENT}{}  {}  {}",
+            conf_tag(o.confidence),
+            o.path.display(),
+            term::dim(&format!("{}, {}{how}", util::human_size(o.bytes), o.reason))
+        );
+    }
+    for d in &f.dumps {
+        let mut about = util::human_size(d.bytes);
+        if let Some(program) = &d.program {
+            about.push_str(&format!(", {program}"));
         }
+        println!("{INDENT}{}  {}", d.path.display(), term::dim(&about));
+    }
+    for b in &f.build_folders {
+        println!(
+            "{INDENT}{}  {}",
+            b.path.display(),
+            term::dim(&format!(
+                "{}, unchanged for {} days",
+                util::human_size(b.bytes),
+                b.unchanged_days
+            ))
+        );
     }
 }
 
 fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
+    if f.skipped {
+        return "not looked for".to_string();
+    }
     if !f.actionable() && f.kept.is_empty() && f.notes.is_empty() {
         return "nothing found".to_string();
     }
@@ -2518,6 +2555,7 @@ fn finding_detail(f: &Finding, choice: Option<&Choice>) -> String {
             None => plural(n, "folder", "folders"),
         },
         Category::WindowsOld if f.actionable() => "1 folder".to_string(),
+        Category::BuildOutput => plural(n, "folder", "folders"),
         _ => String::new(),
     }
 }
@@ -2546,6 +2584,13 @@ fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool) {
                 "{bytes} in {n} {categories}. Clean them: add --yes"
             ))
         );
+    }
+    if !choice.outright.is_empty() {
+        let line = format!(
+            "{} proven dead go without a backup; the other folders go into one.",
+            plural(choice.outright.len(), "folder", "folders")
+        );
+        println!("{}", term::dim(&line));
     }
     if !analysis.elevated && analysis.findings.iter().any(|f| f.needs_admin) {
         println!(
@@ -4566,6 +4611,7 @@ mod tests {
         ];
         let ctx = SafetyContext {
             dry_run: true,
+            keep_emptied_parents: false,
             make_backups: true,
         };
         let outcome = safety::remove_leftovers(&selected, "Example Player", &ctx).unwrap();
