@@ -223,11 +223,13 @@ pub fn command_exe(command: &str) -> Option<PathBuf> {
     let mut s = if expanded.starts_with('"') {
         util::split_command_line(&expanded).into_iter().next()?
     } else {
-        // Unquoted: Windows tries ever longer prefixes, so a path with
+        // Unquoted: Windows tries ever longer prefixes, so the program is
+        // the prefix that names a file on disk, and an `.exe` in its
+        // arguments is not part of it. With nothing on disk, a path with
         // spaces runs up to and including the first `.exe` that ends a token.
         // The scan runs over the original bytes, not a lower-cased copy, whose
         // length can differ and shift the index.
-        match util::exe_token_end(&expanded).or_else(|| util::program_prefix_end(&expanded)) {
+        match util::program_prefix_end(&expanded).or_else(|| util::exe_token_end(&expanded)) {
             Some(i) => expanded[..i].to_string(),
             None => unquoted_program(&expanded)?,
         }
@@ -1202,6 +1204,23 @@ mod tests {
             command_exe(r"C:\Gone\Vendor\start"),
             Some(PathBuf::from(r"C:\Gone\Vendor\start"))
         );
+    }
+
+    #[test]
+    fn a_program_on_disk_ends_the_line_before_an_exe_in_its_arguments() {
+        let dir = crate::backup::TestDir::new("oxidize audit command argument");
+        fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("start.bat");
+        fs::write(&script, "@echo off").unwrap();
+        let tool = dir.join("tool.exe");
+        fs::write(&tool, "MZ").unwrap();
+        let app = dir.join("app.exe");
+
+        let line = format!("{} {}", script.display(), app.display());
+        assert_eq!(command_exe(&line), Some(script.clone()));
+        // Named without its `.exe`, the program still ends before the argument.
+        let line = format!("{} --run {}", dir.join("tool").display(), app.display());
+        assert_eq!(command_exe(&line), Some(tool.clone()));
     }
 
     #[test]
