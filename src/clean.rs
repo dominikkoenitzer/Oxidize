@@ -1420,8 +1420,8 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
     } else {
         opts.tools.running_exes()
     };
-    let (mut backed, mut outright) = (Vec::new(), Vec::new());
-    let mut revived = 0;
+    let mut backed = Vec::new();
+    let (mut gone, mut revived) = (0, 0);
     for o in f
         .folders
         .iter()
@@ -1441,7 +1441,7 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
         );
         if choice.outright.contains(&o.path) {
             if o.confidence == Confidence::High && dead::proven_dead(&o.path, opts.now, &running) {
-                outright.push((item, o.bytes));
+                gone += remove_dirs(&[(item, o.bytes)], false, false, c);
                 continue;
             }
             revived += 1;
@@ -1459,7 +1459,6 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
             "{revived} no longer proven dead, so into the backup instead"
         ));
     }
-    let gone = remove_dirs(&outright, false, false, c);
     if gone > 0 {
         c.notes
             .push(format!("{gone} proven dead, deleted without a backup"));
@@ -1479,24 +1478,22 @@ fn clean_build(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
         running: &running,
         probe: true,
     };
-    let mut items = Vec::new();
     for b in &f.build_folders {
         match build::assess(&b.path, &mut check) {
-            Ok(now) => items.push((
-                Leftover::fs(
+            Ok(now) => {
+                let item = Leftover::fs(
                     LeftoverKind::Directory,
                     now.path,
                     Confidence::High,
                     "stale build output",
                     Some(now.bytes),
                     now.bytes == 0,
-                ),
-                now.bytes,
-            )),
+                );
+                remove_dirs(&[(item, now.bytes)], false, true, c);
+            }
             Err((reason, bytes)) => c.keep(reason, 1, bytes),
         }
     }
-    remove_dirs(&items, false, true, c);
 }
 
 /// Remove whole folders, each with its size, into a backup or for good.
