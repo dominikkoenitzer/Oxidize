@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-use super::files;
+use super::files::{self, Kind};
 use super::protect::{self, Protected};
 use super::windows::Tools;
 use super::KeptReason;
@@ -108,7 +108,8 @@ struct Contents {
     repository: bool,
 }
 
-/// What `dir` holds. None when any of it cannot be read.
+/// What `dir` holds. None when any of it cannot be read, or is a cloud
+/// placeholder or another file whose data may live elsewhere.
 fn contents(dir: &Path) -> Option<Contents> {
     let meta = fs::symlink_metadata(dir).ok()?;
     let mut out = Contents {
@@ -121,8 +122,10 @@ fn contents(dir: &Path) -> Option<Contents> {
         for entry in fs::read_dir(&d).ok()? {
             let path = entry.ok()?.path();
             let meta = fs::symlink_metadata(&path).ok()?;
-            if files::is_link(&meta) {
-                continue;
+            match files::kind(&meta) {
+                Kind::Link => continue,
+                Kind::StandIn => return None,
+                Kind::Plain => {}
             }
             out.newest = out.newest.max(files::last_change(&meta)?);
             if meta.is_dir() {
@@ -194,7 +197,7 @@ pub fn assess(dir: &Path, check: &mut Check) -> Result<BuildFolder, (KeptReason,
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::super::files::tests::{age, file_aged, fixture};
+    use super::super::files::tests::{age, file_aged, fixture, mark};
     use super::*;
 
     /// A build folder at `dir`: a tag and `bytes` of output, everything in it
@@ -248,6 +251,18 @@ pub(crate) mod tests {
         let protected = Protected::new([root.join("Kept").display().to_string()]);
         let found = find(&[root.to_path_buf()], &[root.join("Temp")], &protected);
         assert_eq!(found, [target]);
+    }
+
+    #[test]
+    fn an_offline_or_pinned_file_makes_the_folder_unreadable() {
+        for (name, letter) in [("build_offline", 'O'), ("build_pinned", 'P')] {
+            let root = fixture(name);
+            let dir = root.join("target");
+            cache(&dir, 10, 60);
+            assert!(contents(&dir).is_some(), "{name}");
+            mark(&dir.join(r"debug\deps\out.bin"), letter);
+            assert!(contents(&dir).is_none(), "{name}");
+        }
     }
 
     #[test]

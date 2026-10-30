@@ -9,14 +9,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use super::files::{self, Probe, Rule};
+use super::files::{self, Kind, Probe, Rule};
 
 /// No file in a dead folder changed for this many days.
 pub const DEAD_DAYS: u64 = 30;
 
 /// Is the folder at `dir` dead? Anything that cannot be read or opened
 /// makes the answer no. A link inside is never followed; removing the
-/// folder removes only the link.
+/// folder removes only the link. A cloud placeholder or another file whose
+/// data may live elsewhere makes the answer no.
 pub fn proven_dead(dir: &Path, now: SystemTime, running: &[PathBuf]) -> bool {
     let Ok(meta) = fs::symlink_metadata(dir) else {
         return false;
@@ -48,8 +49,10 @@ pub fn proven_dead(dir: &Path, now: SystemTime, running: &[PathBuf]) -> bool {
             let Ok(meta) = fs::symlink_metadata(&path) else {
                 return false;
             };
-            if files::is_link(&meta) {
-                continue;
+            match files::kind(&meta) {
+                Kind::Link => continue,
+                Kind::StandIn => return false,
+                Kind::Plain => {}
             }
             if meta.is_dir() {
                 if files::is_repository(&path) {
@@ -66,7 +69,7 @@ pub fn proven_dead(dir: &Path, now: SystemTime, running: &[PathBuf]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::files::tests::{file_aged, fixture};
+    use super::super::files::tests::{age, file_aged, fixture, mark};
     use super::*;
 
     #[test]
@@ -124,6 +127,20 @@ mod tests {
             SystemTime::now(),
             &[]
         ));
+    }
+
+    #[test]
+    fn an_offline_or_pinned_file_keeps_the_folder_from_being_proven() {
+        for (name, letter) in [("dead_offline", 'O'), ("dead_pinned", 'P')] {
+            let root = fixture(name);
+            let dir = root.join("Quillmark");
+            file_aged(&dir.join(r"bin\quill.dll"), 10, 90);
+            let file = dir.join("synced.dat");
+            file_aged(&file, 10, 90);
+            mark(&file, letter);
+            age(&file, 90);
+            assert!(!proven_dead(&dir, SystemTime::now(), &[]), "{name}");
+        }
     }
 
     #[test]
