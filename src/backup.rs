@@ -818,6 +818,10 @@ pub fn remove_path(p: &Path) -> std::io::Result<()> {
 /// it. Each file in it is opened alone and marked for deletion before any
 /// of it goes, so a file another program has open, or a program file that
 /// runs, keeps the whole folder. Links inside go as links.
+///
+/// Once the files go, there is no way back: a file made in the folder after
+/// it was listed, or a mark that cannot be taken back, leaves the folder
+/// partly gone, and the error says so.
 #[cfg(windows)]
 pub fn remove_whole(p: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(p)?;
@@ -826,18 +830,32 @@ pub fn remove_whole(p: &Path) -> std::io::Result<()> {
     }
     let (mut dirs, mut marked) = (Vec::new(), Vec::new());
     if let Err(e) = hold(p, &mut dirs, &mut marked) {
+        // A file whose mark stays goes when it is closed.
+        let mut stuck = None;
         for f in &marked {
-            let _ = mark(f, false);
+            if let Err(u) = mark(f, false) {
+                stuck = stuck.or(Some(u));
+            }
         }
-        return Err(e);
+        return Err(stuck.map_or(e, partly_gone));
     }
+    let mut gone = !marked.is_empty();
     // Closing the last handle deletes each file.
     drop(marked);
     // A folder comes after everything in it, so the last one held goes first.
     while let Some(d) = dirs.pop() {
-        mark(&d, true)?;
+        match mark(&d, true) {
+            Ok(()) => gone = true,
+            Err(e) if gone => return Err(partly_gone(e)),
+            Err(e) => return Err(e),
+        }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn partly_gone(e: std::io::Error) -> std::io::Error {
+    std::io::Error::new(e.kind(), format!("part of the folder is gone already: {e}"))
 }
 
 #[cfg(not(windows))]
@@ -856,6 +874,7 @@ pub(crate) mod hooks {
     thread_local! {
         static BEFORE_OPEN: RefCell<Option<Hook>> = RefCell::new(None);
         static NO_POSIX: Cell<bool> = const { Cell::new(false) };
+        static NO_UNMARK: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Run `f` on each folder right before it is opened for deletion.
@@ -870,6 +889,15 @@ pub(crate) mod hooks {
 
     pub(super) fn posix_refused() -> bool {
         NO_POSIX.with(Cell::get)
+    }
+
+    /// Make every take-back of a mark fail.
+    pub(crate) fn refuse_unmark() {
+        NO_UNMARK.with(|c| c.set(true));
+    }
+
+    pub(super) fn unmark_refused() -> bool {
+        NO_UNMARK.with(Cell::get)
     }
 
     pub(super) fn opening(dir: &Path) {
@@ -1024,6 +1052,10 @@ fn mark(file: &fs::File, delete: bool) -> std::io::Result<()> {
     } else {
         0
     };
+    #[cfg(test)]
+    if !delete && hooks::unmark_refused() {
+        return Err(std::io::Error::from_raw_os_error(5));
+    }
     #[cfg(test)]
     if hooks::posix_refused() {
         return plain_mark(handle, delete);
@@ -1440,6 +1472,42 @@ mod tests {
         #[allow(clippy::permissions_set_readonly_false)]
         perms.set_readonly(false);
         fs::set_permissions(&locked, perms).unwrap();
+    }
+
+    #[test]
+    fn a_mark_that_cannot_be_taken_back_is_reported() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_unmark_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        hooks::refuse_unmark();
+
+        let err = remove_whole(&src).unwrap_err();
+        assert!(err.to_string().contains("gone already"), "{err}");
+        assert!(!src.join("a.txt").exists());
+        assert!(src.join("z.txt").exists());
+        drop(held);
+    }
+
+    #[test]
+    fn a_file_made_after_the_folder_was_listed_is_reported_as_partly_gone() {
+        let root = TestDir::new("oxidize_whole_late_test");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::write(src.join(r"sub\f.txt"), "inner").unwrap();
+        // After `src` is listed, a program writes a new file into it.
+        let late = src.join("late.txt");
+        let write = late.clone();
+        hooks::before_open(move |d| {
+            if d.ends_with("sub") {
+                fs::write(&write, "late").unwrap();
+            }
+        });
+
+        let err = remove_whole(&src).unwrap_err();
+        assert!(err.to_string().contains("gone already"), "{err}");
+        assert!(!src.join("a.txt").exists());
+        assert_eq!(fs::read_to_string(&late).unwrap(), "late");
     }
 
     #[test]
