@@ -1203,6 +1203,50 @@ fn a_folder_that_came_alive_since_the_analysis_goes_into_the_backup() {
 }
 
 #[test]
+fn only_a_high_confidence_folder_is_ever_deleted_outright() {
+    let pc = Pc::new("orphans_unsure");
+    let tools = FakeTools::default();
+    let medium = pc.orphan("Quillmark Studio", 120);
+    let low = pc.orphan("Inkwell Studio", 80);
+    let items: Vec<OrphanItem> = [(&medium, Confidence::Medium), (&low, Confidence::Low)]
+        .into_iter()
+        .map(|(f, confidence)| OrphanItem {
+            path: f.path.clone(),
+            bytes: f.size_bytes,
+            modified: f.modified.clone(),
+            confidence,
+            reason: "a plausible match".to_string(),
+            needs_admin: false,
+            proven_dead: false,
+        })
+        .collect();
+    let source = move || items.clone();
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &source);
+    let f = a.finding(Category::Orphans).unwrap();
+    assert_eq!(f.folders.len(), 2);
+    assert!(f.folders.iter().all(|o| !o.proven_dead));
+    let mut choice = a.choice(&[Category::Orphans], Confidence::Low);
+    assert_eq!(choice.folders.len(), 2);
+    a.delete_dead(&mut choice);
+    assert!(choice.outright.is_empty());
+
+    // A choice made by hand that names them outright still backs them up.
+    choice.outright = choice.folders.clone();
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(!o.notes.iter().any(|n| n.contains("without a backup")));
+    let info = crate::backup::find_backup(o.backup.as_ref().expect("a backup")).unwrap();
+    let restored = crate::restore::restore(&info, false).unwrap();
+    assert!(restored.iter().all(|r| r.result.is_ok()));
+    assert!(medium.path.join("data.bin").exists());
+    assert!(low.path.join("data.bin").exists());
+    crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
 fn stale_build_output_goes_for_good_and_the_rest_stays_with_its_reason() {
     use super::build::tests::{age_tree, cache};
     let pc = Pc::new("build_output");
