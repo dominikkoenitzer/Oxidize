@@ -1478,7 +1478,8 @@ fn build_output_a_program_runs_from_or_holds_open_stays_whole() {
     let choice = a.choice(&[Category::BuildOutput], Confidence::High);
     let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
     assert_eq!((done[0].removed, done[0].freed), (0, 0));
-    assert_eq!(kept(&done[0].kept, &KeptReason::InUse).0, 2);
+    // The one kept at the analysis is reported with the two kept now.
+    assert_eq!(kept(&done[0].kept, &KeptReason::InUse).0, 3);
     for dir in [&ran, &open, &runs] {
         assert!(
             dir.join(r"debug\deps\out.bin").exists(),
