@@ -583,7 +583,7 @@ fn remove_one(
                     s.quarantine(item.kind, &path)
                         .context("moving to quarantine")?;
                 }
-                None => crate::backup::remove_path(&path).context("deleting")?,
+                None => crate::backup::remove_whole(&path).context("deleting")?,
             }
             Ok(ItemStatus::Removed)
         }

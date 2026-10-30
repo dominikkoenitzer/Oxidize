@@ -814,6 +814,102 @@ pub fn remove_path(p: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Delete a file or folder that has no backup: all of a folder, or none of
+/// it. Each file in it is opened alone and marked for deletion before any
+/// of it goes, so a file another program has open, or a program file that
+/// runs, keeps the whole folder. Links inside go as links.
+#[cfg(windows)]
+pub fn remove_whole(p: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(p)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return remove_path(p);
+    }
+    let (mut dirs, mut marked) = (Vec::new(), Vec::new());
+    if let Err(e) = hold(p, &mut dirs, &mut marked) {
+        for f in &marked {
+            let _ = mark(f, false);
+        }
+        return Err(e);
+    }
+    // Closing the last handle deletes each file.
+    drop(marked);
+    // A folder comes after everything in it, so the last one held goes first.
+    while let Some(d) = dirs.pop() {
+        mark(&d, true)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn remove_whole(p: &Path) -> std::io::Result<()> {
+    remove_path(p)
+}
+
+/// Open the folder `dir` and everything in it for deletion, each folder
+/// before what it holds, and mark every file. Stops at the first that will
+/// not open or take the mark.
+#[cfg(windows)]
+fn hold(dir: &Path, dirs: &mut Vec<fs::File>, marked: &mut Vec<fs::File>) -> std::io::Result<()> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        // Read sharing lets the folder be listed; a program working in it
+        // holds it without delete sharing, and the open fails.
+        dirs.push(open_for_delete(&d, 1)?);
+        for entry in fs::read_dir(&d)? {
+            let path = entry?.path();
+            let meta = fs::symlink_metadata(&path)?;
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(path);
+                continue;
+            }
+            let file = open_for_delete(&path, 0)?;
+            mark(&file, true)?;
+            marked.push(file);
+        }
+    }
+    Ok(())
+}
+
+/// Open `path` itself for deletion, never what a link points to.
+#[cfg(windows)]
+fn open_for_delete(path: &Path, share: u32) -> std::io::Result<fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(share)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+}
+
+/// Mark an open file or folder to go when it is closed, read-only or not,
+/// or take the mark back. A program file that runs refuses the mark.
+#[cfg(windows)]
+fn mark(file: &fs::File, delete: bool) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{FileDispositionInfoEx, SetFileInformationByHandle};
+    const DELETE: u32 = 0x1;
+    const POSIX_SEMANTICS: u32 = 0x2;
+    const IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
+    let flags: u32 = if delete {
+        DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
+    } else {
+        0
+    };
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            FileDispositionInfoEx,
+            (&flags as *const u32).cast(),
+            4,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
+}
+
 fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(src)?;
     if meta.is_dir() {
@@ -1022,6 +1118,78 @@ mod tests {
         assert!(!dst.exists());
 
         drop(held);
+    }
+
+    #[test]
+    fn a_folder_with_a_file_held_open_is_not_deleted_at_all() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_locked_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        remove_whole(&src).unwrap_err();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        drop(held);
+
+        // Open with delete sharing, as most programs open files.
+        let shared = fs::File::open(src.join("z.txt")).unwrap();
+        remove_whole(&src).unwrap_err();
+        assert!(src.join("a.txt").exists() && src.join("z.txt").exists());
+        drop(shared);
+
+        remove_whole(&src).unwrap();
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn a_folder_a_program_runs_from_is_not_deleted_at_all() {
+        let root = TestDir::new("oxidize_whole_running_test");
+        let src = root.join("src");
+        fs::create_dir_all(src.join("data")).unwrap();
+        fs::write(src.join(r"data\a.txt"), "first").unwrap();
+        let exe = src.join("quill.exe");
+        fs::copy(crate::system::system32("PING.EXE"), &exe).unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let result = remove_whole(&src);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        result.unwrap_err();
+        assert_eq!(
+            fs::read_to_string(src.join(r"data\a.txt")).unwrap(),
+            "first"
+        );
+        assert!(exe.exists());
+    }
+
+    #[test]
+    fn a_whole_folder_goes_with_read_only_files_and_links_left_unfollowed() {
+        let root = TestDir::new("oxidize_whole_test");
+        let src = root.join("src");
+        let outside = root.join("outside");
+        fs::create_dir_all(src.join(r"a\b")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("kept.txt"), "kept").unwrap();
+        let locked = src.join(r"a\b\locked.txt");
+        fs::write(&locked, "read only").unwrap();
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&locked, perms).unwrap();
+        let made = std::process::Command::new(crate::system::system32("cmd.exe"))
+            .args(["/c", "mklink", "/J"])
+            .arg(src.join(r"a\link"))
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+
+        remove_whole(&src).unwrap();
+        assert!(!src.exists());
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "kept"
+        );
     }
 
     #[test]
