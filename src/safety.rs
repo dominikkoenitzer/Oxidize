@@ -27,6 +27,9 @@ pub struct SafetyContext {
     pub dry_run: bool,
     /// True unless `--no-backup`.
     pub make_backups: bool,
+    /// True where the parent is someone's own folder, such as a project
+    /// whose build output goes.
+    pub keep_emptied_parents: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -432,7 +435,9 @@ pub fn remove_leftovers_into(
             }
             Ok(status) => {
                 outcome.deleted += 1;
-                if matches!(item.kind, LeftoverKind::File | LeftoverKind::Directory) {
+                if matches!(item.kind, LeftoverKind::File | LeftoverKind::Directory)
+                    && !ctx.keep_emptied_parents
+                {
                     removed_fs.push(PathBuf::from(&item.path));
                 }
                 if item.kind == LeftoverKind::RegistryKey {
@@ -714,6 +719,7 @@ mod tests {
         let ctx = SafetyContext {
             dry_run: false,
             make_backups: false,
+            keep_emptied_parents: false,
         };
         let outcome = remove_leftovers(&[item], "Example Product", &ctx).unwrap();
         assert_eq!(outcome.deleted, 1);
