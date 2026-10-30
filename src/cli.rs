@@ -226,6 +226,16 @@ pub struct CleanArgs {
     #[arg(long)]
     pub crash_dumps: bool,
 
+    /// With --crash-dumps: clean only this dump, a file or report folder
+    /// as the analysis lists it. Give it once for each dump.
+    #[arg(long, value_name = "PATH", value_parser = named, requires = "crash_dumps")]
+    pub dump: Vec<String>,
+
+    /// With --crash-dumps: leave the dumps of this program, named by its
+    /// file name, with or without .exe. Give it once for each program.
+    #[arg(long, value_name = "PROGRAM", value_parser = named, requires = "crash_dumps")]
+    pub skip_dumps_of: Vec<String>,
+
     /// Recycle Bin items deleted at least --recycle-bin-days ago.
     #[arg(long)]
     pub recycle_bin: bool,
@@ -255,13 +265,28 @@ pub struct CleanArgs {
     #[arg(long)]
     pub orphans: bool,
 
+    /// With --orphans: delete the chosen folders that are proven dead
+    /// outright, so their space comes back at once. Proven dead: matched to
+    /// a removed program at high confidence, no file in it changed for 30
+    /// days or held open, nothing running from it and no git repository in
+    /// it. The other folders still go into a backup.
+    #[arg(long, requires = "orphans")]
+    pub delete_dead: bool,
+
+    /// Stale build output in your profile: folders build and package tools
+    /// mark as their cache with a CACHEDIR.TAG file, nothing in them changed
+    /// for 30 days, never in a git checkout with uncommitted work. The tool
+    /// makes them again when needed; they are deleted without a backup.
+    #[arg(long)]
+    pub build_output: bool,
+
     /// Clear usage traces instead, and nothing else: recent items, jump
     /// lists, Run, search and Open and Save history, program launch counts,
     /// the thumbnail cache and the clipboard history. The files they point
     /// to stay; so do pinned items.
     #[arg(long, conflicts_with_all = [
         "temp", "crash_dumps", "recycle_bin", "browser_cache", "component_store",
-        "delivery_optimization", "windows_old", "orphans",
+        "delivery_optimization", "windows_old", "orphans", "build_output",
     ])]
     pub traces: bool,
 
@@ -286,11 +311,20 @@ impl CleanArgs {
             (self.delivery_optimization, Category::DeliveryOptimization),
             (self.windows_old, Category::WindowsOld),
             (self.orphans, Category::Orphans),
+            (self.build_output, Category::BuildOutput),
         ]
         .into_iter()
         .filter(|(on, _)| *on)
         .map(|(_, c)| c)
         .collect()
+    }
+
+    /// The dumps named with --dump, as full paths.
+    pub fn dumps(&self) -> Vec<std::path::PathBuf> {
+        self.dump
+            .iter()
+            .map(|d| std::path::absolute(d).unwrap_or_else(|_| d.into()))
+            .collect()
     }
 }
 
@@ -623,6 +657,51 @@ mod tests {
         assert_eq!(a.recycle_bin_days, 90);
         assert_eq!(a.levels.threshold(), Confidence::Medium);
         assert!(!parse("orphans").never_asks());
+    }
+
+    #[test]
+    fn crash_dumps_can_be_narrowed_to_single_dumps_and_programs() {
+        let cli = parse(
+            r"clean --crash-dumps --dump C:\Dumps\app.exe.1.dmp --dump C:\Dumps\b.exe.2.dmp --skip-dumps-of tool.exe",
+        );
+        let Commands::Clean(a) = cli.command else {
+            panic!("not clean");
+        };
+        assert_eq!(
+            a.dumps(),
+            [
+                std::path::PathBuf::from(r"C:\Dumps\app.exe.1.dmp"),
+                std::path::PathBuf::from(r"C:\Dumps\b.exe.2.dmp"),
+            ]
+        );
+        assert_eq!(a.skip_dumps_of, ["tool.exe"]);
+        for args in [
+            r"clean --dump C:\Dumps\app.exe.1.dmp",
+            "clean --temp --skip-dumps-of tool.exe",
+            "clean --crash-dumps --skip-dumps-of=",
+        ] {
+            let parsed = Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')));
+            assert!(parsed.is_err(), "{args}");
+        }
+    }
+
+    #[test]
+    fn deleting_dead_folders_outright_needs_the_orphans_flag() {
+        let Commands::Clean(a) = parse("clean --orphans --delete-dead").command else {
+            panic!("not clean");
+        };
+        assert!(a.delete_dead);
+        assert!(Cli::try_parse_from(["oxidize", "clean", "--delete-dead"]).is_err());
+        assert!(Cli::try_parse_from(["oxidize", "clean", "--temp", "--delete-dead"]).is_err());
+    }
+
+    #[test]
+    fn build_output_is_its_own_category_and_not_part_of_traces() {
+        let Commands::Clean(a) = parse("clean --build-output").command else {
+            panic!("not clean");
+        };
+        assert_eq!(a.named(), [crate::clean::Category::BuildOutput]);
+        assert!(Cli::try_parse_from(["oxidize", "clean", "--traces", "--build-output"]).is_err());
     }
 
     #[test]

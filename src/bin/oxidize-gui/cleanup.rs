@@ -178,6 +178,7 @@ impl Cleanup {
         Choice {
             categories,
             folders,
+            outright: Vec::new(),
         }
     }
 
@@ -725,6 +726,7 @@ fn category_detail(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding
             "Windows' own tools"
         }
         Category::Orphans => "Oxidize, into a backup first",
+        Category::BuildOutput => "Oxidize, each folder checked again right before it goes",
         _ => "Oxidize, each file checked again right before it goes",
     };
     fact(ui, t, "Cleaned by", cleaned_by);
@@ -976,6 +978,9 @@ mod tests {
         fn running_exes(&self) -> Vec<PathBuf> {
             Vec::new()
         }
+        fn uncommitted(&self, _dir: &std::path::Path) -> Option<bool> {
+            None
+        }
     }
 
     fn folder(name: &str, confidence: Confidence) -> OrphanItem {
@@ -986,6 +991,7 @@ mod tests {
             confidence,
             reason: "test".into(),
             needs_admin: false,
+            proven_dead: false,
         }
     }
 
