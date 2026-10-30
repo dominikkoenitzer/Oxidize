@@ -269,7 +269,7 @@ pub struct CleanArgs {
     /// outright, so their space comes back at once. Proven dead: matched to
     /// a removed program at high confidence, no file in it changed for 30
     /// days or held open, nothing running from it and no git repository in
-    /// it. The other folders still go into a backup.
+    /// it or above it. The other folders still go into a backup.
     #[arg(long, requires = "orphans")]
     pub delete_dead: bool,
 
