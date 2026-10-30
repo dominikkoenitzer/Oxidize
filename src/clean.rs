@@ -1446,7 +1446,7 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
         }
         backed.push((item, o.bytes));
     }
-    let moved = remove_dirs(&backed, opts.make_backups, c);
+    let moved = remove_dirs(&backed, opts.make_backups, false, c);
     if moved > 0 && c.backup.is_some() {
         c.notes.push(
             "moved into the backup; the space comes back once the backup is deleted".to_string(),
@@ -1457,7 +1457,7 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
             "{revived} no longer proven dead, so into the backup instead"
         ));
     }
-    let gone = remove_dirs(&outright, false, c);
+    let gone = remove_dirs(&outright, false, false, c);
     if gone > 0 {
         c.notes
             .push(format!("{gone} proven dead, deleted without a backup"));
@@ -1491,18 +1491,24 @@ fn clean_build(f: &Finding, c: &mut Cleaned, opts: &CleanOptions) {
             Err((reason, bytes)) => c.keep(reason, 1, bytes),
         }
     }
-    remove_dirs(&items, false, c);
+    remove_dirs(&items, false, true, c);
 }
 
 /// Remove whole folders, each with its size, into a backup or for good.
 /// Says how many went.
-fn remove_dirs(items: &[(Leftover, u64)], make_backups: bool, c: &mut Cleaned) -> usize {
+fn remove_dirs(
+    items: &[(Leftover, u64)],
+    make_backups: bool,
+    keep_emptied_parents: bool,
+    c: &mut Cleaned,
+) -> usize {
     if items.is_empty() {
         return 0;
     }
     let ctx = SafetyContext {
         dry_run: false,
         make_backups,
+        keep_emptied_parents,
     };
     let leftovers: Vec<Leftover> = items.iter().map(|(l, _)| l.clone()).collect();
     let mut removed = 0;

@@ -115,6 +115,7 @@ impl Remove for Remover {
         let ctx = SafetyContext {
             dry_run: false,
             make_backups: true,
+            keep_emptied_parents: false,
         };
         safety::remove_leftovers(items, label, &ctx)
     }

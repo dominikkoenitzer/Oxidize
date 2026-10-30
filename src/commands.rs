@@ -39,6 +39,7 @@ impl Global {
         SafetyContext {
             dry_run: self.dry_run,
             make_backups: !self.no_backup,
+            keep_emptied_parents: false,
         }
     }
 
@@ -4603,6 +4604,7 @@ mod tests {
         ];
         let ctx = SafetyContext {
             dry_run: true,
+            keep_emptied_parents: false,
             make_backups: true,
         };
         let outcome = safety::remove_leftovers(&selected, "Example Player", &ctx).unwrap();

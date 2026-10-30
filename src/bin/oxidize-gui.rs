@@ -316,6 +316,7 @@ impl OxidizeApp {
         SafetyContext {
             dry_run: self.dry_run,
             make_backups: self.make_backups,
+            keep_emptied_parents: false,
         }
     }
 
@@ -4011,6 +4012,7 @@ mod tests {
     fn the_confirm_text_follows_the_settings() {
         let ctx = |dry_run, make_backups| SafetyContext {
             dry_run,
+            keep_emptied_parents: false,
             make_backups,
         };
         assert_eq!(
