@@ -848,18 +848,28 @@ pub fn remove_whole(p: &Path) -> std::io::Result<()> {
 /// Test seams in the whole delete. Each test runs on its own thread.
 #[cfg(all(test, windows))]
 pub(crate) mod hooks {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::path::Path;
 
     type Hook = Box<dyn Fn(&Path)>;
 
     thread_local! {
         static BEFORE_OPEN: RefCell<Option<Hook>> = RefCell::new(None);
+        static NO_POSIX: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Run `f` on each folder right before it is opened for deletion.
     pub(crate) fn before_open(f: impl Fn(&Path) + 'static) {
         BEFORE_OPEN.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    /// Act as a file system without POSIX delete.
+    pub(crate) fn refuse_posix() {
+        NO_POSIX.with(|c| c.set(true));
+    }
+
+    pub(super) fn posix_refused() -> bool {
+        NO_POSIX.with(Cell::get)
     }
 
     pub(super) fn opening(dir: &Path) {
@@ -998,6 +1008,8 @@ fn open_for_delete(path: &Path, share: u32) -> std::io::Result<fs::File> {
 
 /// Mark an open file or folder to go when it is closed, read-only or not,
 /// or take the mark back. A program file that runs refuses the mark.
+/// Where the file system has no POSIX delete, such as FAT, the plain mark
+/// is used, and a read-only file refuses it.
 #[cfg(windows)]
 fn mark(file: &fs::File, delete: bool) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
@@ -1006,17 +1018,46 @@ fn mark(file: &fs::File, delete: bool) -> std::io::Result<()> {
     const DELETE: u32 = 0x1;
     const POSIX_SEMANTICS: u32 = 0x2;
     const IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
+    let handle = HANDLE(file.as_raw_handle());
     let flags: u32 = if delete {
         DELETE | POSIX_SEMANTICS | IGNORE_READONLY_ATTRIBUTE
     } else {
         0
     };
-    unsafe {
+    #[cfg(test)]
+    if hooks::posix_refused() {
+        return plain_mark(handle, delete);
+    }
+    let posix = unsafe {
         SetFileInformationByHandle(
-            HANDLE(file.as_raw_handle()),
+            handle,
             FileDispositionInfoEx,
             (&flags as *const u32).cast(),
             4,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF));
+    // The codes for a request the file system does not know.
+    match posix {
+        Err(e) if matches!(e.raw_os_error(), Some(87 | 50 | 1)) => plain_mark(handle, delete),
+        other => other,
+    }
+}
+
+/// The mark every file system knows. The file goes when its last handle
+/// closes, and the mark can be taken back until then.
+#[cfg(windows)]
+fn plain_mark(handle: windows::Win32::Foundation::HANDLE, delete: bool) -> std::io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{
+        FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+    };
+    let info = FILE_DISPOSITION_INFO { DeleteFile: delete };
+    unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfo,
+            (&info as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
         )
     }
     .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))
@@ -1353,6 +1394,52 @@ mod tests {
             fs::read_to_string(real.join(r"src\a.txt")).unwrap(),
             "first"
         );
+    }
+
+    #[test]
+    fn without_posix_delete_a_whole_folder_still_goes() {
+        let root = TestDir::new("oxidize_whole_plain_test");
+        let src = root.join("src");
+        fs::create_dir_all(src.join(r"a\b")).unwrap();
+        fs::write(src.join("top.txt"), "top").unwrap();
+        fs::write(src.join(r"a\b\deep.txt"), "deep").unwrap();
+        hooks::refuse_posix();
+
+        remove_whole(&src).unwrap();
+        assert!(!src.exists());
+    }
+
+    #[test]
+    fn without_posix_delete_a_folder_with_a_file_held_open_stays_whole() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_plain_locked_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        hooks::refuse_posix();
+
+        remove_whole(&src).unwrap_err();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        drop(held);
+    }
+
+    #[test]
+    fn without_posix_delete_a_read_only_file_keeps_the_folder_whole() {
+        let root = TestDir::new("oxidize_whole_plain_read_only_test");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        let locked = src.join("z.txt");
+        fs::write(&locked, "read only").unwrap();
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&locked, perms.clone()).unwrap();
+        hooks::refuse_posix();
+
+        remove_whole(&src).unwrap_err();
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+        assert!(locked.exists());
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&locked, perms).unwrap();
     }
 
     #[test]
