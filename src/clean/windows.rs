@@ -132,7 +132,7 @@ impl Tools for WindowsTools {
     }
 
     fn uncommitted(&self, dir: &Path) -> Option<bool> {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(git_on(&std::env::var_os("PATH")?)?);
         cmd.arg("-C").arg(dir).args(GIT_STATUS);
         #[cfg(windows)]
         {
@@ -145,6 +145,16 @@ impl Tools for WindowsTools {
             .success()
             .then(|| out.stdout.iter().any(|b| !b.is_ascii_whitespace()))
     }
+}
+
+/// git.exe in the first absolute folder on `path` that holds one. Run by
+/// bare name, Windows would look in the program's own folder and the
+/// current one first.
+fn git_on(path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join("git.exe"))
+        .find(|exe| exe.is_file())
 }
 
 fn dism() -> String {
@@ -356,6 +366,23 @@ The operation completed successfully.
         assert_eq!(WindowsTools.uncommitted(&root), Some(false));
         std::fs::write(root.join("notes.txt"), "work").unwrap();
         assert_eq!(WindowsTools.uncommitted(&root), Some(true));
+    }
+
+    #[test]
+    fn git_is_found_only_by_a_full_path() {
+        let root = super::super::files::tests::fixture("git_path");
+        let (empty, first, second) = (root.join("empty"), root.join("first"), root.join("second"));
+        for dir in [&empty, &first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(first.join("git.exe"), "").unwrap();
+        std::fs::write(second.join("git.exe"), "").unwrap();
+        // The same folder without its drive is not a full path.
+        let no_drive = PathBuf::from(&first.to_str().unwrap()[2..]);
+        let path = std::env::join_paths([no_drive, empty.clone(), second.clone(), first]).unwrap();
+        assert_eq!(git_on(&path), Some(second.join("git.exe")));
+        let path = std::env::join_paths([empty, PathBuf::from("bin")]).unwrap();
+        assert_eq!(git_on(&path), None);
     }
 
     #[test]
