@@ -856,6 +856,7 @@ impl OxidizeApp {
                 Msg::Error(e) => {
                     // A cleaning that stopped is no longer under way.
                     self.cleanup.cleaning = false;
+                    self.cleanup.drop_look_tick();
                     self.log.extend(system::take_tool_log());
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
@@ -1414,6 +1415,9 @@ impl OxidizeApp {
         // An unreadable protected list stands in as an empty one, which
         // would protect nothing.
         if let Some(why) = self.cleanup.refusal(&action) {
+            if matches!(action, Action::FindBuildOutput) {
+                self.cleanup.drop_look_tick();
+            }
             self.status = why;
             return;
         }
@@ -3621,6 +3625,69 @@ mod tests {
         }
         assert!(app.log.is_empty(), "{:?}", app.log);
         assert_eq!(app.jobs, 0);
+    }
+
+    /// An analysis with the build output row ticked to look, as a click
+    /// leaves it before the look runs.
+    fn ticked_to_look(app: &mut OxidizeApp) {
+        app.cleanup
+            .take_analysis(clean::Places::default(), cleanup::tests::analysis());
+        let (_, analysis) = app.cleanup.analysis.as_ref().unwrap();
+        let skipped = analysis
+            .finding(clean::Category::BuildOutput)
+            .unwrap()
+            .clone();
+        assert!(skipped.skipped);
+        app.cleanup.set(&skipped, true);
+        assert!(app.cleanup.ticked.contains(&clean::Category::BuildOutput));
+    }
+
+    #[test]
+    fn a_refused_look_for_build_output_leaves_no_tick() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        ticked_to_look(&mut app);
+        app.cleanup.unreadable =
+            Some(r"reading C:\Example\protected.txt: stream did not contain valid UTF-8".into());
+        app.act(&ctx, Action::FindBuildOutput);
+        assert!(
+            app.status.starts_with("Cannot clean up: "),
+            "{}",
+            app.status
+        );
+        assert_eq!(app.jobs, 0);
+        assert!(!app.cleanup.ticked.contains(&clean::Category::BuildOutput));
+    }
+
+    #[test]
+    fn a_failed_look_for_build_output_leaves_no_tick() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        ticked_to_look(&mut app);
+        app.jobs = 1;
+        app.tx
+            .send(Msg::Error("the operation stopped unexpectedly".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert!(!app.cleanup.ticked.contains(&clean::Category::BuildOutput));
+
+        // Build output that was found keeps its tick when other work fails.
+        let (_, analysis) = app.cleanup.analysis.as_ref().unwrap();
+        let mut found = analysis
+            .finding(clean::Category::BuildOutput)
+            .unwrap()
+            .clone();
+        found.skipped = false;
+        found.count = 2;
+        found.bytes = 300;
+        app.cleanup.take_build_output(found.clone());
+        app.cleanup.set(&found, true);
+        app.jobs = 1;
+        app.tx
+            .send(Msg::Error("the clean stopped".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.cleanup.ticked.contains(&clean::Category::BuildOutput));
     }
 
     #[test]
