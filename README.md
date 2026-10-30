@@ -81,8 +81,8 @@ oxidize clean --traces --yes          clear every trace
 
 Naming categories cleans exactly those: `--temp`, `--crash-dumps`,
 `--recycle-bin`, `--browser-cache`, `--component-store`,
-`--delivery-optimization`, `--windows-old` and `--orphans`.
-`--recycle-bin-days` sets the Recycle Bin's age. In the window, the Clean up
+`--delivery-optimization`, `--windows-old`, `--orphans` and
+`--build-output`. `--recycle-bin-days` sets the Recycle Bin's age. In the window, the Clean up
 tab does the same: Analyse, tick, clean.
 
 Temporary files go only when they were neither written nor created for 7
@@ -105,8 +105,23 @@ through Disk Cleanup: after that there is no going back to the Windows you
 upgraded from. Folders of removed programs are the folders no installed
 program claims, scored against the programs Oxidize and Windows Installer
 removed: only high-confidence ones are chosen by default, and they go into a
-backup like any other leftover, so `oxidize restore` puts them back. Deleted
-temporary files, dumps, caches and Recycle Bin items do not come back.
+backup like any other leftover, so `oxidize restore` puts them back. A backup
+on the same drive frees nothing until it is deleted, so `--delete-dead`
+deletes the chosen folders that are proven dead outright: no file in them
+changed for 30 days or held open, nothing running from them and no git
+repository in or above them. Each is checked again right before it goes,
+and one that came alive goes into the backup instead. Stale build output is
+only ever cleaned when you name it: folders a build or package tool marked
+as its cache with a `CACHEDIR.TAG` file, in your profile but outside the
+temp folders, with nothing in them changed for 30 days. One inside a git
+checkout goes only while `git status` shows no uncommitted work, and with
+administrator rights git is not run at all, so those stay. Deleted
+temporary files, dumps, caches, build output and Recycle Bin items do not
+come back.
+
+`--dump <path>` cleans only the dumps named, as the plan lists them, and
+`--skip-dumps-of <program>` leaves one program's dumps; both go with
+`--crash-dumps`, and what they leave is counted as left out.
 
 Folders you list in `%LOCALAPPDATA%\Oxidize\protected.txt`, one per line,
 are never cleaned, with everything in them, temp folders included. `%TEMP%`
@@ -253,7 +268,7 @@ already gone; while it is still installed, use `oxidize uninstall`.
 `oxidize clean` only shows what it would clean; `--yes` cleans it. Without a
 category flag it takes the safe set, with one or more it takes exactly those.
 `--orphans` takes high-confidence folders, `--medium` and `--all` widen it as
-for leftovers. `--elevate` brings back the elevated run's output, because
+for leftovers, and `--delete-dead` deletes the proven dead ones outright. `--elevate` brings back the elevated run's output, because
 `clean` never asks a question.
 
 `oxidize uninstall <program> --yes` removes a program completely in one go.
