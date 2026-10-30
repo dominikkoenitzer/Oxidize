@@ -837,7 +837,14 @@ pub fn remove_whole(p: &Path) -> std::io::Result<()> {
                 stuck = stuck.or(Some(u));
             }
         }
-        return Err(stuck.map_or(e, partly_gone));
+        return Err(match stuck {
+            // Both reasons: what is gone, and why the delete stopped.
+            Some(u) => {
+                let gone = partly_gone(u);
+                std::io::Error::new(gone.kind(), format!("{gone}; the delete stopped: {e}"))
+            }
+            None => e,
+        });
     }
     let mut gone = !marked.is_empty();
     // Closing the last handle deletes each file.
@@ -1485,6 +1492,21 @@ mod tests {
         assert!(err.to_string().contains("gone already"), "{err}");
         assert!(!src.join("a.txt").exists());
         assert!(src.join("z.txt").exists());
+        drop(held);
+    }
+
+    #[test]
+    fn a_mark_that_cannot_be_taken_back_keeps_why_the_delete_stopped() {
+        // Declared before the held file, so it is closed when the guard runs.
+        let root = TestDir::new("oxidize_whole_unmark_reason_test");
+        let (src, held) = folder_with_a_locked_file(&root);
+        hooks::refuse_unmark();
+
+        let err = remove_whole(&src).unwrap_err();
+        let held_open = std::io::Error::from_raw_os_error(32).to_string();
+        assert!(err.to_string().contains("gone already"), "{err}");
+        assert!(err.to_string().contains(&held_open), "{err}");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
         drop(held);
     }
 
