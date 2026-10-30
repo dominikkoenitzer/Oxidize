@@ -845,6 +845,32 @@ pub fn remove_whole(p: &Path) -> std::io::Result<()> {
     remove_path(p)
 }
 
+/// Test seams in the whole delete. Each test runs on its own thread.
+#[cfg(all(test, windows))]
+pub(crate) mod hooks {
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    type Hook = Box<dyn Fn(&Path)>;
+
+    thread_local! {
+        static BEFORE_OPEN: RefCell<Option<Hook>> = RefCell::new(None);
+    }
+
+    /// Run `f` on each folder right before it is opened for deletion.
+    pub(crate) fn before_open(f: impl Fn(&Path) + 'static) {
+        BEFORE_OPEN.with(|h| *h.borrow_mut() = Some(Box::new(f)));
+    }
+
+    pub(super) fn opening(dir: &Path) {
+        BEFORE_OPEN.with(|h| {
+            if let Some(f) = h.borrow().as_ref() {
+                f(dir);
+            }
+        });
+    }
+}
+
 /// Open the folder `dir` and everything in it for deletion, each folder
 /// before what it holds, and mark every file. Stops at the first that will
 /// not open or take the mark.
@@ -852,9 +878,14 @@ pub fn remove_whole(p: &Path) -> std::io::Result<()> {
 fn hold(dir: &Path, dirs: &mut Vec<fs::File>, marked: &mut Vec<fs::File>) -> std::io::Result<()> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
+        #[cfg(test)]
+        hooks::opening(&d);
         // Read sharing lets the folder be listed; a program working in it
         // holds it without delete sharing, and the open fails.
-        dirs.push(open_for_delete(&d, 1)?);
+        let held = open_for_delete(&d, 1)?;
+        // Held without delete sharing, it can no longer be swapped for a link.
+        real_folder(&held, (d == dir).then_some(dir))?;
+        dirs.push(held);
         for entry in fs::read_dir(&d)? {
             let path = entry?.path();
             let meta = fs::symlink_metadata(&path)?;
@@ -868,6 +899,87 @@ fn hold(dir: &Path, dirs: &mut Vec<fs::File>, marked: &mut Vec<fs::File>) -> std
         }
     }
     Ok(())
+}
+
+/// Refuse a held folder that is a link or no folder, and the top folder
+/// when the handle leads to another place than the path `top`.
+#[cfg(windows)]
+fn real_folder(held: &fs::File, top: Option<&Path>) -> std::io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        FileAttributeTagInfo, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO,
+        FILE_NAME_NORMALIZED,
+    };
+    let handle = HANDLE(held.as_raw_handle());
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    }
+    .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+    if info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+        || info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+    {
+        return Err(std::io::Error::other(
+            "the folder changed while it was being deleted",
+        ));
+    }
+    let Some(top) = top else {
+        return Ok(());
+    };
+    let mut buf = vec![0u16; 32_768];
+    let n = unsafe { GetFinalPathNameByHandleW(handle, &mut buf, FILE_NAME_NORMALIZED) } as usize;
+    if n == 0 || n >= buf.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    if same_place(&String::from_utf16_lossy(&buf[..n]), &long_name(top)?) {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "the path to the folder goes through a link",
+        ))
+    }
+}
+
+/// `p` as a full path with its short 8.3 names spelled out.
+#[cfg(windows)]
+fn long_name(p: &Path) -> std::io::Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    let full = std::path::absolute(p)?;
+    let wide: Vec<u16> = full
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buf = vec![0u16; 32_768];
+    let n = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+    if n == 0 || n >= buf.len() {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(String::from_utf16_lossy(&buf[..n]))
+}
+
+/// Whether two full paths name the same place, with or without the `\\?\`
+/// prefix, in any case.
+#[cfg(windows)]
+fn same_place(a: &str, b: &str) -> bool {
+    fn plain(s: &str) -> String {
+        let s = s.replace('/', r"\");
+        let s = match s.strip_prefix(r"\\?\UNC\") {
+            Some(rest) => format!(r"\\{rest}"),
+            None => s.strip_prefix(r"\\?\").unwrap_or(&s).to_string(),
+        };
+        s.trim_end_matches('\\').to_lowercase()
+    }
+    plain(a) == plain(b)
 }
 
 /// Open `path` itself for deletion, never what a link points to.
@@ -1190,6 +1302,64 @@ mod tests {
             fs::read_to_string(outside.join("kept.txt")).unwrap(),
             "kept"
         );
+    }
+
+    fn junction(link: &Path, target: &Path) {
+        let made = std::process::Command::new(crate::system::system32("cmd.exe"))
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+    }
+
+    #[test]
+    fn a_folder_swapped_for_a_link_during_the_delete_is_not_followed() {
+        let root = TestDir::new("oxidize_whole_swap_test");
+        let src = root.join("src");
+        let outside = root.join("outside");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "first").unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("kept.txt"), "kept").unwrap();
+        // After `src` is listed, `sub` turns into a link to `outside`.
+        let swap = outside.clone();
+        hooks::before_open(move |d| {
+            if d.ends_with("sub") && !d.is_symlink() {
+                fs::remove_dir(d).unwrap();
+                junction(d, &swap);
+            }
+        });
+
+        remove_whole(&src).unwrap_err();
+        assert_eq!(
+            fs::read_to_string(outside.join("kept.txt")).unwrap(),
+            "kept"
+        );
+        assert_eq!(fs::read_to_string(src.join("a.txt")).unwrap(), "first");
+    }
+
+    #[test]
+    fn a_folder_reached_through_a_link_is_not_deleted() {
+        let root = TestDir::new("oxidize_whole_through_test");
+        let real = root.join("real");
+        fs::create_dir_all(real.join("src")).unwrap();
+        fs::write(real.join(r"src\a.txt"), "first").unwrap();
+        junction(&root.join("link"), &real);
+
+        remove_whole(&root.join(r"link\src")).unwrap_err();
+        assert_eq!(
+            fs::read_to_string(real.join(r"src\a.txt")).unwrap(),
+            "first"
+        );
+    }
+
+    #[test]
+    fn the_same_place_is_found_under_any_spelling() {
+        assert!(same_place(r"\\?\C:\Users\Ann\Temp\", "c:/users/ann/temp"));
+        assert!(same_place(r"\\?\UNC\server\share\x", r"\\server\share\x"));
+        assert!(!same_place(r"\\?\D:\dev\x", r"C:\dev\x"));
     }
 
     #[test]
