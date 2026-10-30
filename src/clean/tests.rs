@@ -1209,6 +1209,46 @@ fn a_folder_that_came_alive_since_the_analysis_goes_into_the_backup() {
 }
 
 #[test]
+fn each_dead_folder_is_checked_after_the_one_before_it_went() {
+    let pc = Pc::new("orphans_in_turn");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, false);
+    let mut choice = a.choice(&[Category::Orphans], Confidence::High);
+    a.delete_dead(&mut choice);
+    assert_eq!(choice.outright.len(), 2);
+
+    // Whichever goes first, the other one is written to as it goes.
+    let (q, i) = (quill.path.clone(), ink.path.clone());
+    crate::backup::hooks::before_open(move |d| {
+        let other = if d == q {
+            &i
+        } else if d == i {
+            &q
+        } else {
+            return;
+        };
+        fs::write(other.join("new.txt"), "fresh").unwrap();
+    });
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(o
+        .notes
+        .contains(&"1 proven dead, deleted without a backup".to_string()));
+    assert!(o
+        .notes
+        .contains(&"1 no longer proven dead, so into the backup instead".to_string()));
+
+    let info = crate::backup::find_backup(o.backup.as_ref().expect("a backup")).unwrap();
+    let restored = crate::restore::restore(&info, false).unwrap();
+    assert!(restored.iter().all(|r| r.result.is_ok()));
+    assert!(quill.path.join("new.txt").exists() != ink.path.join("new.txt").exists());
+    crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
 fn only_a_high_confidence_folder_is_ever_deleted_outright() {
     let pc = Pc::new("orphans_unsure");
     let tools = FakeTools::default();
