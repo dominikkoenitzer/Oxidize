@@ -59,7 +59,9 @@ pub fn proven_dead(dir: &Path, now: SystemTime, running: &[PathBuf]) -> bool {
                     return false;
                 }
                 stack.push(path);
-            } else if !files::old_enough(&meta, &rule, now) || files::probe(&path) != Probe::Free {
+            } else if !files::old_enough(&meta, &rule, now)
+                || files::probe_for_good(&path) != Probe::Free
+            {
                 return false;
             }
         }
@@ -115,6 +117,26 @@ mod tests {
             SystemTime::now(),
             &[]
         ));
+    }
+
+    #[test]
+    fn a_running_program_file_keeps_the_folder_alive_without_the_process_list() {
+        let root = fixture("dead_loaded");
+        let dir = root.join("Quillmark");
+        fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("quill.exe");
+        fs::copy(crate::system::system32("PING.EXE"), &exe).unwrap();
+        age(&exe, 90);
+        let mut child = std::process::Command::new(&exe)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        // A running program holds no handle on its own file.
+        let dead = proven_dead(&dir, SystemTime::now(), &[]);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!dead);
     }
 
     #[test]

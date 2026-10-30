@@ -124,12 +124,27 @@ pub enum Probe {
 /// read or written.
 #[cfg(windows)]
 pub fn probe(path: &Path) -> Probe {
-    use std::os::windows::fs::OpenOptionsExt;
     const DELETE: u32 = 0x0001_0000;
+    open_alone(path, DELETE)
+}
+
+/// [`probe`] for a file that goes without a backup. Write access is asked
+/// too: a program file that runs or is loaded refuses it, though no
+/// program holds it open. A read-only file is refused as well.
+#[cfg(windows)]
+pub fn probe_for_good(path: &Path) -> Probe {
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_WRITE_DATA: u32 = 0x0002;
+    open_alone(path, DELETE | FILE_WRITE_DATA)
+}
+
+#[cfg(windows)]
+fn open_alone(path: &Path, access: u32) -> Probe {
+    use std::os::windows::fs::OpenOptionsExt;
     // Opens the reparse point itself, never what it points to.
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
     match fs::OpenOptions::new()
-        .access_mode(DELETE)
+        .access_mode(access)
         .share_mode(0)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
         .open(path)
@@ -141,6 +156,11 @@ pub fn probe(path: &Path) -> Probe {
 
 #[cfg(not(windows))]
 pub fn probe(_path: &Path) -> Probe {
+    Probe::Free
+}
+
+#[cfg(not(windows))]
+pub fn probe_for_good(_path: &Path) -> Probe {
     Probe::Free
 }
 

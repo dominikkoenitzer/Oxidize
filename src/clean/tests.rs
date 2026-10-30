@@ -1378,3 +1378,43 @@ fn build_output_written_to_or_protected_since_the_analysis_stays() {
     assert!(used.join("CACHEDIR.TAG").exists());
     assert!(kept_dir.join("CACHEDIR.TAG").exists());
 }
+
+#[test]
+fn build_output_a_program_runs_from_or_holds_open_stays_whole() {
+    use super::build::tests::cache;
+    let pc = Pc::new("build_in_use");
+    let code = pc.root.join(r"Profile\code");
+    let ran = code.join(r"one\target");
+    let open = code.join(r"two\target");
+    let runs = code.join(r"three\target");
+    for dir in [&ran, &open, &runs] {
+        cache(dir, 30, 60);
+    }
+    let tools = FakeTools::default();
+    let at_analysis = [ran.join(r"debug\tool.exe")];
+    let a = analyse_with(
+        &pc,
+        &Protected::default(),
+        false,
+        &at_analysis,
+        &tools,
+        &no_orphans,
+    );
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert_eq!(f.count, 2);
+    assert_eq!(kept(&f.kept, &KeptReason::InUse).0, 1);
+
+    let _held = fs::File::open(open.join(r"debug\deps\out.bin")).unwrap();
+    *tools.running.lock().unwrap() = vec![runs.join(r"debug\tool.exe")];
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (0, 0));
+    assert_eq!(kept(&done[0].kept, &KeptReason::InUse).0, 2);
+    for dir in [&ran, &open, &runs] {
+        assert!(
+            dir.join(r"debug\deps\out.bin").exists(),
+            "{}",
+            dir.display()
+        );
+    }
+}

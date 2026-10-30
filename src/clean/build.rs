@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use serde::Serialize;
 
-use super::files::{self, Kind};
+use super::files::{self, Kind, Probe};
 use super::protect::{self, Protected};
 use super::windows::Tools;
 use super::KeptReason;
@@ -106,16 +106,21 @@ struct Contents {
     bytes: u64,
     newest: SystemTime,
     repository: bool,
+    /// How the first file that would not open for deletion answered, when
+    /// the files were probed.
+    held: Option<Probe>,
 }
 
 /// What `dir` holds. None when any of it cannot be read, or is a cloud
-/// placeholder or another file whose data may live elsewhere.
-fn contents(dir: &Path) -> Option<Contents> {
+/// placeholder or another file whose data may live elsewhere. With
+/// `probe`, each file is opened for deletion too.
+fn contents(dir: &Path, probe: bool) -> Option<Contents> {
     let meta = fs::symlink_metadata(dir).ok()?;
     let mut out = Contents {
         bytes: 0,
         newest: files::last_change(&meta)?,
         repository: false,
+        held: None,
     };
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -133,6 +138,9 @@ fn contents(dir: &Path) -> Option<Contents> {
                 stack.push(path);
             } else {
                 out.bytes += meta.len();
+                if probe && out.held.is_none() {
+                    out.held = Some(files::probe_for_good(&path)).filter(|p| *p != Probe::Free);
+                }
             }
         }
     }
@@ -149,11 +157,16 @@ pub struct Check<'a> {
     pub tools: &'a dyn Tools,
     /// Each checkout's answer, asked once.
     pub checkouts: HashMap<PathBuf, Option<bool>>,
+    /// Executables of the running processes.
+    pub running: &'a [PathBuf],
+    /// Open each file for deletion as well, right before the folder goes.
+    pub probe: bool,
 }
 
 /// May the tagged folder `dir` go? Asked by the analysis and again right
 /// before it goes. When it stays, says why, with its bytes where they are
-/// known.
+/// known. A program running from it, or a file in it that is open or
+/// loaded, keeps it whole.
 pub fn assess(dir: &Path, check: &mut Check) -> Result<BuildFolder, (KeptReason, u64)> {
     if check.protected.touches(dir) {
         return Err((KeptReason::Protected, 0));
@@ -165,13 +178,25 @@ pub fn assess(dir: &Path, check: &mut Check) -> Result<BuildFolder, (KeptReason,
             0,
         ));
     }
-    let c = contents(dir).ok_or((KeptReason::Unreadable, 0))?;
+    let c = contents(dir, check.probe).ok_or((KeptReason::Unreadable, 0))?;
     if c.repository || files::is_repository(dir) {
         return Err((KeptReason::Repository, c.bytes));
     }
     let age = check.now.duration_since(c.newest).unwrap_or_default();
     if age < super::days_ago(BUILD_DAYS) {
         return Err((KeptReason::Recent(BUILD_DAYS), c.bytes));
+    }
+    if check
+        .running
+        .iter()
+        .any(|exe| crate::system::path_under(exe, dir))
+    {
+        return Err((KeptReason::InUse, c.bytes));
+    }
+    match c.held {
+        None => {}
+        Some(Probe::InUse) => return Err((KeptReason::InUse, c.bytes)),
+        Some(_) => return Err((KeptReason::AccessDenied, c.bytes)),
     }
     let checkout = files::repository_above(dir, &mut HashMap::new());
     if let Some(repo) = &checkout {
@@ -259,9 +284,9 @@ pub(crate) mod tests {
             let root = fixture(name);
             let dir = root.join("target");
             cache(&dir, 10, 60);
-            assert!(contents(&dir).is_some(), "{name}");
+            assert!(contents(&dir, false).is_some(), "{name}");
             mark(&dir.join(r"debug\deps\out.bin"), letter);
-            assert!(contents(&dir).is_none(), "{name}");
+            assert!(contents(&dir, false).is_none(), "{name}");
         }
     }
 
