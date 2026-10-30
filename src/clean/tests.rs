@@ -1535,6 +1535,23 @@ fn a_tagged_folder_counts_only_beside_a_project_or_ignored_by_git() {
     fs::create_dir_all(checkout.join(".git")).unwrap();
     let ignored = checkout.join("out");
     let ignored_bytes = bare_cache(&ignored, 10, 60);
+    let rows = [
+        (r"kts\build", "BUILD.GRADLE.KTS"),
+        (r"gradle\build", "Settings.Gradle"),
+        (r"fsharp\obj", "Tool.FSPROJ"),
+        (r"vb\obj", "Tool.VbProj"),
+        (r"cpp\x64", "Tool.VCXPROJ"),
+        (r"meson\builddir", "Meson.Build"),
+        (r"python\build", "SETUP.PY"),
+    ];
+    let mut projects = Vec::new();
+    let mut projects_bytes = 0;
+    for (dir, file) in rows {
+        let out = code.join(dir);
+        projects_bytes += bare_cache(&out, 10, 60);
+        fs::write(out.parent().unwrap().join(file), "").unwrap();
+        projects.push(out);
+    }
     let tools = tools_uncommitted(Some(false));
     *tools.ignored.lock().unwrap() = Some(true);
     let asked = |t: &FakeTools| t.calls().iter().filter(|c| **c == "ignored").count();
@@ -1544,9 +1561,10 @@ fn a_tagged_folder_counts_only_beside_a_project_or_ignored_by_git() {
     let mut found: Vec<&Path> = f.build_folders.iter().map(|b| b.path.as_path()).collect();
     found.sort();
     let mut want = vec![dotnet.as_path(), ignored.as_path()];
+    want.extend(projects.iter().map(|p| p.as_path()));
     want.sort();
     assert_eq!(found, want);
-    assert_eq!(f.bytes, dotnet_bytes + ignored_bytes);
+    assert_eq!(f.bytes, dotnet_bytes + ignored_bytes + projects_bytes);
     assert!(f.kept.is_empty(), "the others are not build output at all");
     assert_eq!(asked(&tools), 1, "git is asked only in a checkout");
 
@@ -1554,10 +1572,16 @@ fn a_tagged_folder_counts_only_beside_a_project_or_ignored_by_git() {
     *tools.ignored.lock().unwrap() = Some(false);
     let choice = a.choice(&[Category::BuildOutput], Confidence::High);
     let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
-    assert_eq!((done[0].removed, done[0].freed), (1, dotnet_bytes));
+    assert_eq!(
+        (done[0].removed, done[0].freed),
+        (1 + rows.len(), dotnet_bytes + projects_bytes)
+    );
     let gone_off = KeptReason::Failed("no longer looks like build output".into());
     assert_eq!(kept(&done[0].kept, &gone_off).0, 1);
     assert!(!dotnet.exists());
+    for gone in &projects {
+        assert!(!gone.exists(), "{}", gone.display());
+    }
     for stays in [&bare, &odd, &ignored] {
         assert!(stays.join("CACHEDIR.TAG").exists(), "{}", stays.display());
     }

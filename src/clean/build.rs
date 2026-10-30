@@ -31,16 +31,22 @@ const TAG: &str = "CACHEDIR.TAG";
 const SIGNATURE: &[u8; 43] = b"Signature: 8a477f597d28d172789f06886806bc55";
 
 /// Files that make the folder they are in a project, so a tagged folder
-/// beside them is that project's build output. Project files ending in
-/// `.csproj` count too.
-const PROJECT_FILES: [&str; 6] = [
+/// beside them is that project's build output.
+const PROJECT_FILES: [&str; 10] = [
     "Cargo.toml",
     "package.json",
     "pyproject.toml",
+    "setup.py",
     "CMakeLists.txt",
+    "meson.build",
     "build.gradle",
+    "build.gradle.kts",
+    "settings.gradle",
     "go.mod",
 ];
+
+/// Project files named for their project carry one of these endings.
+const PROJECT_EXTENSIONS: [&str; 4] = ["csproj", "fsproj", "vbproj", "vcxproj"];
 
 /// A build folder that would go.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -80,7 +86,7 @@ fn holds_a_project(dir: &Path) -> bool {
         let named = PROJECT_FILES.iter().any(|p| name.eq_ignore_ascii_case(p))
             || Path::new(&name)
                 .extension()
-                .is_some_and(|x| x.eq_ignore_ascii_case("csproj"));
+                .is_some_and(|x| PROJECT_EXTENSIONS.iter().any(|p| x.eq_ignore_ascii_case(p)));
         named && e.file_type().is_ok_and(|t| t.is_file())
     })
 }
