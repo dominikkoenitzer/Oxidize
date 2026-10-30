@@ -978,6 +978,7 @@ fn a_temp_folder_that_is_no_temp_folder_is_never_walked_or_cleaned() {
         let chosen = Choice {
             categories: vec![Category::Temp],
             folders: Vec::new(),
+            outright: Vec::new(),
         };
         let done = clean_with(&pc, &a, &chosen, &Protected::default(), true, &tools);
         assert_eq!((done[0].removed, done[0].freed), (0, 0), "{name}");
