@@ -2284,7 +2284,7 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     }
     if !run {
         if !g.json {
-            print_clean_hints(&analysis, &choice, g.dry_run);
+            print_clean_hints(&analysis, &choice, g.dry_run, !g.no_backup);
         }
         return Ok(());
     }
@@ -2565,7 +2565,17 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool) {
+/// The hint for the folders proven dead, which skip the backup a clean makes.
+fn dead_folders_line(dead: usize, backup: bool) -> String {
+    let dead = plural(dead, "folder", "folders");
+    if backup {
+        format!("{dead} proven dead go without a backup; the other folders go into one.")
+    } else {
+        format!("{dead} proven dead go without a backup.")
+    }
+}
+
+fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool, backup: bool) {
     println!();
     let bytes = util::human_size(analysis.chosen_bytes(choice));
     let n = choice.categories.len();
@@ -2586,11 +2596,10 @@ fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool) {
         );
     }
     if !choice.outright.is_empty() {
-        let line = format!(
-            "{} proven dead go without a backup; the other folders go into one.",
-            plural(choice.outright.len(), "folder", "folders")
+        println!(
+            "{}",
+            term::dim(&dead_folders_line(choice.outright.len(), backup))
         );
-        println!("{}", term::dim(&line));
     }
     if !analysis.elevated && analysis.findings.iter().any(|f| f.needs_admin) {
         println!(
@@ -3193,6 +3202,16 @@ mod tests {
     use crate::packages::fake::{package, FakePackageStore};
     use crate::safety::ItemOutcome;
     use clap::Parser;
+
+    #[test]
+    fn the_dead_folder_hint_promises_no_backup_when_backups_are_off() {
+        assert_eq!(
+            dead_folders_line(1, true),
+            "1 folder proven dead go without a backup; the other folders go into one."
+        );
+        let off = dead_folders_line(1, false);
+        assert!(!off.contains("go into one"), "{off}");
+    }
 
     #[test]
     fn the_mcp_server_refuses_the_flags_of_a_single_run() {
