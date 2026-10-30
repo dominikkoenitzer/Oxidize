@@ -100,6 +100,8 @@ enum Msg {
     },
     /// An analysis for the Clean up tab ended.
     Analysed(Box<(clean::Places, clean::Analysis)>),
+    /// The build output the analysis left out was looked for.
+    BuildFound(Box<clean::Finding>),
     /// A cleaning ended.
     Cleaned(Vec<clean::Cleaned>),
     /// The usage traces were read.
@@ -149,6 +151,8 @@ enum Action {
     RestartAdmin,
     /// Analyse what the Clean up tab can clean.
     Analyse,
+    /// Look for the build output the analysis left out.
+    FindBuildOutput,
     /// Clean what was ticked.
     Clean(clean::Choice),
     /// Clear every usage trace.
@@ -472,7 +476,8 @@ impl OxidizeApp {
         self.status = "Analysing what can be cleaned...".to_string();
         let protected = self.cleanup.protected.clone();
         self.spawn(ctx, move || {
-            let (places, analysis) = clean::analyse_this_pc(&protected, clean::RECYCLE_DAYS);
+            let (places, analysis) =
+                clean::analyse_this_pc(&protected, clean::RECYCLE_DAYS, clean::Asked::default());
             Msg::Analysed(Box::new((places, analysis)))
         });
         let protected = self.cleanup.protected.clone();
@@ -480,6 +485,18 @@ impl OxidizeApp {
             let places = clean::traces::TracePlaces::this_pc();
             let shell = clean::traces::shell_for(&places);
             Msg::TracesFound(clean::traces::analyse(&places, &protected, shell.as_ref()))
+        });
+    }
+
+    fn start_find_build_output(&mut self, ctx: &egui::Context) {
+        let Some((places, _)) = &self.cleanup.analysis else {
+            return;
+        };
+        let places = places.clone();
+        self.status = "Looking for build output...".to_string();
+        let protected = self.cleanup.protected.clone();
+        self.spawn(ctx, move || {
+            Msg::BuildFound(Box::new(clean::build_output_this_pc(&places, &protected)))
         });
     }
 
@@ -821,6 +838,13 @@ impl OxidizeApp {
                     let (places, analysis) = *found;
                     self.status = analysed_status(&analysis);
                     self.cleanup.take_analysis(places, analysis);
+                    self.job_done();
+                }
+                Msg::BuildFound(found) => {
+                    self.cleanup.take_build_output(*found);
+                    if let Some((_, analysis)) = &self.cleanup.analysis {
+                        self.status = analysed_status(analysis);
+                    }
                     self.job_done();
                 }
                 Msg::Cleaned(results) => self.on_cleaned(results),
@@ -1438,6 +1462,7 @@ impl OxidizeApp {
                     Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
                 },
                 Action::Analyse => self.start_analyse(ctx),
+                Action::FindBuildOutput => self.start_find_build_output(ctx),
                 Action::Clean(choice) if self.confirm.is_none() => {
                     let Some((_, analysis)) = &self.cleanup.analysis else {
                         return;

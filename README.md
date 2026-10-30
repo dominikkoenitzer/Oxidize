@@ -83,7 +83,8 @@ Naming categories cleans exactly those: `--temp`, `--crash-dumps`,
 `--recycle-bin`, `--browser-cache`, `--component-store`,
 `--delivery-optimization`, `--windows-old`, `--orphans` and
 `--build-output`. `--recycle-bin-days` sets the Recycle Bin's age. In the window, the Clean up
-tab does the same: Analyse, tick, clean.
+tab does the same: Analyse, tick, clean. Build output is looked for there
+only once its row is ticked.
 
 Temporary files go only when they were neither written nor created for 7
 days, in your temp folder and in Windows' own. A git repository stays
@@ -111,8 +112,9 @@ deletes the chosen folders that are proven dead outright: no file in them
 changed for 30 days or held open, nothing running from them, no git
 repository in or above them and no cloud placeholder in them. Each is
 checked again right before it goes and goes whole or not at all, and one
-that came alive goes into the backup instead. Stale build output is
-only ever cleaned when you name it: folders a build or package tool marked
+that came alive goes into the backup instead. Without `--delete-dead` no
+folder is proven dead, so none of their files are opened. Stale build output is
+only ever looked for and cleaned when you name it: folders a build or package tool marked
 as its cache with a `CACHEDIR.TAG` file, in your profile but outside the
 temp folders, with nothing in them changed for 30 days, nothing running
 from them, no file in them held open and no cloud placeholder. One inside a git

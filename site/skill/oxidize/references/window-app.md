@@ -41,7 +41,7 @@ With Dry run ticked, Run uninstaller only logs the command it would run, and the
 
 1. The user clicks Clean up in the top bar, then Analyse. The analysis changes nothing and can take a minute. With Restart as administrator first, Windows' own temp folder and dumps, the component store and the Delivery Optimization cache count too.
 2. Each category shows its size, what it is, and what stays and why. The safe set is ticked: temporary files, crash dumps, browser caches, and folders of removed programs at high confidence. The folders of removed programs open into a list with a tick, a confidence tag and a reason for each.
-3. Go through the ticks with the user. The Recycle Bin, the component store, the Delivery Optimization cache, the previous Windows installation and stale build output are never ticked by themselves. Before the user ticks the previous Windows installation, say that it cannot come back afterwards.
+3. Go through the ticks with the user. The Recycle Bin, the component store, the Delivery Optimization cache, the previous Windows installation and stale build output are never ticked by themselves. Build output is looked for only once its row is ticked; until then the row says tick to look. Before the user ticks the previous Windows installation, say that it cannot come back afterwards.
 4. The user clicks Clean N ticked categories and confirms with Clean. With Dry run ticked, the button only logs what would be cleaned.
 5. The result shows what was freed per category and what stayed. Folders of removed programs went into a backup, and Undo beside them puts them back. Nothing else comes back.
 

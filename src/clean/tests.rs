@@ -230,6 +230,10 @@ fn analyse_with(
             recycle_bin_days: RECYCLE_DAYS,
             tools,
             orphans,
+            asked: Asked {
+                build_output: true,
+                dead: true,
+            },
         },
     )
 }
@@ -641,6 +645,7 @@ fn the_recycle_bin_goes_only_when_chosen_and_only_old_items() {
             recycle_bin_days: 1,
             tools: &tools,
             orphans: &no_orphans,
+            asked: Asked::default(),
         },
     );
     assert_eq!(a.finding(Category::RecycleBin).unwrap().count, 1);
@@ -1206,6 +1211,46 @@ fn a_folder_that_came_alive_since_the_analysis_goes_into_the_backup() {
     assert!(quill.path.join("new.txt").exists());
     assert!(ink.path.join(r"bin\inkwell.exe").exists());
     crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
+fn a_plain_analysis_does_not_look_for_build_output_or_prove_folders_dead() {
+    use super::build::tests::cache;
+    let pc = Pc::new("plain_analysis");
+    let checkout = pc.root.join(r"Profile\code\work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    cache(&checkout.join(r"app\target"), 30, 60);
+    let quill = pc.orphan("Quillmark Studio", 120);
+    let removed = vec![("Quillmark Studio".to_string(), None)];
+    let snap = scanner::Snapshot::with_programs(Vec::new());
+    let scored = score_orphans(std::slice::from_ref(&quill), &removed, &snap);
+    let source = move || scored.clone();
+    let tools = tools_uncommitted(Some(false));
+    let a = analyse(
+        &pc.places,
+        &Options {
+            protected: &Protected::default(),
+            elevated: false,
+            now: SystemTime::now(),
+            running: &[],
+            recycle_bin_days: RECYCLE_DAYS,
+            tools: &tools,
+            orphans: &source,
+            asked: Asked::default(),
+        },
+    );
+    let f = a.finding(Category::BuildOutput).unwrap();
+    assert!(f.skipped);
+    assert!(!f.actionable());
+    assert_eq!((f.count, f.bytes), (0, 0));
+    assert!(f.build_folders.is_empty() && f.kept.is_empty());
+    assert!(!tools.calls().contains(&"uncommitted"), "git is not run");
+    let o = a.finding(Category::Orphans).unwrap();
+    assert_eq!(o.folders.len(), 1);
+    assert!(!o.folders[0].proven_dead);
+    let mut choice = a.choice(&[Category::Orphans], Confidence::High);
+    a.delete_dead(&mut choice);
+    assert!(choice.outright.is_empty());
 }
 
 #[test]

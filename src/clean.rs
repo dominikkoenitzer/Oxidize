@@ -297,6 +297,9 @@ pub struct Finding {
     pub needs_admin: bool,
     /// Part of the safe set that is chosen unless the user says otherwise.
     pub preselected: bool,
+    /// Not looked into, as it was not asked for.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
     /// Orphans only: each folder with how sure the match is.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub folders: Vec<OrphanItem>,
@@ -325,6 +328,7 @@ impl Finding {
             notes: Vec::new(),
             needs_admin: false,
             preselected: false,
+            skipped: false,
             folders: Vec::new(),
             dumps: Vec::new(),
             build_folders: Vec::new(),
@@ -728,6 +732,19 @@ pub struct Options<'a> {
     pub tools: &'a dyn Tools,
     /// The unclaimed folders, already scored.
     pub orphans: &'a (dyn Fn() -> Vec<OrphanItem> + Sync),
+    pub asked: Asked,
+}
+
+/// What the analysis looks into only when asked, as it walks, runs git or
+/// opens files for more than a count.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Asked {
+    /// Build output: the walk of the profile, with git for the folders in a
+    /// checkout.
+    pub build_output: bool,
+    /// Whether the high-confidence orphan folders are proven dead, which
+    /// opens each file in them alone.
+    pub dead: bool,
 }
 
 /// Look at every category. Changes nothing.
@@ -1022,7 +1039,8 @@ fn orphans(opts: &Options) -> Finding {
             f.keep(KeptReason::Protected, 1, item.bytes);
             continue;
         }
-        item.proven_dead = item.confidence == Confidence::High
+        item.proven_dead = opts.asked.dead
+            && item.confidence == Confidence::High
             && dead::proven_dead(&item.path, opts.now, opts.running);
         f.folders.push(item);
     }
@@ -1047,6 +1065,11 @@ fn orphans(opts: &Options) -> Finding {
 
 fn build_output(places: &Places, opts: &Options) -> Finding {
     let mut f = Finding::new(Category::BuildOutput);
+    f.work = Work::Build;
+    if !opts.asked.build_output {
+        f.skipped = true;
+        return f;
+    }
     let skip: Vec<PathBuf> = [&places.user_temp, &places.windows_temp]
         .into_iter()
         .flatten()
@@ -1084,7 +1107,6 @@ fn build_output(places: &Places, opts: &Options) -> Finding {
             "git is not asked with administrator rights, so folders in git checkouts stay".into(),
         );
     }
-    f.work = Work::Build;
     f
 }
 
@@ -1542,7 +1564,11 @@ fn remove_dirs(
 
 /// The analysis of this PC, read the way the command line and the window
 /// both do it.
-pub fn analyse_this_pc(protected: &Protected, recycle_bin_days: u64) -> (Places, Analysis) {
+pub fn analyse_this_pc(
+    protected: &Protected,
+    recycle_bin_days: u64,
+    asked: Asked,
+) -> (Places, Analysis) {
     let places = Places::this_pc();
     let running = crate::system::running_exes();
     let tools = windows::WindowsTools;
@@ -1561,9 +1587,29 @@ pub fn analyse_this_pc(protected: &Protected, recycle_bin_days: u64) -> (Places,
         recycle_bin_days,
         tools: &tools,
         orphans: &source,
+        asked,
     };
     let analysis = analyse(&places, &opts);
     (places, analysis)
+}
+
+/// Build output in `places` alone, for an analysis that left it out.
+pub fn build_output_this_pc(places: &Places, protected: &Protected) -> Finding {
+    let running = crate::system::running_exes();
+    let opts = Options {
+        protected,
+        elevated: safety::is_elevated(),
+        now: SystemTime::now(),
+        running: &running,
+        recycle_bin_days: RECYCLE_DAYS,
+        tools: &windows::WindowsTools,
+        orphans: &Vec::<OrphanItem>::new,
+        asked: Asked {
+            build_output: true,
+            dead: false,
+        },
+    };
+    build_output(places, &opts)
 }
 
 /// Clean on this PC.
