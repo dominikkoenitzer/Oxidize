@@ -73,13 +73,16 @@ pub trait Tools: Send + Sync {
 
 /// `git status` in its short form, for scripts. Its file system monitor,
 /// a program a checkout's settings can name, is never started, and no
-/// lock is taken that a running git would trip over.
+/// lock is taken that a running git would trip over. Untracked files and
+/// submodules are shown whatever the checkout's settings say.
 pub const GIT_STATUS: &[&str] = &[
     "-c",
     "core.fsmonitor=false",
     "--no-optional-locks",
     "status",
     "--porcelain",
+    "--untracked-files=normal",
+    "--ignore-submodules=none",
 ];
 
 /// The real tools.
@@ -334,6 +337,25 @@ The operation completed successfully.
         );
         assert!(!text.contains(char::REPLACEMENT_CHARACTER), "{text}");
         assert_eq!(tool_text(b"14 2254147166\r\n"), "14 2254147166\r\n");
+    }
+
+    #[test]
+    fn git_shows_untracked_work_the_checkout_hides() {
+        let root = super::super::files::tests::fixture("git_hidden");
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&*root)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "status.showUntrackedFiles", "no"]);
+        assert_eq!(WindowsTools.uncommitted(&root), Some(false));
+        std::fs::write(root.join("notes.txt"), "work").unwrap();
+        assert_eq!(WindowsTools.uncommitted(&root), Some(true));
     }
 
     #[test]
