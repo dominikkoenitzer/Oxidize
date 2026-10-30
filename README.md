@@ -108,13 +108,14 @@ removed: only high-confidence ones are chosen by default, and they go into a
 backup like any other leftover, so `oxidize restore` puts them back. A backup
 on the same drive frees nothing until it is deleted, so `--delete-dead`
 deletes the chosen folders that are proven dead outright: no file in them
-changed for 30 days or held open, nothing running from them and no git
-repository in or above them. Each is checked again right before it goes,
-and one that came alive goes into the backup instead. Stale build output is
+changed for 30 days or held open, nothing running from them, no git
+repository in or above them and no cloud placeholder in them. Each is
+checked again right before it goes and goes whole or not at all, and one
+that came alive goes into the backup instead. Stale build output is
 only ever cleaned when you name it: folders a build or package tool marked
 as its cache with a `CACHEDIR.TAG` file, in your profile but outside the
 temp folders, with nothing in them changed for 30 days, nothing running
-from them and no file in them held open. One inside a git
+from them, no file in them held open and no cloud placeholder. One inside a git
 checkout goes only while `git status` shows no uncommitted work, and with
 administrator rights git is not run at all, so those stay. Deleted
 temporary files, dumps, caches, build output and Recycle Bin items do not
