@@ -25,6 +25,9 @@ struct FakeTools {
     /// What git says about each checkout: uncommitted work or not, or None
     /// when it cannot tell.
     uncommitted: Mutex<Option<bool>>,
+    /// What git says about each tagged folder: ignored or not, or None when
+    /// it cannot tell.
+    ignored: Mutex<Option<bool>>,
     /// A path whose presence is noted each time git is asked.
     watched: Mutex<Option<PathBuf>>,
     seen: Mutex<Vec<bool>>,
@@ -85,6 +88,10 @@ impl Tools for FakeTools {
             self.seen.lock().unwrap().push(path.exists());
         }
         *self.uncommitted.lock().unwrap()
+    }
+    fn ignored(&self, _dir: &Path) -> Option<bool> {
+        self.call("ignored");
+        *self.ignored.lock().unwrap()
     }
 }
 
@@ -1452,6 +1459,7 @@ fn a_tagged_folder_that_is_a_repository_or_a_link_stays() {
         elevated: false,
         tools: &tools,
         checkouts: Default::default(),
+        ignored: Default::default(),
         running: &[],
         probe: false,
     };
@@ -1508,6 +1516,63 @@ fn with_administrator_rights_git_is_never_run_and_checkout_output_stays() {
     assert_eq!(done[0].removed, 1);
     assert!(!outside.exists() && inside.exists());
     assert!(!tools.calls().contains(&"uncommitted"));
+}
+
+#[test]
+fn a_tagged_folder_counts_only_beside_a_project_or_ignored_by_git() {
+    use super::build::tests::bare_cache;
+    let pc = Pc::new("build_project");
+    let code = pc.root.join(r"Profile\code");
+    let bare = pc.root.join(r"Profile\viewer\cache");
+    bare_cache(&bare, 40, 60);
+    let dotnet = code.join(r"tool\obj");
+    let dotnet_bytes = bare_cache(&dotnet, 30, 60);
+    fs::write(code.join(r"tool\Tool.CSPROJ"), "").unwrap();
+    let odd = code.join(r"odd\target");
+    bare_cache(&odd, 20, 60);
+    fs::create_dir_all(code.join(r"odd\Cargo.toml")).unwrap();
+    let checkout = code.join("work");
+    fs::create_dir_all(checkout.join(".git")).unwrap();
+    let ignored = checkout.join("out");
+    let ignored_bytes = bare_cache(&ignored, 10, 60);
+    let tools = tools_uncommitted(Some(false));
+    *tools.ignored.lock().unwrap() = Some(true);
+    let asked = |t: &FakeTools| t.calls().iter().filter(|c| **c == "ignored").count();
+
+    let a = analyse_with(&pc, &Protected::default(), false, &[], &tools, &no_orphans);
+    let f = a.finding(Category::BuildOutput).unwrap();
+    let mut found: Vec<&Path> = f.build_folders.iter().map(|b| b.path.as_path()).collect();
+    found.sort();
+    let mut want = vec![dotnet.as_path(), ignored.as_path()];
+    want.sort();
+    assert_eq!(found, want);
+    assert_eq!(f.bytes, dotnet_bytes + ignored_bytes);
+    assert!(f.kept.is_empty(), "the others are not build output at all");
+    assert_eq!(asked(&tools), 1, "git is asked only in a checkout");
+
+    // Git is asked again right before: no longer ignored, so it stays.
+    *tools.ignored.lock().unwrap() = Some(false);
+    let choice = a.choice(&[Category::BuildOutput], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    assert_eq!((done[0].removed, done[0].freed), (1, dotnet_bytes));
+    let gone_off = KeptReason::Failed("no longer looks like build output".into());
+    assert_eq!(kept(&done[0].kept, &gone_off).0, 1);
+    assert!(!dotnet.exists());
+    for stays in [&bare, &odd, &ignored] {
+        assert!(stays.join("CACHEDIR.TAG").exists(), "{}", stays.display());
+    }
+
+    // With administrator rights git is not asked, so the one in the
+    // checkout is not build output.
+    let tools = tools_uncommitted(Some(false));
+    *tools.ignored.lock().unwrap() = Some(true);
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    assert!(a
+        .finding(Category::BuildOutput)
+        .unwrap()
+        .build_folders
+        .is_empty());
+    assert_eq!(asked(&tools), 0);
 }
 
 #[test]

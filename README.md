@@ -115,7 +115,8 @@ checked again right before it goes and goes whole or not at all, and one
 that came alive goes into the backup instead. Without `--delete-dead` no
 folder is proven dead, so none of their files are opened. Stale build output is
 only ever looked for and cleaned when you name it: folders a build or package tool marked
-as its cache with a `CACHEDIR.TAG` file, in your profile but outside the
+as its cache with a `CACHEDIR.TAG` file, beside a project file such as
+`Cargo.toml` or `package.json` or ignored by git, in your profile but outside the
 temp folders, with nothing in them changed for 30 days, nothing running
 from them, no file in them held open and no cloud placeholder. One inside a git
 checkout goes only while `git status` shows no uncommitted work, and with

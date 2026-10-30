@@ -69,6 +69,9 @@ pub trait Tools: Send + Sync {
     /// Whether the git checkout at `dir` holds uncommitted work: changed,
     /// staged or untracked files. None when git cannot tell.
     fn uncommitted(&self, dir: &Path) -> Option<bool>;
+    /// Whether git ignores the folder `dir` in its checkout. None when git
+    /// cannot tell.
+    fn ignored(&self, dir: &Path) -> Option<bool>;
 }
 
 /// `git status` in its short form, for scripts. Its file system monitor,
@@ -84,6 +87,11 @@ pub const GIT_STATUS: &[&str] = &[
     "--untracked-files=normal",
     "--ignore-submodules=none",
 ];
+
+/// Asked inside a folder: exit code 0 when git ignores it, 1 when not, and
+/// any other code when git cannot tell. As with the status, the file system
+/// monitor is never started.
+pub const GIT_IGNORED: &[&str] = &["-c", "core.fsmonitor=false", "check-ignore", "-q", "."];
 
 /// The real tools.
 pub struct WindowsTools;
@@ -144,6 +152,28 @@ impl Tools for WindowsTools {
         out.status
             .success()
             .then(|| out.stdout.iter().any(|b| !b.is_ascii_whitespace()))
+    }
+
+    fn ignored(&self, dir: &Path) -> Option<bool> {
+        let mut cmd = Command::new(git_on(&std::env::var_os("PATH")?)?);
+        cmd.arg("-C").arg(dir).args(GIT_IGNORED);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let status = cmd
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        match status.code() {
+            Some(0) => Some(true),
+            Some(1) => Some(false),
+            _ => None,
+        }
     }
 }
 
@@ -366,6 +396,30 @@ The operation completed successfully.
         assert_eq!(WindowsTools.uncommitted(&root), Some(false));
         std::fs::write(root.join("notes.txt"), "work").unwrap();
         assert_eq!(WindowsTools.uncommitted(&root), Some(true));
+    }
+
+    #[test]
+    fn git_says_which_folders_it_ignores() {
+        let root = super::super::files::tests::fixture("git_ignored");
+        let repo = root.join("repo");
+        for dir in [r"app\target\debug", r"app\cache"] {
+            std::fs::create_dir_all(repo.join(dir)).unwrap();
+        }
+        let made = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["init", "-q"])
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        std::fs::write(repo.join(r"app\.gitignore"), "target/\n").unwrap();
+        std::fs::write(repo.join(r"app\target\debug\out.bin"), "x").unwrap();
+        std::fs::write(repo.join(r"app\cache\data.bin"), "y").unwrap();
+        assert_eq!(WindowsTools.ignored(&repo.join(r"app\target")), Some(true));
+        assert_eq!(WindowsTools.ignored(&repo.join(r"app\cache")), Some(false));
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        assert_eq!(WindowsTools.ignored(&outside), None);
     }
 
     #[test]

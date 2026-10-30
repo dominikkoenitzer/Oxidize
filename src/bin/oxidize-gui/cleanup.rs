@@ -1025,6 +1025,9 @@ mod tests {
         fn uncommitted(&self, _dir: &std::path::Path) -> Option<bool> {
             None
         }
+        fn ignored(&self, _dir: &std::path::Path) -> Option<bool> {
+            None
+        }
     }
 
     fn folder(name: &str, confidence: Confidence) -> OrphanItem {
