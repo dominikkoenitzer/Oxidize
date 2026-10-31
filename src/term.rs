@@ -51,9 +51,22 @@ fn paint(text: &str, code: &str) -> String {
     paint_if(color_on(), text, code)
 }
 
-/// For text bound for stderr, which has its own switch.
-fn paint_err(text: &str, code: &str) -> String {
-    paint_if(ERR_COLOR_ENABLED.load(Ordering::Relaxed), text, code)
+/// The switches `init` stored.
+fn switches() -> Colors {
+    Colors {
+        out: color_on(),
+        err: ERR_COLOR_ENABLED.load(Ordering::Relaxed),
+    }
+}
+
+/// The `warning: ...` line, coloured by stderr's switch.
+fn warn_line(colors: &Colors, msg: &str) -> String {
+    format!("{} {msg}", paint_if(colors.err, "warning:", "33"))
+}
+
+/// The `error: ...` line, coloured by stderr's switch.
+fn error_line(colors: &Colors, msg: &str) -> String {
+    format!("{} {msg}", paint_if(colors.err, "error:", "31"))
 }
 
 fn paint_if(on: bool, text: &str, code: &str) -> String {
@@ -87,12 +100,12 @@ pub fn info(msg: &str) {
 
 /// `warning: ...` on stderr.
 pub fn warn(msg: &str) {
-    eprintln!("{} {msg}", paint_err("warning:", "33"));
+    eprintln!("{}", warn_line(&switches(), msg));
 }
 
 /// `error: ...` on stderr.
 pub fn error(msg: &str) {
-    eprintln!("{} {msg}", paint_err("error:", "31"));
+    eprintln!("{}", error_line(&switches(), msg));
 }
 
 /// Ask a yes/no question. Empty input picks the default. When stdin is not a
@@ -193,5 +206,21 @@ mod tests {
     fn only_a_stream_with_colour_gets_escape_codes() {
         assert_eq!(paint_if(true, "error:", "31"), "\x1b[31merror:\x1b[0m");
         assert_eq!(paint_if(false, "error:", "31"), "error:");
+    }
+
+    #[test]
+    fn warnings_and_errors_follow_the_stderr_switch() {
+        let err_only = Colors {
+            out: false,
+            err: true,
+        };
+        assert_eq!(warn_line(&err_only, "x"), "\x1b[33mwarning:\x1b[0m x");
+        assert_eq!(error_line(&err_only, "x"), "\x1b[31merror:\x1b[0m x");
+        let out_only = Colors {
+            out: true,
+            err: false,
+        };
+        assert_eq!(warn_line(&out_only, "x"), "warning: x");
+        assert_eq!(error_line(&out_only, "x"), "error: x");
     }
 }
