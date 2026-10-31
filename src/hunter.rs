@@ -26,17 +26,12 @@ fn looks_like_path(q: &str) -> bool {
     q.contains('\\') || q.contains('/') || (q.len() >= 2 && q.as_bytes()[1] == b':')
 }
 
-/// Make a path absolute (joining the current dir if relative) without
-/// canonicalising. Canonicalisation yields `\\?\` verbatim paths on Windows,
-/// which break simple prefix comparisons against registry `InstallLocation`s.
+/// Make a path absolute (joining the current dir if relative) and resolve its
+/// `.` and `..` parts, so `Foo\..\Bar\bar.exe` is not taken to sit under Foo.
+/// No canonicalising: that yields `\\?\` verbatim paths on Windows, which
+/// break simple prefix comparisons against registry `InstallLocation`s.
 fn absolutize(p: &Path) -> PathBuf {
-    if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(p))
-            .unwrap_or_else(|_| p.to_path_buf())
-    }
+    std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
 }
 
 /// Is `child` equal to, or nested under, `parent` (case-insensitive)?
@@ -294,6 +289,21 @@ mod tests {
         assert_eq!(matches[0].program.display_name, "Vendor Player");
         assert!(matches[0].score >= 1000);
         assert!(matches[0].reason.contains("install folder"));
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_with_dot_dot_belongs_to_the_folder_it_lands_in() {
+        let programs = vec![
+            program("Foo", Some(r"C:\Apps\Foo")),
+            program("Bar", Some(r"C:\Apps\Bar")),
+        ];
+        let matches = hunt(r"C:\Apps\Foo\..\Bar\bar.exe", &programs);
+        assert_eq!(matches[0].program.display_name, "Bar");
+        assert!(matches[0].score >= 1000);
+        assert!(matches[0].reason.contains("install folder"));
+        assert!(matches
+            .iter()
+            .all(|m| m.program.display_name != "Foo" || m.score < 500));
     }
 
     #[test]
