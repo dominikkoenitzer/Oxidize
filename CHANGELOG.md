@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- A process with no window that runs from the program's own install folder
+  no longer stops `oxidize uninstall`. The plan names it before the
+  question, and once the removal is confirmed, by the prompt or `--yes`, it
+  is ended by its id. A dry run lists it in `would_end`, and a run lists it
+  in `closed` as `ended`. Any other process that stays still stops the
+  removal before anything runs, and the window and the MCP server stop on
+  every one as before.
+
 ## 0.2.12, 2026-10-30
 
 - A git repository in a temp folder stays whole, however old its files are.
