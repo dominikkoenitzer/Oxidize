@@ -20,6 +20,9 @@ struct FakeShell {
     clipboard: Mutex<ClipboardState>,
     recent_dir: Option<PathBuf>,
     fail: bool,
+    /// Also delete what Windows deletes: every recent item and every list
+    /// without pins, whatever the protected list says.
+    whole: Option<PathBuf>,
 }
 
 impl FakeShell {
@@ -29,6 +32,14 @@ impl FakeShell {
             clipboard: Mutex::new(clipboard),
             recent_dir: places.automatic(),
             fail: false,
+            whole: None,
+        }
+    }
+
+    fn like_windows(places: &TracePlaces) -> Self {
+        FakeShell {
+            whole: places.recent.clone(),
+            ..FakeShell::new(places, ClipboardState::Off)
         }
     }
 
@@ -46,10 +57,17 @@ impl Shell for FakeShell {
         let Some(dir) = &self.recent_dir else {
             return Ok(());
         };
+        if let Some(recent) = &self.whole {
+            for (path, _) in recent_files(recent) {
+                fs::remove_file(&path).unwrap();
+            }
+        }
         for (path, _) in files_in(dir, |n| n.ends_with(".automaticdestinations-ms")) {
             if let Ok(d) = jumplist::read(&path) {
                 if d.pinned > 0 {
                     fs::write(&path, jump_list(d.pinned, d.pinned)).unwrap();
+                } else if self.whole.is_some() {
+                    fs::remove_file(&path).unwrap();
                 }
             }
         }
@@ -373,6 +391,56 @@ fn a_protected_folder_keeps_its_traces() {
         .join(r"AutomaticDestinations\a1.automaticDestinations-ms")
         .exists());
     assert!(p.values("RunMRU").is_empty(), "the registry lists still go");
+}
+
+#[test]
+fn windows_never_clears_what_the_protected_list_keeps() {
+    let lists = r"AutomaticDestinations\a1.automaticDestinations-ms";
+    for (name, keep) in [
+        ("keep_item", "Notes.lnk"),
+        ("keep_list", lists),
+        ("keep_folder", ""),
+    ] {
+        let p = Profile::used(name);
+        let shell = FakeShell::like_windows(&p.places);
+        let kept = if keep.is_empty() {
+            p.recent()
+        } else {
+            p.recent().join(keep)
+        };
+        let protected = Protected::new([kept.display().to_string()]);
+        clear(&p.places, &protected, &shell);
+        assert!(kept.exists(), "{name}");
+        assert!(!shell.calls().contains(&"clear_recent"), "{name}");
+        // What the list does not cover still goes, file by file.
+        if !keep.is_empty() {
+            assert!(!p.recent().join("shot-1.png.lnk").exists(), "{name}");
+        }
+    }
+}
+
+#[test]
+fn with_nothing_protected_windows_clears_first() {
+    let p = Profile::used("whole");
+    let shell = FakeShell::like_windows(&p.places);
+    let done = clear(&p.places, &Protected::default(), &shell);
+    assert_eq!(shell.calls(), ["clear_recent", "purge_thumbnails", "refresh"]);
+    assert!(!p.recent().join("Notes.lnk").exists());
+    let auto = p.recent().join("AutomaticDestinations");
+    assert!(!auto.join("a1.automaticDestinations-ms").exists());
+    let pinned = jumplist::read(&auto.join("b2.automaticDestinations-ms")).unwrap();
+    assert_eq!((pinned.entries, pinned.pinned), (2, 2));
+    assert!(done.iter().all(|f| !f.failed()), "{done:#?}");
+}
+
+#[test]
+fn a_kept_windows_clear_does_not_promise_the_items_of_pinned_lists() {
+    let p = Profile::used("promise");
+    let shell = FakeShell::new(&p.places, ClipboardState::Off);
+    let protected = Protected::new([p.recent().join("Notes.lnk").display().to_string()]);
+    let a = analyse(&p.places, &protected, &shell);
+    // Only the unpinned list's five go; the pinned list keeps all of its own.
+    assert_eq!(find(&a, Trace::JumpLists).notes, ["5 recent items"]);
 }
 
 #[test]
