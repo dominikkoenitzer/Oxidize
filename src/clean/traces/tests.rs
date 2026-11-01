@@ -424,7 +424,10 @@ fn with_nothing_protected_windows_clears_first() {
     let p = Profile::used("whole");
     let shell = FakeShell::like_windows(&p.places);
     let done = clear(&p.places, &Protected::default(), &shell);
-    assert_eq!(shell.calls(), ["clear_recent", "purge_thumbnails", "refresh"]);
+    assert_eq!(
+        shell.calls(),
+        ["clear_recent", "purge_thumbnails", "refresh"]
+    );
     assert!(!p.recent().join("Notes.lnk").exists());
     let auto = p.recent().join("AutomaticDestinations");
     assert!(!auto.join("a1.automaticDestinations-ms").exists());
