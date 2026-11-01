@@ -3889,6 +3889,7 @@ mod tests {
                 windowless: false,
             }],
             would_close: Vec::new(),
+            would_end: Vec::new(),
             vendor: VendorStep::Skip {
                 reason: "installed for this user only".to_string(),
             },

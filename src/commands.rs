@@ -658,6 +658,20 @@ fn uninstall_batch(
     let n = batch.len();
     let apps = batch.iter().filter(|s| matches!(s, Step::Store(_))).count();
     let programs = n - apps;
+    // Read once, before the question that confirms what is ended.
+    let running = if programs > 0 && !keep {
+        (env.running)()
+    } else {
+        Vec::new()
+    };
+    let ends: Vec<Vec<complete::Running>> = targets
+        .iter()
+        .map(|t| {
+            t.as_ref()
+                .map(|t| ends_for(t, &running, env.has_window, how))
+                .unwrap_or_default()
+        })
+        .collect();
 
     if !g.json {
         let head = if n == 1 {
@@ -671,6 +685,9 @@ fn uninstall_batch(
                 Step::Program(b) => {
                     println!("  {}. {}", i + 1, program_head(&b.program));
                     println!("     {}", term::dim(&b.plan.display()));
+                    for line in ends_in_plan(&ends[i]) {
+                        println!("     {}", term::dim(&line));
+                    }
                 }
                 Step::Store(app) => {
                     println!("  {}. {}", i + 1, package_head(app));
@@ -725,7 +742,7 @@ fn uninstall_batch(
     }
 
     let mut runs = Vec::with_capacity(n);
-    for (i, (step, target)) in batch.iter().zip(targets).enumerate() {
+    for (i, ((step, target), ends)) in batch.iter().zip(targets).zip(ends).enumerate() {
         if !g.json {
             println!();
             println!(
@@ -753,6 +770,7 @@ fn uninstall_batch(
                     &b.plan,
                     already_gone,
                     None,
+                    ends,
                     how,
                     levels,
                     g,
@@ -868,9 +886,18 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
     let target = scanner::build_target_with(program, &snap);
     let plan = uninstall::plan(program, how.silent)?;
 
+    let running = if how.keep {
+        Vec::new()
+    } else {
+        system::running_processes()
+    };
+    let ends = ends_for(&target, &running, &system::has_window, how);
     if !g.json {
         println!("{}", program_head(program));
         println!("  {}", term::dim(&plan.display()));
+        for line in ends_in_plan(&ends) {
+            println!("  {}", term::dim(&line));
+        }
     }
 
     let question = if how.keep {
@@ -888,7 +915,17 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         return Err(Failure::cancelled("Cancelled.", true).into());
     }
 
-    let run = run_uninstall(program, &target, &plan, false, Some(snap), how, levels, g)?;
+    let run = run_uninstall(
+        program,
+        &target,
+        &plan,
+        false,
+        Some(snap),
+        ends,
+        how,
+        levels,
+        g,
+    )?;
     if g.json {
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
@@ -899,6 +936,32 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         return Err(run.failure(g.json).into());
     }
     Ok(())
+}
+
+/// The plan's lines for the processes a confirmed removal ends.
+fn ends_in_plan(ends: &[complete::Running]) -> Vec<String> {
+    ends.iter()
+        .map(|p| {
+            format!(
+                "ends {}, which has no window to be asked through",
+                p.exe.display()
+            )
+        })
+        .collect()
+}
+
+/// What a confirmed removal of the program ends: what runs from its own
+/// folder with no window. `--keep` closes nothing, so it ends nothing.
+fn ends_for(
+    target: &ScanTarget,
+    running: &[complete::Running],
+    has_window: &dyn Fn(u32) -> bool,
+    how: &How,
+) -> Vec<complete::Running> {
+    if how.keep {
+        return Vec::new();
+    }
+    complete::to_end(running, target, std::process::id(), has_window)
 }
 
 /// The program's name in bold, then its version and publisher.
@@ -1061,7 +1124,8 @@ impl ProgramRun {
 /// program's folders, run its uninstaller only when Oxidize cannot do without
 /// it, remove the leftovers at `levels` and scan again. `target` is the
 /// footprint captured before anything ran, `snap` the reading of the
-/// machine it was built from, when that is still current.
+/// machine it was built from, when that is still current. `ends` are the
+/// windowless processes the plan named and the confirmation covered.
 #[allow(clippy::too_many_arguments)]
 fn run_uninstall(
     program: &Program,
@@ -1069,6 +1133,7 @@ fn run_uninstall(
     plan: &uninstall::UninstallPlan,
     already_gone: bool,
     snap: Option<scanner::Snapshot>,
+    ends: Vec<complete::Running>,
     how: &How,
     levels: &LevelOpts,
     g: &Global,
@@ -1088,6 +1153,7 @@ fn run_uninstall(
         g,
         wait,
         first: std::cell::RefCell::new(snap),
+        ends,
     };
     let opts = complete::Options {
         level,
@@ -1122,8 +1188,8 @@ fn run_uninstall(
 
 /// A complete removal as JSON. Stable fields for scripts: `nothing_left`,
 /// `still_installed`, `remaining`, `below_level`, `closed`, `uninstaller`,
-/// `uninstaller_step`, `removal`, `seconds`; a dry run has `would_close` and
-/// `would_remove` instead.
+/// `uninstaller_step`, `removal`, `seconds`; a dry run has `would_close`,
+/// `would_end` and `would_remove` instead.
 fn complete_json(
     program: &Program,
     plan: &uninstall::UninstallPlan,
@@ -1143,6 +1209,7 @@ fn complete_json(
     });
     if dry_run {
         json_out["would_close"] = json!(out.would_close);
+        json_out["would_end"] = json!(out.would_end);
         json_out["would_remove"] = json!(out.selected);
     } else {
         json_out["closed"] = json!(out.closed);
@@ -1174,7 +1241,12 @@ fn print_complete(name: &str, out: &complete::Outcome, dry_run: bool) {
             println!();
             println!("{}", term::dim("would close"));
             for p in &out.would_close {
-                println!("  {}", p.exe.display());
+                if out.would_end.contains(p) {
+                    let why = term::dim(", no window to be asked through: it would be ended");
+                    println!("  {}{why}", p.exe.display());
+                } else {
+                    println!("  {}", p.exe.display());
+                }
             }
         }
         return;
@@ -1234,6 +1306,8 @@ struct CliPc<'a> {
     /// The reading the target was built from, for the first scan only:
     /// later scans must see what the removal changed.
     first: std::cell::RefCell<Option<scanner::Snapshot>>,
+    /// The windowless processes the confirmed plan named to end.
+    ends: Vec<complete::Running>,
 }
 
 impl complete::Pc for CliPc<'_> {
@@ -1261,6 +1335,22 @@ impl complete::Pc for CliPc<'_> {
             );
         }
         system::close_processes(procs, complete::CLOSE_GRACE)
+    }
+
+    fn may_end(&self) -> Vec<complete::Running> {
+        self.ends.clone()
+    }
+
+    fn end(&self, procs: &[complete::Running]) -> Vec<complete::Closed> {
+        if !self.g.json {
+            for p in procs {
+                println!(
+                    "Ending {}, which has no window to be asked through.",
+                    p.exe.display()
+                );
+            }
+        }
+        system::end_processes(procs)
     }
 
     fn run_uninstaller(&self, plan: &uninstall::UninstallPlan) -> Result<uninstall::Ran> {
@@ -3803,6 +3893,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            would_end: Vec::new(),
             vendor: complete::VendorStep::Skip {
                 reason: "installed for this user only".to_string(),
             },
@@ -3865,6 +3956,37 @@ mod tests {
         assert_eq!(j["would_close"][0]["pid"], 100);
         assert!(j.get("nothing_left").is_none());
         assert!(j.get("closed").is_none());
+    }
+
+    #[test]
+    fn a_process_to_be_ended_is_named_in_the_plan_the_dry_run_and_the_result() {
+        let p = program(
+            "Example Player",
+            "example-player",
+            Some(r"C:\x\uninstall.exe"),
+        );
+        let plan = uninstall::plan(&p, true).unwrap();
+        let mut dry = outcome(true);
+        dry.would_end = dry.would_close.clone();
+        let j = complete_json(&p, &plan, &dry, Confidence::High, true);
+        assert_eq!(j["would_end"][0]["pid"], 100);
+        let mut ran = outcome(false);
+        ran.closed[0].how = complete::CloseHow::Ended;
+        ran.closed[0].windowless = true;
+        let j = complete_json(&p, &plan, &ran, Confidence::High, false);
+        assert_eq!(j["closed"][0]["how"], "ended");
+        assert_eq!(j["closed"][0]["windowless"], true);
+        assert!(j.get("would_end").is_none());
+
+        let helper = complete::Running {
+            pid: 100,
+            exe: PathBuf::from(r"D:\Apps\Example Player\helper.exe"),
+        };
+        assert_eq!(
+            ends_in_plan(std::slice::from_ref(&helper)),
+            [r"ends D:\Apps\Example Player\helper.exe, which has no window to be asked through"]
+        );
+        assert!(ends_in_plan(&[]).is_empty());
     }
 
     #[test]

@@ -136,8 +136,9 @@ An object:
 | `report` | ScanReport, what the removal works from. In a dry run, everything a scan finds as if the program were gone. |
 | `seconds` | number, how long the run took |
 | `would_close` | dry run only: `[{ "pid", "exe" }]`, the processes that would be closed |
+| `would_end` | dry run only: `[{ "pid", "exe" }]`, those of `would_close` with no window that run from the program's own install folder, which the confirmed run ends by id |
 | `would_remove` | dry run only: `[Leftover]`, every item that would go |
-| `closed` | missing in a dry run: `[{ "pid", "exe", "how" }]`. `how` is `"closed"` (it closed by itself), `"running"` (still running after three seconds, or never asked for want of a window) or `"failed"` (it could not be asked), the last with an `error`. One with no window to be asked through has `"windowless": true`. Any process not `"closed"` stops the run before the uninstaller, and `error` names it. |
+| `closed` | missing in a dry run: `[{ "pid", "exe", "how" }]`. `how` is `"closed"` (it closed by itself), `"ended"` (no window, from the program's own install folder, ended by id once confirmed), `"running"` (still running after three seconds, or never asked for want of a window) or `"failed"` (it could not be asked or ended), the last with an `error`. One with no window to be asked through has `"windowless": true`. Any process not `"closed"` or `"ended"` stops the run before the uninstaller, and `error` names it. |
 | `uninstaller` | missing in a dry run. `"skipped, <reason>"`, or how it ended: `"finished"`, `"finished, a reboot is required"`, `"finished, a reboot has been started"`, `"reported the product as not installed (1605)"`, `"was cancelled (1602)"`, `"found another installation in progress (1618)"`, `"exited with code N"`, `"ended without an exit code"` or `"was still running after N s"`. `null` when it could not start; `error` says why. |
 | `still_installed` | bool, missing in a dry run |
 | `remaining` | `[Leftover]`, missing in a dry run: the items at the chosen level that the second scan still found |
