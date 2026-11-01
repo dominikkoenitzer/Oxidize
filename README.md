@@ -69,7 +69,9 @@ in File Explorer, program launch counts, the thumbnail cache and the
 clipboard history. Only these lists go; the files they point to stay, and so
 do pinned items. Windows clears the recent items and jump lists itself first,
 so Explorer hears of it without a restart, and its own Disk Cleanup handler
-empties the thumbnail cache. `--traces` never touches temporary folders,
+empties the thumbnail cache. When the protected list reaches into the Recent
+folder, Windows is not asked, since it would clear everything; the items go
+one by one and the protected ones stay. `--traces` never touches temporary folders,
 browser data, mail or the data of programs. It shows what it would clear;
 `--yes` clears it. In the window it is Clean slate on the Clean up tab: one
 list, one button.
