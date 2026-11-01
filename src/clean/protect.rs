@@ -26,10 +26,17 @@ pub struct Protected {
     entries: Vec<String>,
     /// The same, expanded and normalised for comparing.
     keys: Vec<String>,
-    /// Lines of the file that protect nothing: a drive root, or not a full
-    /// path. They go back into the file as they were, so a save never
-    /// loses what the user wrote.
-    idle: Vec<String>,
+    /// The lines of the file it was read from, in order, so a save keeps what the user wrote.
+    lines: Vec<Line>,
+}
+
+/// One line of the file, as written.
+#[derive(Debug, Clone)]
+enum Line {
+    /// A comment, a blank line, or a line that protects nothing.
+    Kept(String),
+    /// A line listing the entry with this key, in any spelling; it goes when the entry does.
+    Entry { text: String, key: String },
 }
 
 /// Why an entry is not taken onto the list.
@@ -70,23 +77,7 @@ impl Protected {
 
     /// Add one entry, or say why it is not taken.
     pub fn try_add(&mut self, entry: &str) -> Result<(), NotAdded> {
-        // A list saved by an editor that writes a byte order mark starts
-        // with one, and it would make the first folder a name nothing has.
-        let entry = entry.trim_start_matches('\u{feff}');
-        let entry = entry.trim().trim_matches('"').trim();
-        if entry.is_empty() {
-            return Err(NotAdded::Empty);
-        }
-        let path = util::expand_env_vars(entry);
-        if !Path::new(&path).is_absolute() {
-            return Err(NotAdded::NotFullPath);
-        }
-        let key = key_of(Path::new(&path));
-        if key.len() <= 3 {
-            // A drive root would protect everything on it; the list is for
-            // folders, so such a line is ignored rather than honoured.
-            return Err(NotAdded::DriveRoot);
-        }
+        let (entry, key) = entry_and_key(entry)?;
         if self.keys.contains(&key) {
             return Err(NotAdded::Listed);
         }
@@ -100,7 +91,9 @@ impl Protected {
         match self.entries.iter().position(|e| e == entry) {
             Some(i) => {
                 self.entries.remove(i);
-                self.keys.remove(i);
+                let key = self.keys.remove(i);
+                self.lines
+                    .retain(|l| !matches!(l, Line::Entry { key: k, .. } if *k == key));
                 true
             }
             None => false,
@@ -153,11 +146,28 @@ impl Protected {
             .any(|k| p == *k || under(&p, k) || under(k, &p))
     }
 
-    /// The list as the file stores it.
+    /// The list as the file stores it: the lines read, then entries added since; a new list gets the header.
     pub fn to_file_text(&self) -> String {
-        let mut text = HEADER.to_string();
-        for e in self.entries.iter().chain(&self.idle) {
-            text.push_str(e);
+        let mut text = String::new();
+        if self.lines.is_empty() {
+            text.push_str(HEADER);
+        }
+        let read = self.lines.iter().map(|l| match l {
+            Line::Kept(text) | Line::Entry { text, .. } => text.as_str(),
+        });
+        let added = self
+            .keys
+            .iter()
+            .zip(&self.entries)
+            .filter(|(k, _)| {
+                !self
+                    .lines
+                    .iter()
+                    .any(|l| matches!(l, Line::Entry { key, .. } if key == *k))
+            })
+            .map(|(_, e)| e.as_str());
+        for line in read.chain(added) {
+            text.push_str(line);
             text.push('\n');
         }
         text
@@ -167,17 +177,51 @@ impl Protected {
     pub fn from_file_text(text: &str) -> Self {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut p = Protected::default();
-        for line in text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        {
-            if let Err(NotAdded::DriveRoot | NotAdded::NotFullPath) = p.try_add(line) {
-                p.idle.push(line.to_string());
-            }
+        for line in text.lines() {
+            let trimmed = line.trim();
+            let read = if trimmed.starts_with('#') {
+                None
+            } else {
+                entry_and_key(trimmed).ok()
+            };
+            p.lines.push(match read {
+                Some((entry, key)) => {
+                    if !p.keys.contains(&key) {
+                        p.entries.push(entry.to_string());
+                        p.keys.push(key.clone());
+                    }
+                    Line::Entry {
+                        text: line.to_string(),
+                        key,
+                    }
+                }
+                None => Line::Kept(line.to_string()),
+            });
         }
         p
     }
+}
+
+/// An entry as it is listed, and its key; or why it protects nothing.
+fn entry_and_key(entry: &str) -> Result<(&str, String), NotAdded> {
+    // A list saved by an editor that writes a byte order mark starts
+    // with one, and it would make the first folder a name nothing has.
+    let entry = entry.trim_start_matches('\u{feff}');
+    let entry = entry.trim().trim_matches('"').trim();
+    if entry.is_empty() {
+        return Err(NotAdded::Empty);
+    }
+    let path = util::expand_env_vars(entry);
+    if !Path::new(&path).is_absolute() {
+        return Err(NotAdded::NotFullPath);
+    }
+    let key = key_of(Path::new(&path));
+    if key.len() <= 3 {
+        // A drive root would protect everything on it; the list is for
+        // folders, so such a line is ignored rather than honoured.
+        return Err(NotAdded::DriveRoot);
+    }
+    Ok((entry, key))
 }
 
 /// `%LOCALAPPDATA%\Oxidize\protected.txt`.
@@ -374,13 +418,53 @@ mod tests {
         assert_eq!(
             lines,
             [
-                r"C:\Also",
                 r"Work\Keep",
                 r"%OXIDIZE_PROTECT_NEVER_SET%\Docs",
-                r"C:\"
+                r"C:\",
+                r"C:\Also"
             ]
         );
         assert_eq!(Protected::from_file_text(&saved).to_file_text(), saved);
+    }
+
+    #[test]
+    fn a_save_keeps_the_users_own_comments_where_they_were() {
+        let mut p = Protected::from_file_text("# build outputs\nC:\\Keep\n\n# games\nC:\\Games\n");
+        assert!(p.add(r"C:\Also"));
+        assert!(p.remove(r"C:\Keep"));
+        assert_eq!(
+            p.to_file_text(),
+            "# build outputs\n\n# games\nC:\\Games\nC:\\Also\n"
+        );
+    }
+
+    #[test]
+    fn a_list_saved_unchanged_comes_back_line_for_line() {
+        let text = format!(
+            "{HEADER}# mine\n\nC:\\Keep\n  \"C:\\Quoted Folder\"  \nWork\\Keep\nc:\\keep\\\nC:\\\n"
+        );
+        let p = Protected::from_file_text(&text);
+        assert_eq!(p.entries(), [r"C:\Keep", r"C:\Quoted Folder"]);
+        assert_eq!(p.to_file_text(), text);
+        // The header goes in once, not again on every save.
+        let again = Protected::from_file_text(&p.to_file_text()).to_file_text();
+        assert_eq!(again.matches(HEADER).count(), 1);
+    }
+
+    #[test]
+    fn a_new_list_starts_with_the_header() {
+        let mut p = Protected::default();
+        assert!(p.add(r"C:\One"));
+        assert_eq!(p.to_file_text(), format!("{HEADER}C:\\One\n"));
+    }
+
+    #[test]
+    fn a_removed_entry_leaves_no_line_for_it_behind() {
+        let mut p = Protected::from_file_text("C:\\Keep\nc:\\keep\\\nC:\\Other\n");
+        assert!(p.remove(r"C:\Keep"));
+        let saved = p.to_file_text();
+        assert_eq!(saved, "C:\\Other\n");
+        assert!(!Protected::from_file_text(&saved).covers(Path::new(r"C:\Keep\a.txt")));
     }
 
     #[test]
