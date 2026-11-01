@@ -251,37 +251,54 @@ fn vendor_files(publisher: &str) -> Vec<Leftover> {
         if !path.is_absolute() {
             continue;
         }
-        if path.exists() {
-            if downloads
-                .as_deref()
-                .is_some_and(|d| system::path_under(path, d))
-                && path.is_file()
-            {
-                out.push(Leftover::fs(
-                    LeftoverKind::File,
-                    path.to_path_buf(),
-                    Confidence::Medium,
-                    "the vendor's file in Downloads, most likely the installer",
-                    std::fs::metadata(path).ok().map(|m| m.len()),
-                    false,
-                ));
+        match vendor_file(path, downloads.as_deref()) {
+            Some(VendorFile::Download(item)) => out.push(item),
+            Some(VendorFile::Removed) => {
+                for field in [COMPANY_FIELD, NAME_FIELD] {
+                    let value = format!("{file}{field}");
+                    if registry::value_exists(hive, NAME_CACHE, &value) {
+                        out.push(Leftover::reg_value(
+                            hive,
+                            NAME_CACHE,
+                            value,
+                            Confidence::High,
+                            "the name Windows cached for a removed file of the vendor's",
+                        ));
+                    }
+                }
             }
-            continue;
-        }
-        for field in [COMPANY_FIELD, NAME_FIELD] {
-            let value = format!("{file}{field}");
-            if registry::value_exists(hive, NAME_CACHE, &value) {
-                out.push(Leftover::reg_value(
-                    hive,
-                    NAME_CACHE,
-                    value,
-                    Confidence::High,
-                    "the name Windows cached for a removed file of the vendor's",
-                ));
-            }
+            None => {}
         }
     }
     out
+}
+
+/// What became of a file of the vendor's that Windows cached a name for.
+#[derive(Debug)]
+enum VendorFile {
+    /// Still in Downloads, most likely the installer.
+    Download(Leftover),
+    /// Removed, so its cached name points nowhere.
+    Removed,
+}
+
+/// The vendor's file at the full path `path`, with `downloads` the user's Downloads folder.
+fn vendor_file(path: &Path, downloads: Option<&Path>) -> Option<VendorFile> {
+    // A file on a drive that is not plugged in is not removed.
+    if exe_missing(path) {
+        return Some(VendorFile::Removed);
+    }
+    let waiting = downloads.is_some_and(|d| system::path_under(path, d)) && path.is_file();
+    waiting.then(|| {
+        VendorFile::Download(Leftover::fs(
+            LeftoverKind::File,
+            path.to_path_buf(),
+            Confidence::Medium,
+            "the vendor's file in Downloads, most likely the installer",
+            std::fs::metadata(path).ok().map(|m| m.len()),
+            false,
+        ))
+    })
 }
 
 /// The folders not inside another folder of the list.
@@ -651,5 +668,29 @@ mod tests {
             Some(format!(r"{drive}\Apps\app.exe"))
         );
         assert_eq!(device_to_drive(r"\Device\NoSuchVolume\x"), None);
+    }
+
+    #[test]
+    fn a_vendor_file_on_a_drive_that_is_not_there_is_not_removed() {
+        let downloads = crate::backup::TestDir::new("oxidize_vendor_file_test");
+        let installer = downloads.join("QuillmarkSetup.exe");
+        std::fs::create_dir_all(&*downloads).unwrap();
+        std::fs::write(&installer, b"stand-in").unwrap();
+        match vendor_file(&installer, Some(&*downloads)) {
+            Some(VendorFile::Download(item)) => assert_eq!(item.confidence, Confidence::Medium),
+            other => panic!("{other:?}"),
+        }
+        let gone = std::env::temp_dir()
+            .join(unique("Quillmark"))
+            .join("QuillmarkSetup.exe");
+        assert!(matches!(
+            vendor_file(&gone, Some(&*downloads)),
+            Some(VendorFile::Removed)
+        ));
+        let Some(letter) = ('M'..='Z').find(|l| !Path::new(&format!("{l}:\\")).exists()) else {
+            return;
+        };
+        let away = PathBuf::from(format!(r"{letter}:\Setup\QuillmarkSetup.exe"));
+        assert!(vendor_file(&away, Some(&*downloads)).is_none());
     }
 }
