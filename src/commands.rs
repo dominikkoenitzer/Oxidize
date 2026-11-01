@@ -3987,6 +3987,20 @@ mod tests {
             [r"ends D:\Apps\Example Player\helper.exe, which has no window to be asked through"]
         );
         assert!(ends_in_plan(&[]).is_empty());
+
+        let mut target = scanner::name_only_target("Example Player", Some("Example Studio"));
+        target.install_location = Some(PathBuf::from(r"D:\Apps\Example Player"));
+        target.install_vouched = true;
+        let running = [helper];
+        let mut how = How {
+            silent: false,
+            keep: false,
+            use_uninstaller: false,
+        };
+        assert_eq!(ends_for(&target, &running, &|_| false, &how), running);
+        // Running only the uninstaller ends nothing and names nothing to end.
+        how.keep = true;
+        assert!(ends_for(&target, &running, &|_| false, &how).is_empty());
     }
 
     #[test]
