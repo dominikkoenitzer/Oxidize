@@ -143,9 +143,7 @@ pub fn run_with(plan: &UninstallPlan, stdin: Stdio, stdout: Stdio) -> Result<Exi
         .map_err(|e| launch_error(e, exe))
 }
 
-/// The error the plan's launch would meet because its program file is gone,
-/// known before anything runs. A bare name is found on the search path at
-/// launch and is not looked for here.
+/// The launch error a gone program file would give, known before anything runs; bare names are left to the search path.
 pub fn missing_program(plan: &UninstallPlan) -> Option<String> {
     let exe = plan.argv.first()?;
     let path = Path::new(exe);
