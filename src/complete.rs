@@ -179,8 +179,12 @@ pub fn vendor_step(
     let mut high_dirs = footprint
         .iter()
         .filter(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
-    // A recorded install folder that would stay keeps the files the uninstaller removes.
-    let has_folder = match target.install_location.as_deref() {
+    // A recorded install folder that would stay, shared ones too, keeps the files the uninstaller removes.
+    let recorded = target
+        .install_location
+        .clone()
+        .or_else(|| scanner::recorded_install_folder(program));
+    let has_folder = match recorded.as_deref() {
         Some(loc) => {
             scanner::own_install_folder(target).is_some()
                 || high_dirs.any(|l| system::path_under(loc, Path::new(&l.path)))
@@ -1359,6 +1363,28 @@ mod tests {
             &[settings, around],
             &machine(),
         );
+        assert!(!step.runs(), "{step:?}");
+    }
+
+    #[test]
+    fn a_shared_recorded_folder_keeps_the_uninstaller() {
+        // Another program records the same folder, so the target drops it and the scan leaves it.
+        let p = program(Hive::CurrentUser);
+        let mut t = target();
+        t.install_location = None;
+        let settings = dir(r"D:\Settings\ExamplePlayer", Confidence::High);
+        let step = vendor_step(
+            &p,
+            &plan(false),
+            &t,
+            std::slice::from_ref(&settings),
+            &machine(),
+        );
+        assert!(step.runs(), "{step:?}");
+
+        // A High folder that is the recorded one still takes it along.
+        let own = dir(p.install_location.as_deref().unwrap(), Confidence::High);
+        let step = vendor_step(&p, &plan(false), &t, &[settings, own], &machine());
         assert!(!step.runs(), "{step:?}");
     }
 

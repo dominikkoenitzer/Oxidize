@@ -272,10 +272,9 @@ pub fn build_target(program: &Program) -> ScanTarget {
     build_target_with(program, &Snapshot::new())
 }
 
-/// `build_target` reading the system through `snap`.
-pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
-    let roots = snap.roots();
-    let install_location = program
+/// The install folder as the program records it, in one form, when it names one.
+pub fn recorded_install_folder(program: &Program) -> Option<PathBuf> {
+    program
         .install_location
         .as_deref()
         .map(util::expand_env_vars)
@@ -294,6 +293,12 @@ pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
         // folder of whatever the current one is; neither says where the
         // program is.
         .filter(|p| p.is_absolute())
+}
+
+/// `build_target` reading the system through `snap`.
+pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
+    let roots = snap.roots();
+    let install_location = recorded_install_folder(program)
         // A program writes its own install location, so a protected one is
         // either a broken installer or a hostile one. Either way nothing may
         // be claimed through it: everything under the folder would count as
