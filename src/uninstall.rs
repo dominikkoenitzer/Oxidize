@@ -97,7 +97,7 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
 
     let argv = util::split_uninstall_command(&util::expand_env_vars(&raw));
     if argv.first().is_none_or(|exe| exe.trim().is_empty()) {
-        bail!("uninstall command parsed to nothing: {raw:?}");
+        bail!("uninstall command parsed to nothing: {raw}");
     }
     let unattended =
         silent && (program.quiet_uninstall_string.is_some() || unins_uninstaller(&raw));
@@ -340,6 +340,16 @@ mod tests {
         let asked = plan(&p, false).unwrap();
         assert!(!asked.unattended);
         assert_eq!(asked.argv, [r"C:\Apps\App\unins000.exe"]);
+    }
+
+    #[test]
+    fn a_command_that_names_no_program_is_shown_as_recorded() {
+        let p = program(r#""" C:\Apps\App\setup.exe"#, None);
+        let err = plan(&p, false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"uninstall command parsed to nothing: "" C:\Apps\App\setup.exe"#
+        );
     }
 
     #[test]
