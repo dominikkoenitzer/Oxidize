@@ -176,10 +176,17 @@ pub fn vendor_step(
     if program.source.hive != Hive::CurrentUser {
         return run("installed for all users");
     }
-    let has_folder = scanner::own_install_folder(target).is_some()
-        || footprint
-            .iter()
-            .any(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
+    let mut high_dirs = footprint
+        .iter()
+        .filter(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
+    // A recorded install folder that would stay keeps the files the uninstaller removes.
+    let has_folder = match target.install_location.as_deref() {
+        Some(loc) => {
+            scanner::own_install_folder(target).is_some()
+                || high_dirs.any(|l| system::path_under(loc, Path::new(&l.path)))
+        }
+        None => high_dirs.next().is_some(),
+    };
     if !has_folder {
         return run("no folder of its own is known");
     }
@@ -1274,6 +1281,33 @@ mod tests {
             &machine(),
         );
         assert!(step.runs());
+    }
+
+    #[test]
+    fn a_recorded_folder_that_stays_keeps_the_uninstaller() {
+        // The settings folder goes, the program files named otherwise would stay.
+        let mut t = target();
+        t.install_location = Some(PathBuf::from(r"D:\Example Studio\EP-files"));
+        let settings = dir(r"D:\Settings\ExamplePlayer", Confidence::High);
+        let step = vendor_step(
+            &program(Hive::CurrentUser),
+            &plan(false),
+            &t,
+            std::slice::from_ref(&settings),
+            &machine(),
+        );
+        assert!(step.runs(), "{step:?}");
+
+        // A High folder around the recorded one takes it along.
+        let around = dir(r"D:\Example Studio", Confidence::High);
+        let step = vendor_step(
+            &program(Hive::CurrentUser),
+            &plan(false),
+            &t,
+            &[settings, around],
+            &machine(),
+        );
+        assert!(!step.runs(), "{step:?}");
     }
 
     #[test]
