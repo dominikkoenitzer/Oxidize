@@ -286,6 +286,10 @@ pub trait Pc {
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
     /// Run the vendor's uninstaller; returns how it went.
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<Ran>;
+    /// Why the uninstaller cannot start because its file is gone, if it is.
+    fn uninstaller_missing(&self, plan: &UninstallPlan) -> Option<String> {
+        crate::uninstall::missing_program(plan)
+    }
     /// Wait until the program is unregistered; true when it is.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove the items, with a backup unless told otherwise.
@@ -399,6 +403,19 @@ pub fn remove_completely(
         out.report = full.unwrap_or_default();
         out.selected = at_level(&out.report, opts.level);
         out.removal = pc.remove(&out.selected, &program.display_name).ok();
+        out.seconds = start.elapsed().as_secs_f64();
+        return out;
+    }
+
+    // An uninstaller that cannot start leaves the program as it is, its windows open.
+    if let Some(e) = out
+        .vendor
+        .runs()
+        .then(|| pc.uninstaller_missing(plan))
+        .flatten()
+    {
+        out.error = Some(e);
+        out.verdict.still_installed = pc.still_installed(program);
         out.seconds = start.elapsed().as_secs_f64();
         return out;
     }
@@ -654,6 +671,8 @@ mod tests {
         vendor_takes: Vec<String>,
         /// The vendor's uninstaller is still running when the wait ends.
         never_ends: bool,
+        /// The uninstaller's file is gone.
+        uninstaller_gone: bool,
         /// Processes that stay when they are asked to close.
         stays: Vec<u32>,
         /// Items a scan finds only once the item at the path is gone.
@@ -671,6 +690,7 @@ mod tests {
                 stuck: Vec::new(),
                 vendor_takes: Vec::new(),
                 never_ends: false,
+                uninstaller_gone: false,
                 stays: Vec::new(),
                 shows_once_gone: RefCell::new(Vec::new()),
                 backups: RefCell::new(0),
@@ -766,6 +786,9 @@ mod tests {
 
         fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<Ran> {
             self.calls.borrow_mut().push("uninstall".to_string());
+            if self.uninstaller_gone {
+                anyhow::bail!("{}: uninstall.exe", crate::uninstall::UNINSTALLER_MISSING);
+            }
             self.items
                 .borrow_mut()
                 .retain(|l| !self.vendor_takes.contains(&l.path));
@@ -779,6 +802,11 @@ mod tests {
                 said: "finished".to_string(),
                 ended: true,
             })
+        }
+
+        fn uninstaller_missing(&self, _plan: &UninstallPlan) -> Option<String> {
+            self.uninstaller_gone
+                .then(|| format!("{}: uninstall.exe", crate::uninstall::UNINSTALLER_MISSING))
         }
 
         fn wait_until_gone(&self, _program: &Program, _plan: &UninstallPlan) -> bool {
@@ -1072,6 +1100,30 @@ mod tests {
             ]
         );
         assert!(out.complete(), "{out:?}");
+    }
+
+    #[test]
+    fn a_missing_uninstaller_stops_the_flow_before_anything_closes() {
+        let mut items = per_user_footprint();
+        items.push(Leftover::service(
+            "ExampleSvc",
+            r"D:\ExamplePlayer\svc.exe",
+            Confidence::High,
+            "named after the program",
+        ));
+        let mut pc = FakePc::new(items);
+        pc.uninstaller_gone = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(out.vendor.runs());
+        assert_eq!(pc.calls(), ["scan true"]);
+        assert!(out.closed.is_empty());
+        let error = out.error.unwrap_or_default();
+        assert!(
+            error.starts_with(crate::uninstall::UNINSTALLER_MISSING),
+            "{error}"
+        );
+        assert!(out.verdict.still_installed);
     }
 
     #[test]
