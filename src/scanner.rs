@@ -744,7 +744,7 @@ fn shared_install_folder(
     let key = norm_path_key(loc);
     if other_installs
         .iter()
-        .any(|o| dir_contains(&key, &norm_path_key(o)))
+        .any(|o| holds_install(&key, &norm_path_key(o)))
     {
         return true;
     }
@@ -1466,6 +1466,11 @@ fn dir_contains(dir: &str, other: &str) -> bool {
     other.len() > dir.len() && other.starts_with(&format!("{dir}\\"))
 }
 
+/// Does another program live in the folder, inside it or recorded as the folder itself?
+fn holds_install(dir: &str, install: &str) -> bool {
+    dir == install || dir_contains(dir, install)
+}
+
 /// Install folders of every other program, so a shared parent folder is never
 /// proposed for deletion.
 fn other_program_install_dirs(
@@ -1829,7 +1834,7 @@ fn scan_dir_children(
                 .unwrap_or(false);
             let houses_other = other_installs
                 .iter()
-                .any(|o| dir_contains(&key, &norm_path_key(o)));
+                .any(|o| holds_install(&key, &norm_path_key(o)));
             // Reading the folder is only worth it where its name counts.
             let family = std::cell::OnceCell::new();
             let family =
@@ -1921,7 +1926,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             let loc_key = norm_path_key(loc);
             let houses_other = other_installs
                 .iter()
-                .any(|other| dir_contains(&loc_key, &norm_path_key(other)));
+                .any(|other| holds_install(&loc_key, &norm_path_key(other)));
             // A folder named exactly like the product is the product's own,
             // even if the publisher name contains that word.
             let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
@@ -2943,6 +2948,37 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_another_program_records_as_its_own_is_left_alone() {
+        let root = crate::backup::TestDir::new("oxidize_same_folder_test");
+        let host = root.join("Example Editor");
+        fs::create_dir_all(host.join("bin")).unwrap();
+        let mut host_entry = listed("Example Editor", "example-editor", Some("Example Corp"));
+        host_entry.install_location = Some(host.display().to_string());
+        let mut addon = name_target("Example Editor Language Pack", Some("Example Corp"));
+        addon.registry = Some((
+            "example-editor-language-pack".to_string(),
+            RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+        ));
+        let others = std::slice::from_ref(&host);
+
+        // The add-on records its host's folder: that folder is not its own.
+        assert!(shared_install_folder(&host, &addon, others, &[]));
+
+        // Nor is it taken by name from the folder it sits in.
+        let editor = name_target("Example Editor", Some("Example Corp"));
+        let mut out = Vec::new();
+        scan_dir_children(&root, &editor, others, false, &[], &mut out);
+        assert!(out.is_empty(), "{out:?}");
+
+        // Nor as the recorded install folder.
+        addon.install_location = Some(host.clone());
+        let snap = Snapshot::with_programs(vec![host_entry]);
+        let _ = snap.roots.set(Vec::new());
+        let out = scan_filesystem(&addon, &snap);
+        assert!(out.iter().all(|l| Path::new(&l.path) != host), "{out:?}");
+    }
+
+    #[test]
     fn an_install_folder_is_not_matched_by_its_own_name() {
         let program = |install: &str| Program {
             registry_key: "Foo Editor".to_string(),
@@ -3294,7 +3330,7 @@ mod tests {
             None,
         );
         nvapp.publisher = Some("NVIDIA Corporation".to_string());
-        let nvapp = build_target(&nvapp);
+        let nvapp = build_target_with(&nvapp, &Snapshot::with_programs(vec![nvapp.clone()]));
         assert!(nvapp.name_tokens.len() > 1, "{:?}", nvapp.name_tokens);
         assert!(score_product("NVIDIA App SelfUpdate_", &nvapp).is_some());
 
