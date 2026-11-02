@@ -3078,8 +3078,8 @@ fn resolve_target<'a>(
 /// Programs and Store apps side by side: an exact id (a program's registry
 /// id; an app's family, full or identity name), then an exact name, then a
 /// unique part of a name. A name both kinds answer to equally well is
-/// ambiguous; neither wins. Store apps signed as part of Windows answer only
-/// to their exact id or name.
+/// ambiguous; neither wins. Store apps signed as part of Windows and programs
+/// hidden from the list answer only to their exact id or name.
 pub(crate) fn resolve_any<'a>(
     programs: &'a [Program],
     packages: &'a [Package],
@@ -3123,7 +3123,7 @@ pub(crate) fn resolve_any<'a>(
     let needle = target.to_lowercase();
     let subs: Vec<&Program> = programs
         .iter()
-        .filter(|p| p.display_name.to_lowercase().contains(&needle))
+        .filter(|p| !p.is_system_component && p.display_name.to_lowercase().contains(&needle))
         .collect();
     let sub_apps: Vec<&Package> = packages
         .iter()
@@ -3704,6 +3704,30 @@ mod tests {
             resolve_any(&[], &apps, "shell helper"),
             Ok(Resolved::Store(_))
         ));
+    }
+
+    #[test]
+    fn a_hidden_component_answers_only_to_its_exact_id_or_name() {
+        let mut part = program("Example Suite Runtime", "{RUNTIME-ID}", Some("x.exe"));
+        part.is_system_component = true;
+        let mut programs = installed();
+        programs.push(part);
+        assert!(matches!(
+            resolve_any(&programs, &[], "suite"),
+            Err(Resolve::NotFound)
+        ));
+        // Next to a listed program it does not make the name ambiguous.
+        programs.push(program("Example Suite", "example-suite", Some("y.exe")));
+        assert!(matches!(
+            resolve_any(&programs, &[], "suite"),
+            Ok(Resolved::Program(p)) if p.display_name == "Example Suite"
+        ));
+        for exact in ["example suite runtime", "{RUNTIME-ID}"] {
+            assert!(matches!(
+                resolve_any(&programs, &[], exact),
+                Ok(Resolved::Program(p)) if p.is_system_component
+            ));
+        }
     }
 
     #[test]
