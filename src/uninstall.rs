@@ -77,6 +77,7 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
         });
     }
 
+    let mut stamped = false;
     let (raw, source) = if silent {
         match (&program.quiet_uninstall_string, &program.uninstall_string) {
             (Some(q), _) => (q.clone(), "QuietUninstallString".to_string()),
@@ -84,6 +85,13 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
                 format!("{u} {UNINS_SILENT}"),
                 "UninstallString with the unins000.exe silent switches".to_string(),
             ),
+            (None, Some(u)) if stamped_uninstaller(u) => {
+                stamped = true;
+                (
+                    u.clone(),
+                    "UninstallString with the /S silent switch".to_string(),
+                )
+            }
             (None, Some(u)) => (u.clone(), "UninstallString, no quiet variant".to_string()),
             (None, None) => bail!("no uninstall command recorded for this program"),
         }
@@ -95,12 +103,20 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
         (u, "UninstallString".to_string())
     };
 
-    let argv = util::split_uninstall_command(&util::expand_env_vars(&raw));
+    let mut argv = util::split_uninstall_command(&util::expand_env_vars(&raw));
     if argv.first().is_none_or(|exe| exe.trim().is_empty()) {
         bail!("uninstall command parsed to nothing: {raw:?}");
     }
+    // The switch goes right after the program, since `_?=` has to stay last.
+    if stamped
+        && !argv[1..]
+            .iter()
+            .any(|a| a.eq_ignore_ascii_case(STAMPED_SILENT))
+    {
+        argv.insert(1, STAMPED_SILENT.to_string());
+    }
     let unattended =
-        silent && (program.quiet_uninstall_string.is_some() || unins_uninstaller(&raw));
+        silent && (program.quiet_uninstall_string.is_some() || unins_uninstaller(&raw) || stamped);
     Ok(UninstallPlan {
         argv,
         is_msi: false,
@@ -123,6 +139,36 @@ fn unins_uninstaller(command: &str) -> bool {
     };
     let stem = base.strip_suffix(".exe").unwrap_or(&base);
     stem.len() == 8 && stem.starts_with("unins") && stem[5..].bytes().all(|b| b.is_ascii_digit())
+}
+
+/// What a stamped uninstaller takes to run without a window.
+const STAMPED_SILENT: &str = "/S";
+
+/// The stamp another widely used install system writes after its program code, behind four bytes of flags.
+const STAMP: &[u8; 16] = b"\xEF\xBE\xAD\xDENullsoftInst";
+
+/// The flag that system sets in the uninstallers it writes and leaves off in installers.
+const STAMP_UNINSTALL_FLAG: u32 = 1;
+
+/// An uninstaller with the stamp, told by its file, since its name is the author's choice.
+fn stamped_uninstaller(command: &str) -> bool {
+    let argv = util::split_uninstall_command(&util::expand_env_vars(command));
+    let Some(exe) = argv.first() else {
+        return false;
+    };
+    std::fs::File::open(exe).is_ok_and(|f| stamped_uninstaller_data(std::io::BufReader::new(f)))
+}
+
+/// Finds the stamp where its install system does, at a 512-byte block; an installer, which `/S` would run, lacks the flag.
+fn stamped_uninstaller_data(mut file: impl std::io::Read) -> bool {
+    let mut block = [0u8; 512];
+    while file.read_exact(&mut block).is_ok() {
+        if &block[4..20] == STAMP {
+            let flags = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
+            return flags & STAMP_UNINSTALL_FLAG != 0;
+        }
+    }
+    false
 }
 
 /// Launch the plan and wait for the spawned process to exit.
@@ -255,20 +301,39 @@ pub fn wait_for_completion(program: &Program, plan: &UninstallPlan, max: Duratio
 
 /// Some uninstallers run from `%TEMP%\<random>\_iu14D2N.tmp` or similar.
 fn is_temp_uninstaller(exe: &Path) -> bool {
-    let Some(temp) = std::env::var_os("TEMP").map(std::path::PathBuf::from) else {
-        return false;
-    };
-    if !system::path_under(exe, &temp) {
+    // A stamped uninstaller takes the temp folder from Windows, which reads TMP before TEMP.
+    ["TMP", "TEMP"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .any(|temp| temp_uninstaller_in(exe, Path::new(&temp)))
+}
+
+fn temp_uninstaller_in(exe: &Path, temp: &Path) -> bool {
+    if !system::path_under(exe, temp) {
         return false;
     }
-    let name = exe
-        .file_name()
-        .map(|s| s.to_string_lossy().to_lowercase())
+    let lower = |s: &std::ffi::OsStr| s.to_string_lossy().to_lowercase();
+    let name = exe.file_name().map(lower).unwrap_or_default();
+    let folder = exe
+        .parent()
+        .and_then(Path::file_name)
+        .map(lower)
         .unwrap_or_default();
     name.contains("unins")
         || name.ends_with(".tmp")
         || name.contains("setup")
         || name.contains("install")
+        || stamped_copy(&folder, &name)
+}
+
+/// A stamped uninstaller runs from its copy in `~nsuA.tmp\Au_.exe`, `Un_A.exe` in newer versions.
+fn stamped_copy(folder: &str, name: &str) -> bool {
+    let copy_folder = folder.starts_with("~nsu") && folder.ends_with(".tmp");
+    let un_letter = name
+        .strip_prefix("un_")
+        .and_then(|rest| rest.strip_suffix(".exe"))
+        .is_some_and(|l| l.len() == 1 && l.bytes().all(|b| b.is_ascii_alphabetic()));
+    copy_folder || name == "au_.exe" || un_letter
 }
 
 pub fn describe_exit(status: ExitStatus, is_msi: bool) -> String {
@@ -354,6 +419,79 @@ mod tests {
         assert!(!unins_uninstaller(r"C:\Apps\unins.exe"));
         assert!(!unins_uninstaller(r"C:\Apps\uninstaller.exe"));
         assert!(unins_uninstaller(r"C:\Apps\unins001.exe /LOG"));
+    }
+
+    /// A made-up program file with the stamp at the given offset.
+    fn stamped_file(
+        name: &str,
+        flags: u32,
+        at: usize,
+    ) -> (std::path::PathBuf, crate::backup::TestCleanup) {
+        let root =
+            std::env::temp_dir().join(format!("oxidize-test-run-{}-{name}", std::process::id()));
+        let exe = root.join(r"Quillmark Notes\uninstall\helper.exe");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let mut bytes = vec![0u8; 2048];
+        bytes[..2].copy_from_slice(b"MZ");
+        bytes[at..at + 4].copy_from_slice(&flags.to_le_bytes());
+        bytes[at + 4..at + 20].copy_from_slice(STAMP);
+        std::fs::write(&exe, bytes).unwrap();
+        (exe, crate::backup::TestCleanup(vec![root]))
+    }
+
+    #[test]
+    fn a_stamped_uninstaller_gets_its_silent_switch() {
+        let (exe, _cleanup) = stamped_file("stamp_switch", STAMP_UNINSTALL_FLAG, 512);
+        let path = exe.to_string_lossy().to_string();
+        let p = program(&format!("\"{path}\" _?=C:\\Apps\\Quillmark"), None);
+        let silent = plan(&p, true).unwrap();
+        assert!(silent.unattended);
+        assert_eq!(silent.argv, [path.as_str(), "/S", r"_?=C:\Apps\Quillmark"]);
+        let asked = plan(&p, false).unwrap();
+        assert!(!asked.unattended);
+        assert_eq!(asked.argv, [path.as_str(), r"_?=C:\Apps\Quillmark"]);
+        // A quiet command still wins.
+        let quiet = program(&format!("\"{path}\""), Some(r"C:\Apps\Quillmark\quiet.exe"));
+        assert_eq!(
+            plan(&quiet, true).unwrap().argv,
+            [r"C:\Apps\Quillmark\quiet.exe"]
+        );
+    }
+
+    #[test]
+    fn a_stamped_installer_or_a_stray_stamp_gets_no_switch() {
+        for (name, flags, at) in [
+            ("stamp_installer", 0, 512),
+            ("stamp_stray", STAMP_UNINSTALL_FLAG, 700),
+        ] {
+            let (exe, _cleanup) = stamped_file(name, flags, at);
+            let path = exe.to_string_lossy().to_string();
+            let silent = plan(&program(&format!("\"{path}\""), None), true).unwrap();
+            assert!(!silent.unattended, "{name}");
+            assert_eq!(silent.argv, [path.as_str()], "{name}");
+        }
+        assert!(!stamped_uninstaller(r#""C:\Apps\Quillmark\gone.exe""#));
+    }
+
+    #[test]
+    fn the_stamped_copy_in_temp_counts_as_the_uninstaller() {
+        let temp = Path::new(r"C:\Users\someone\AppData\Local\Temp");
+        for exe in [
+            r"~nsuA.tmp\Un_A.exe",
+            r"~nsuB.tmp\Au_.exe",
+            r"~nsu.tmp\Un_C.exe",
+        ] {
+            assert!(temp_uninstaller_in(&temp.join(exe), temp), "{exe}");
+        }
+        for exe in [
+            r"quillmark\runner.exe",
+            r"cache\Un_Archive.exe",
+            r"Au_.exe.bak",
+        ] {
+            assert!(!temp_uninstaller_in(&temp.join(exe), temp), "{exe}");
+        }
+        let elsewhere = Path::new(r"C:\Apps\~nsuA.tmp\Un_A.exe");
+        assert!(!temp_uninstaller_in(elsewhere, temp));
     }
 
     #[test]
