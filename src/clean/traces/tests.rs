@@ -82,6 +82,9 @@ impl Shell for FakeShell {
     }
 }
 
+/// Making a key under the shared parent and deleting the parent take turns, or one lands on the other.
+static PARENT: Mutex<()> = Mutex::new(());
+
 /// A stand-in profile. Its registry key and folder go when the test ends,
 /// also when it fails.
 struct Profile {
@@ -94,6 +97,7 @@ impl Drop for Profile {
     fn drop(&mut self) {
         let _ = hkcu().delete_subkey_all(&self.key);
         // The parent goes once no other test uses it.
+        let _turn = PARENT.lock().unwrap_or_else(|e| e.into_inner());
         let _ = hkcu().delete_subkey(STAND_IN_KEY);
     }
 }
@@ -130,6 +134,7 @@ impl Profile {
         } else {
             format!(r"{}\{rel}", self.places.explorer_key)
         };
+        let _turn = PARENT.lock().unwrap_or_else(|e| e.into_inner());
         hkcu().create_subkey(path).unwrap().0
     }
 
