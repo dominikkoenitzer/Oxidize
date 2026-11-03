@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.2.13, 2026-11-03
+
+- `--silent` gives `/S` to an uninstaller from another widely used install
+  system when the program records no quiet command. It is known by the
+  stamp that system writes into the file, never by its name, and an
+  installer of that kind, whose stamp lacks the uninstall flag, gets no
+  switch. The wait afterwards also follows the copy of itself such an
+  uninstaller runs from the temp folder.
+- `clean --delete-dead` deletes the chosen unclaimed folders that are proven
+  dead outright, each checked again right before it goes and taken whole or
+  not at all. One that came alive goes into the backup instead.
+- `clean --build-output` cleans stale build output in the profile: folders a
+  build tool marked as its cache, beside a project file or ignored by git,
+  untouched for 30 days and not in use. It is looked for only when named,
+  and in the window only once its row is ticked.
+- `clean --dump` cleans only the dumps named, and `--skip-dumps-of` leaves
+  one program's dumps.
+- Warnings and errors are coloured by whether stderr itself is a terminal.
+- An unquoted uninstall command takes its program from disk before an exe
+  named in its arguments, and a traced path has its `..` parts resolved
+  before install folders are matched.
+
 ## 0.2.12, 2026-10-30
 
 - A git repository in a temp folder stays whole, however old its files are.
