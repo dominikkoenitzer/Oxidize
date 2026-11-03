@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.14, 2026-11-03
+
+- `--silent` gives `/S` to any uninstall command whose file carries the
+  stamp read since 0.2.13, also when the stamp marks the file as an
+  installer. Some programs register such an installer as their uninstaller,
+  and without the switch it ran its wizard unseen and left the program
+  installed. Only a stamp on the 512-byte grid counts, as before.
+
 ## 0.2.13, 2026-11-03
 
 - `--silent` gives `/S` to an uninstaller from another widely used install
