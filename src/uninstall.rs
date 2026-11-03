@@ -147,9 +147,6 @@ const STAMPED_SILENT: &str = "/S";
 /// The stamp another widely used install system writes after its program code, behind four bytes of flags.
 const STAMP: &[u8; 16] = b"\xEF\xBE\xAD\xDENullsoftInst";
 
-/// The flag that system sets in the uninstallers it writes and leaves off in installers.
-const STAMP_UNINSTALL_FLAG: u32 = 1;
-
 /// An uninstaller with the stamp, told by its file, since its name is the author's choice.
 fn stamped_uninstaller(command: &str) -> bool {
     let argv = util::split_uninstall_command(&util::expand_env_vars(command));
@@ -159,13 +156,12 @@ fn stamped_uninstaller(command: &str) -> bool {
     std::fs::File::open(exe).is_ok_and(|f| stamped_uninstaller_data(std::io::BufReader::new(f)))
 }
 
-/// Finds the stamp where its install system does, at a 512-byte block; an installer, which `/S` would run, lacks the flag.
+/// Finds the stamp where its install system does, at a 512-byte block, whatever its flags say: the registry names it the uninstaller, and installers take `/S` too.
 fn stamped_uninstaller_data(mut file: impl std::io::Read) -> bool {
     let mut block = [0u8; 512];
     while file.read_exact(&mut block).is_ok() {
         if &block[4..20] == STAMP {
-            let flags = u32::from_le_bytes([block[0], block[1], block[2], block[3]]);
-            return flags & STAMP_UNINSTALL_FLAG != 0;
+            return true;
         }
     }
     false
@@ -420,6 +416,9 @@ mod tests {
         assert!(!unins_uninstaller(r"C:\Apps\uninstaller.exe"));
         assert!(unins_uninstaller(r"C:\Apps\unins001.exe /LOG"));
     }
+
+    /// The flag that install system sets in the uninstallers it writes and leaves off in installers.
+    const STAMP_UNINSTALL_FLAG: u32 = 1;
 
     /// A made-up program file with a stamp, given by its flags, at each offset.
     fn stamped_file(
