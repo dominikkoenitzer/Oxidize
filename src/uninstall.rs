@@ -421,11 +421,10 @@ mod tests {
         assert!(unins_uninstaller(r"C:\Apps\unins001.exe /LOG"));
     }
 
-    /// A made-up program file with the stamp at the given offset.
+    /// A made-up program file with a stamp, given by its flags, at each offset.
     fn stamped_file(
         name: &str,
-        flags: u32,
-        at: usize,
+        stamps: &[(u32, usize)],
     ) -> (std::path::PathBuf, crate::backup::TestCleanup) {
         let root =
             std::env::temp_dir().join(format!("oxidize-test-run-{}-{name}", std::process::id()));
@@ -433,15 +432,17 @@ mod tests {
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         let mut bytes = vec![0u8; 2048];
         bytes[..2].copy_from_slice(b"MZ");
-        bytes[at..at + 4].copy_from_slice(&flags.to_le_bytes());
-        bytes[at + 4..at + 20].copy_from_slice(STAMP);
+        for &(flags, at) in stamps {
+            bytes[at..at + 4].copy_from_slice(&flags.to_le_bytes());
+            bytes[at + 4..at + 20].copy_from_slice(STAMP);
+        }
         std::fs::write(&exe, bytes).unwrap();
         (exe, crate::backup::TestCleanup(vec![root]))
     }
 
     #[test]
     fn a_stamped_uninstaller_gets_its_silent_switch() {
-        let (exe, _cleanup) = stamped_file("stamp_switch", STAMP_UNINSTALL_FLAG, 512);
+        let (exe, _cleanup) = stamped_file("stamp_switch", &[(STAMP_UNINSTALL_FLAG, 512)]);
         let path = exe.to_string_lossy().to_string();
         let p = program(&format!("\"{path}\" _?=C:\\Apps\\Quillmark"), None);
         let silent = plan(&p, true).unwrap();
@@ -459,17 +460,31 @@ mod tests {
     }
 
     #[test]
-    fn a_stamped_installer_or_a_stray_stamp_gets_no_switch() {
-        for (name, flags, at) in [
-            ("stamp_installer", 0, 512),
-            ("stamp_stray", STAMP_UNINSTALL_FLAG, 700),
-        ] {
-            let (exe, _cleanup) = stamped_file(name, flags, at);
-            let path = exe.to_string_lossy().to_string();
-            let silent = plan(&program(&format!("\"{path}\""), None), true).unwrap();
-            assert!(!silent.unattended, "{name}");
-            assert_eq!(silent.argv, [path.as_str()], "{name}");
-        }
+    fn a_stamped_installer_named_as_the_uninstaller_gets_the_switch_too() {
+        // The first stamp lacks the uninstall flag; the flagged one embedded after it is off the 512-byte grid.
+        let (exe, _cleanup) = stamped_file(
+            "stamp_installer",
+            &[(0, 1024), (STAMP_UNINSTALL_FLAG, 1300)],
+        );
+        let path = exe.to_string_lossy().to_string();
+        let p = program(&format!("\"{path}\" _?=C:\\Apps\\Quillmark"), None);
+        let silent = plan(&p, true).unwrap();
+        assert!(silent.unattended);
+        assert_eq!(silent.argv, [path.as_str(), "/S", r"_?=C:\Apps\Quillmark"]);
+        let quiet = program(&format!("\"{path}\""), Some(r"C:\Apps\Quillmark\quiet.exe"));
+        assert_eq!(
+            plan(&quiet, true).unwrap().argv,
+            [r"C:\Apps\Quillmark\quiet.exe"]
+        );
+    }
+
+    #[test]
+    fn a_stray_stamp_gets_no_switch() {
+        let (exe, _cleanup) = stamped_file("stamp_stray", &[(STAMP_UNINSTALL_FLAG, 700)]);
+        let path = exe.to_string_lossy().to_string();
+        let silent = plan(&program(&format!("\"{path}\""), None), true).unwrap();
+        assert!(!silent.unattended);
+        assert_eq!(silent.argv, [path.as_str()]);
         assert!(!stamped_uninstaller(r#""C:\Apps\Quillmark\gone.exe""#));
     }
 
