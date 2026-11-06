@@ -75,6 +75,14 @@ const REG_DENY: &[&str] = &[
     "odbc",
 ];
 
+/// Endings of the settings files a program may keep in the user's folder.
+const USER_FOLDER_SETTINGS: &[&str] = &["cfg", "conf", "ini", "json", "toml", "yaml", "yml"];
+
+/// Folders in the user's folder, with or without their dot, that hold what
+/// many programs or the user put there. A program of that name does not own
+/// them: `.ssh` holds the user's keys whatever "SSH" says.
+const USER_FOLDER_SHARED: &[&str] = &["cache", "config", "git", "gnupg", "local", "ssh"];
+
 /// Directory names that must never appear anywhere in a path we propose
 /// deleting, so an install folder recorded inside a shared location stays.
 const SHARED_DIR_DENY: &[&str] = &[
@@ -1628,6 +1636,8 @@ fn guard_paths() -> &'static Guards {
             env_dir("USERPROFILE").and_then(|p| p.parent().map(Path::to_path_buf)),
             env_dir("USERPROFILE").map(|p| p.join("Documents")),
             env_dir("USERPROFILE").map(|p| p.join("Downloads")),
+            // Many programs share it; the empty-parent cleanup stops here.
+            env_dir("USERPROFILE").map(|p| p.join(".config")),
             env_dir("APPDATA").and_then(|p| p.parent().map(Path::to_path_buf)),
             env_dir("LOCALAPPDATA").and_then(|p| p.parent().map(|a| a.join("LocalLow"))),
             env_dir("TEMP"),
@@ -1890,6 +1900,99 @@ fn scan_dir_children(
     }
 }
 
+/// Is this file a program's settings by name alone: `quillmark.json`,
+/// `.quillmark.json` or `.quillmark`?
+fn is_settings_file_of(name: &str, target: &ScanTarget) -> bool {
+    let bare = name.strip_prefix('.');
+    let plain = bare.unwrap_or(name);
+    match plain.rsplit_once('.') {
+        Some((stem, end)) => {
+            USER_FOLDER_SETTINGS.contains(&end.to_lowercase().as_str())
+                && is_exact_product(stem, target)
+        }
+        None => {
+            bare.is_some()
+                && !USER_FOLDER_SHARED.contains(&plain.to_lowercase().as_str())
+                && is_exact_product(plain, target)
+        }
+    }
+}
+
+/// The user's folder and its `.config`, where some programs keep their
+/// settings. Most of what is here is the user's own, so only the program's
+/// exact name counts, and these are never read as a vendor's folders. A plain
+/// folder of that name may be a project of the user's, so it is never High.
+fn scan_user_folder(
+    home: &Path,
+    target: &ScanTarget,
+    other_installs: &[PathBuf],
+    name_shared: bool,
+    roots: &[PathBuf],
+    out: &mut Vec<Leftover>,
+) {
+    let sure = if name_shared || target.vendor_is_shared {
+        Confidence::Medium
+    } else {
+        Confidence::High
+    };
+    let config = home.join(".config");
+    for (dir, in_config) in [(home, false), (config.as_path(), true)] {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        let place = if in_config {
+            "exact name, in .config in the user's folder"
+        } else {
+            "exact name, in the user's folder"
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if fs_denied(&name) {
+                continue;
+            }
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                let bare = name.strip_prefix('.');
+                let plain = bare.unwrap_or(&name);
+                if USER_FOLDER_SHARED.contains(&plain.to_lowercase().as_str())
+                    || !is_exact_product(plain, target)
+                {
+                    continue;
+                }
+                let key = norm_path_key(&path);
+                let holds_install = target
+                    .install_location
+                    .as_deref()
+                    .is_some_and(|loc| dir_contains(&key, &norm_path_key(loc)));
+                let houses_other = other_installs
+                    .iter()
+                    .any(|other| dir_contains(&key, &norm_path_key(other)));
+                if holds_install || houses_other {
+                    continue;
+                }
+                if in_config || bare.is_some() {
+                    push_dir_leftover(out, path, sure, place.to_string(), roots);
+                } else {
+                    let reason =
+                        "exact name, but a plain folder in the user's folder may be the user's own";
+                    push_dir_leftover(out, path, Confidence::Medium, reason.to_string(), roots);
+                }
+            } else if ft.is_file() && is_settings_file_of(&name, target) {
+                let size = entry.metadata().map(|m| m.len()).ok();
+                out.push(Leftover::fs(
+                    LeftoverKind::File,
+                    path,
+                    sure,
+                    place.to_string(),
+                    size,
+                    false,
+                ));
+            }
+        }
+    }
+}
+
 fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
     let other_installs = other_program_install_dirs(target.registry.as_ref(), snap.programs());
     let other_installs = other_installs.as_slice();
@@ -1953,6 +2056,13 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
         jobs.push(Box::new(move || {
             let mut out = Vec::new();
             scan_dir_children(root, target, other_installs, name_shared, roots, &mut out);
+            out
+        }));
+    }
+    if let Some(home) = env_dir("USERPROFILE") {
+        jobs.push(Box::new(move || {
+            let mut out = Vec::new();
+            scan_user_folder(&home, target, other_installs, name_shared, roots, &mut out);
             out
         }));
     }
@@ -3864,6 +3974,95 @@ mod tests {
         // Once the folder is gone, a path into it names the program.
         let gone = program_files().join(r"Brightway\Versions\version-0000\StudioBeta.exe");
         assert!(path_names_product(&gone, &t));
+    }
+
+    #[test]
+    fn the_user_folder_counts_the_exact_name_and_nothing_else() {
+        let t = name_target("Quillmark", None);
+        let home = crate::backup::TestDir::new("oxidize_user_folder_test");
+        for dir in [
+            ".quillmark",
+            "Quillmark",
+            ".quillmark-backup",
+            "Quillmark Notes",
+            r".config\quillmark",
+            r".config\quillmark-extra",
+            r".config\other",
+        ] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        for file in [
+            "quillmark.json",
+            ".quillmark.toml",
+            "quillmark.txt",
+            "quillmark.docx",
+            "quillmark-notes.json",
+            r".config\quillmark.yaml",
+            r".config\other.yaml",
+        ] {
+            fs::write(home.join(file), "x").unwrap();
+        }
+
+        let mut out = Vec::new();
+        scan_user_folder(&home, &t, &[], false, &fs_roots(), &mut out);
+        let mut found: Vec<(String, Confidence)> =
+            out.iter().map(|l| (l.path.clone(), l.confidence)).collect();
+        found.sort();
+        let mut want: Vec<(String, Confidence)> = [
+            (".quillmark", Confidence::High),
+            (".quillmark.toml", Confidence::High),
+            ("Quillmark", Confidence::Medium),
+            ("quillmark.json", Confidence::High),
+            (r".config\quillmark", Confidence::High),
+            (r".config\quillmark.yaml", Confidence::High),
+        ]
+        .into_iter()
+        .map(|(path, level)| (home.join(path).display().to_string(), level))
+        .collect();
+        want.sort();
+        assert_eq!(found, want);
+
+        // Another program carries the name: nothing here is sure to be ours.
+        let mut out = Vec::new();
+        scan_user_folder(&home, &t, &[], true, &fs_roots(), &mut out);
+        assert_eq!(out.len(), want.len());
+        assert!(out.iter().all(|l| l.confidence == Confidence::Medium));
+    }
+
+    #[test]
+    fn the_user_folder_keeps_what_many_programs_share() {
+        let home = crate::backup::TestDir::new("oxidize_user_shared_test");
+        for name in USER_FOLDER_SHARED {
+            fs::create_dir_all(home.join(format!(".{name}"))).unwrap();
+            fs::create_dir_all(home.join(name)).unwrap();
+        }
+        for name in USER_FOLDER_SHARED {
+            let t = name_target(name, None);
+            let mut out = Vec::new();
+            scan_user_folder(&home, &t, &[], false, &fs_roots(), &mut out);
+            assert!(out.is_empty(), "{name}: {} found", out.len());
+        }
+
+        // A program installed inside a folder of the name keeps that folder.
+        let t = name_target("Quillmark", None);
+        let own = home.join(".quillmark");
+        fs::create_dir_all(own.join("other")).unwrap();
+        let mut out = Vec::new();
+        scan_user_folder(
+            &home,
+            &t,
+            &[own.join("other")],
+            false,
+            &fs_roots(),
+            &mut out,
+        );
+        assert!(out.is_empty(), "{} found", out.len());
+
+        let profile = env_dir("USERPROFILE").unwrap();
+        assert!(is_protected_path(&profile.join(".config")));
+        assert!(!is_protected_path(
+            &profile.join(".config").join("quillmark")
+        ));
     }
 
     #[test]
