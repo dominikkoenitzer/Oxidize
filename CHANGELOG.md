@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.15, 2026-11-06
+
+- The scan looks for a program's settings in the user's folder and in its
+  `.config` folder, by the exact name. A dot folder, a folder inside
+  `.config` or a settings file such as `name.json` counts as high confidence,
+  and as medium when the name or the vendor is shared with other programs. A
+  plain folder of that name in the user's folder is always medium. These
+  stayed behind before, while the report said nothing was left.
+
 ## 0.2.14, 2026-11-03
 
 - `--silent` gives `/S` to any uninstall command whose file carries the
