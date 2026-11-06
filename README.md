@@ -12,8 +12,8 @@ under [Other ways to install](#other-ways-to-install).
 ## What it does
 
 Windows' own uninstall leaves things around: registry keys, folders under
-AppData and ProgramData, services, scheduled tasks, firewall rules, PATH
-entries that point nowhere. Oxidize closes whatever still runs from the
+AppData and ProgramData, settings in the user's folder, services, scheduled
+tasks, firewall rules, PATH entries that point nowhere. Oxidize closes whatever still runs from the
 program's folders, runs its uninstaller when one is needed, then finds those
 leftovers and removes them. A second scan ends the run with `Nothing left.` or
 a list of what is still there and why. Everything removed is backed up first
