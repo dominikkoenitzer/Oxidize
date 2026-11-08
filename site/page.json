@@ -216,9 +216,9 @@
     ]
   },
   "data": {
-    "title": "Only the backups",
+    "title": "Backups and protected folders",
     "body": [
-      "Each removal gets one backup folder under <code>%LOCALAPPDATA%\\Oxidize\\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data."
+      "Each removal gets one backup folder under <code>%LOCALAPPDATA%\\Oxidize\\backups</code>, with the exported registry keys, the moved files and a list of every step. Besides them, Oxidize stores only the list of protected folders in <code>%LOCALAPPDATA%\\Oxidize\\protected.txt</code>."
     ]
   },
   "keys": [
@@ -261,7 +261,7 @@
     {
       "title": "Removing it",
       "body": [
-        "Delete oxidize-gui.exe, and <code>%LOCALAPPDATA%\\Oxidize</code> once you no longer need the backups in it."
+        "Delete oxidize-gui.exe and oxidize.exe, then <code>%LOCALAPPDATA%\\Oxidize</code> once you no longer need the backups in it. If you added a folder to your PATH for oxidize.exe, remove that entry too."
       ]
     }
   ],
