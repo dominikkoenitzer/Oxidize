@@ -1323,9 +1323,42 @@ pub(crate) mod tests {
         let (big, small) = headline(&c, false);
         assert_eq!(big, format!("{} freed", util::human_size(2048)));
         assert_eq!(small, "Analyse again to see what is left.");
-        // Changing the protected list afterwards keeps the result in view.
-        c.slate = Slate::default();
-        assert!(c.has_something());
+    }
+
+    #[test]
+    fn a_saved_change_of_the_list_drops_an_analysis_and_keeps_what_was_freed() {
+        let dir =
+            std::env::temp_dir().join(format!("oxidize-gui-test-listsave-{}", std::process::id()));
+        let file = dir.join("protected.txt");
+        let mut c = tab();
+        c.list_file = Ok(file.clone());
+        let freed = vec![Cleaned {
+            category: Category::Temp,
+            freed: 2048,
+            removed: 3,
+            kept: Vec::new(),
+            backup: None,
+            notes: Vec::new(),
+        }];
+        c.results = Some(freed.clone());
+        c.new_protected = r"C:\Example Keep".to_string();
+        c.add_protected();
+        let added = protect::load_from(&file).map(|p| p.entries().to_vec());
+        let head = headline(&c, false).0;
+
+        c.take_analysis(Places::default(), analysis());
+        c.results = Some(freed);
+        c.remove_protected(r"C:\Example Keep");
+        let removed = protect::load_from(&file).map(|p| p.entries().to_vec());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(added.unwrap(), [r"C:\Example Keep"]);
+        // A cleaning's results stay in view.
+        assert_eq!(head, format!("{} freed", util::human_size(2048)));
+        assert!(removed.unwrap().is_empty());
+        assert_eq!(c.protect_error, None);
+        assert!(c.analysis.is_none(), "it may hold what the list now covers");
+        assert!(c.results.is_none());
     }
 
     #[test]
