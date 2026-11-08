@@ -3147,12 +3147,12 @@ fn ambiguous(target: &str, programs: &[&Program], apps: &[&Package]) -> Resolve 
     let n = programs.len() + apps.len();
     let listing = programs
         .iter()
-        .map(|p| format!("  {}  {}", p.display_name, term::dim(p.id())))
+        .map(|p| format!("  {}  {}", p.display_name, term::dim_err(p.id())))
         .chain(apps.iter().map(|a| {
             format!(
                 "  {} (Store app)  {}",
                 a.display_name,
-                term::dim(&a.family_name)
+                term::dim_err(&a.family_name)
             )
         }))
         .take(12)
