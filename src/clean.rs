@@ -982,7 +982,7 @@ fn component_store(opts: &Options) -> Finding {
                 .push("the space freed is measured on the drive afterwards".into());
             f.work = Work::Tool(None);
         }
-        Err(e) => f.keep(KeptReason::Failed(format!("{e:#}")), 0, 0),
+        Err(e) => f.keep(KeptReason::Failed(util::plain_reason(e.as_ref())), 0, 0),
     }
     f
 }
@@ -1002,7 +1002,7 @@ fn delivery_optimization(opts: &Options) -> Finding {
                 f.keep(KeptReason::NeedsAdmin, count, bytes);
             }
         }
-        Err(e) => f.keep(KeptReason::Failed(format!("{e:#}")), 0, 0),
+        Err(e) => f.keep(KeptReason::Failed(util::plain_reason(e.as_ref())), 0, 0),
     }
     f
 }
@@ -1396,7 +1396,11 @@ fn run_tool(f: &Finding, dir: Option<&Path>, c: &mut Cleaned, opts: &CleanOption
         _ => Ok(()),
     };
     if let Err(e) = result {
-        c.keep(KeptReason::Failed(format!("{e:#}")), f.count, f.bytes);
+        c.keep(
+            KeptReason::Failed(util::plain_reason(e.as_ref())),
+            f.count,
+            f.bytes,
+        );
         return;
     }
     match f.category {
@@ -1559,7 +1563,7 @@ fn remove_dirs(
             }
         }
         Err(e) => c.keep(
-            KeptReason::Failed(format!("{e:#}")),
+            KeptReason::Failed(util::plain_reason(e.as_ref())),
             items.len(),
             items.iter().map(|(_, b)| b).sum(),
         ),

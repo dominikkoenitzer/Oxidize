@@ -372,6 +372,39 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Why an operation failed, in the words of the first system error in its chain, for a user to read.
+pub fn plain_reason(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut cause = e;
+    while !cause.is::<std::io::Error>() {
+        match cause.source() {
+            Some(next) => cause = next,
+            None => break,
+        }
+    }
+    let text = cause.to_string();
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(" (os error ") {
+        plain.push_str(&rest[..at]);
+        let tail = &rest[at + " (os error ".len()..];
+        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+        match tail[digits..].strip_prefix(')') {
+            Some(after) if digits > 0 => rest = after,
+            _ => {
+                plain.push_str(" (os error ");
+                rest = tail;
+            }
+        }
+    }
+    plain.push_str(rest);
+    let plain = plain.trim();
+    plain
+        .strip_suffix('.')
+        .unwrap_or(plain)
+        .trim_end()
+        .to_string()
+}
+
 /// Parse a raw `InstallDate` value into `YYYY-MM-DD`. Installers write the
 /// documented `YYYYMMDD`, but also ISO dates, `MM/DD/YYYY` and free text.
 /// Anything that is not a plausible date yields `None`.
@@ -422,6 +455,34 @@ pub fn file_basename_lower(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_reads_as_the_words_of_the_system_error_in_it() {
+        let missing = std::io::Error::from_raw_os_error(2);
+        let words = missing.to_string();
+        let words = words.split(" (os error").next().unwrap();
+        let words = words.strip_suffix('.').unwrap_or(words);
+        assert_eq!(plain_reason(&missing), words);
+        let chained = anyhow::Error::from(std::io::Error::from_raw_os_error(2))
+            .context("starting dism.exe")
+            .context("reading the component store");
+        assert_eq!(plain_reason(chained.as_ref()), words);
+        // A message that quotes system errors keeps their words and loses each number.
+        let quoted = std::io::Error::other(
+            "part is gone: Not here. (os error 145); stopped: Busy. (os error 32)",
+        );
+        assert_eq!(
+            plain_reason(&quoted),
+            "part is gone: Not here.; stopped: Busy"
+        );
+        // Without an io error the root cause speaks, and other parentheses stay.
+        let root =
+            anyhow::anyhow!("dism.exe ended with exit code 5 (os error x)").context("cleaning");
+        assert_eq!(
+            plain_reason(root.as_ref()),
+            "dism.exe ended with exit code 5 (os error x)"
+        );
+    }
 
     #[test]
     fn splits_quoted_exe_with_args() {

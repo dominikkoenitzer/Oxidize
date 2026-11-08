@@ -37,11 +37,16 @@ impl FakeShell {
     }
 }
 
+/// Windows refusing a call, as an io error inside the context around it.
+fn refusal(code: i32, doing: &'static str) -> anyhow::Error {
+    anyhow::Error::from(io::Error::from_raw_os_error(code)).context(doing)
+}
+
 impl Shell for FakeShell {
     fn clear_recent(&self) -> Result<()> {
         self.calls.lock().unwrap().push("clear_recent");
         if self.fail {
-            anyhow::bail!("refused");
+            return Err(refusal(2, "clearing the recent items"));
         }
         let Some(dir) = &self.recent_dir else {
             return Ok(());
@@ -69,7 +74,7 @@ impl Shell for FakeShell {
     fn purge_thumbnails(&self, dir: &Path) -> Result<()> {
         self.calls.lock().unwrap().push("purge_thumbnails");
         if self.fail {
-            anyhow::bail!("refused");
+            return Err(refusal(145, "emptying the thumbnail cache"));
         }
         for (path, _) in thumbnail_files(dir) {
             fs::write(&path, [0u8; 24]).unwrap();
@@ -523,4 +528,48 @@ fn a_file_explorer_took_first_is_not_a_failure() {
     // Anything else is still an error.
     fs::create_dir_all(dir.join("a folder")).unwrap();
     assert!(remove_if_there(&dir.join("a folder")).is_err());
+}
+
+/// Windows' words for `code`, without the number, the chain or a final full stop.
+fn assert_plain(text: &str, code: i32) {
+    let words = io::Error::from_raw_os_error(code).to_string();
+    assert!(!text.is_empty());
+    assert!(!text.contains("os error"), "{text}");
+    assert!(!text.ends_with('.'), "{text}");
+    assert!(
+        words.starts_with(text),
+        "{text} is not the start of {words}"
+    );
+}
+
+#[test]
+fn a_failed_trace_keeps_the_words_of_windows_without_the_number() {
+    for code in [2, 145] {
+        match reason_of(&io::Error::from_raw_os_error(code)) {
+            KeptReason::Failed(text) => assert_plain(&text, code),
+            other => panic!("{code} became {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_refusal_from_windows_reads_without_the_chain() {
+    let p = Profile::used("refused_words");
+    let mut shell = FakeShell::new(&p.places, ClipboardState::Absent);
+    shell.fail = true;
+    let done = clear(&p.places, &Protected::default(), &shell);
+    for (trace, code) in [(Trace::JumpLists, 2), (Trace::Thumbnails, 145)] {
+        let texts: Vec<&String> = find(&done, trace)
+            .kept
+            .iter()
+            .filter_map(|k| match &k.reason {
+                KeptReason::Failed(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(!texts.is_empty(), "{trace:?}");
+        for text in texts {
+            assert_plain(text, code);
+        }
+    }
 }
