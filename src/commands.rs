@@ -2636,6 +2636,11 @@ fn print_cleaned(done: &[Cleaned], freed: u64) {
         if let Some(stays) = clean::stays_text(&c.kept) {
             println!("{INDENT}{}", term::dim(&stays));
         }
+        for k in &c.kept {
+            if let clean::KeptReason::NoBackup(refused) = &k.reason {
+                println!("{INDENT}{}", term::dim(&refused.to_string()));
+            }
+        }
     }
     println!();
     println!("{} freed", util::human_size(freed));

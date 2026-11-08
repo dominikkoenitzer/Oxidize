@@ -912,6 +912,12 @@ fn show_results(
             let color = if c.failed() { t.red } else { t.weak };
             ui.add(egui::Label::new(RichText::new(stays).small().color(color)).wrap());
         }
+        for k in &c.kept {
+            if let clean::KeptReason::NoBackup(refused) = &k.reason {
+                let words = RichText::new(refused.window_text()).small().color(t.weak);
+                ui.add(egui::Label::new(words).wrap());
+            }
+        }
         if let Some(name) = &c.backup {
             if ui
                 .add_enabled(!busy, egui::Button::new("Undo"))

@@ -1221,6 +1221,43 @@ fn a_folder_that_came_alive_since_the_analysis_goes_into_the_backup() {
 }
 
 #[test]
+fn folders_that_cannot_be_backed_up_stay_and_say_so_without_a_flag() {
+    let pc = Pc::new("orphans_no_backup");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, true);
+    // A file stands where this test's backups folder belongs.
+    let backups = crate::backup::backups_base().unwrap();
+    let run = backups.parent().unwrap().to_path_buf();
+    let _cleanup = crate::backup::TestCleanup(vec![run.clone()]);
+    fs::create_dir_all(&run).unwrap();
+    fs::write(&backups, "x").unwrap();
+
+    let choice = a.choice(&[Category::Orphans], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    assert_eq!(o.removed, 0);
+    assert!(quill.path.exists() && ink.path.exists());
+    assert!(o.failed());
+    let [k] = &o.kept[..] else {
+        panic!("{:?}", o.kept);
+    };
+    assert!(matches!(k.reason, KeptReason::NoBackup(_)), "{k:?}");
+    assert_eq!((k.count, k.reason.code()), (2, "failed"));
+    let stays = stays_text(&o.kept).unwrap();
+    assert!(stays.contains("not deleted without a backup"), "{stays}");
+    for term in ["--", "os error", "refusing"] {
+        assert!(!stays.contains(term), "{term} in {stays}");
+    }
+    // The command line's JSON keeps the flag that gets past it.
+    let json = serde_json::to_value(k).unwrap();
+    let reason = json["reason"].as_str().unwrap();
+    assert!(
+        reason.ends_with("Pass --no-backup to delete anyway."),
+        "{reason}"
+    );
+}
+
+#[test]
 fn a_plain_analysis_does_not_look_for_build_output_or_prove_folders_dead() {
     use super::build::tests::cache;
     let pc = Pc::new("plain_analysis");

@@ -210,7 +210,8 @@ impl KeptReason {
             KeptReason::Uncommitted => "in a git checkout with uncommitted work".to_string(),
             KeptReason::CheckoutUnknown => "in a git checkout git could not check".to_string(),
             KeptReason::Failed(e) => e.clone(),
-            KeptReason::NoBackup(refused) => refused.to_string(),
+            // Each front end says why and what to do in its own words.
+            KeptReason::NoBackup(_) => "not deleted without a backup".to_string(),
         }
     }
 }
@@ -227,7 +228,12 @@ impl Serialize for Kept {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut st = s.serialize_struct("Kept", 4)?;
         st.serialize_field("code", self.reason.code())?;
-        st.serialize_field("reason", &self.reason.text())?;
+        // Only the command line writes JSON, so a backup refusal keeps its flag there.
+        let reason = match &self.reason {
+            KeptReason::NoBackup(refused) => refused.to_string(),
+            other => other.text(),
+        };
+        st.serialize_field("reason", &reason)?;
         st.serialize_field("count", &self.count)?;
         st.serialize_field("bytes", &self.bytes)?;
         st.end()
