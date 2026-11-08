@@ -10,12 +10,20 @@ fn home_path(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("oxidize_{name}_{}", std::process::id()))
 }
 
-/// The stand-in user folder with its two AppData folders.
+/// The stand-in user folder with its two AppData folders, removed when the test ends, passed or failed.
 struct Home(PathBuf);
 
 impl Home {
     fn new(name: &str) -> Home {
         let path = home_path(name);
+        // A run that was killed before its guard ran can leave the folder, and the process id comes round again.
+        if let Err(e) = fs::remove_dir_all(&path) {
+            assert!(
+                e.kind() == std::io::ErrorKind::NotFound,
+                "cannot clear {}: {e}",
+                path.display()
+            );
+        }
         let app_data = path.join("AppData");
         fs::create_dir_all(app_data.join("Roaming")).unwrap();
         fs::create_dir_all(app_data.join("Local")).unwrap();
@@ -28,6 +36,12 @@ impl std::ops::Deref for Home {
 
     fn deref(&self) -> &Path {
         &self.0
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 
@@ -95,10 +109,6 @@ fn settings_in_the_user_folder_are_found_removed_and_restored() {
         fs::read_to_string(folder.join("settings.toml")).unwrap(),
         "a = 1"
     );
-
-    let path = home.to_path_buf();
-    drop(home);
-    let _ = fs::remove_dir_all(&path);
 }
 
 #[test]
