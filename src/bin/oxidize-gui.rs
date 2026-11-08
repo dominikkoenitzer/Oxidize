@@ -370,6 +370,8 @@ impl OxidizeApp {
     }
 
     fn start_scan(&mut self, ctx: &egui::Context, program: Program) {
+        // A newer scan says what it finds, whatever an earlier removal held.
+        self.keep_status_for = None;
         self.status = format!("Scanning for leftovers of {}...", program.display_name);
         self.spawn(ctx, move || {
             // One reading of the machine serves both steps.
@@ -3873,6 +3875,74 @@ mod tests {
             .unwrap();
         app.drain_messages(&ctx);
         assert_eq!(app.status, "0 leftovers of Example Player.");
+    }
+
+    #[test]
+    fn a_scan_after_another_program_was_picked_during_the_re_scan_says_what_it_found() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let other = Program {
+            registry_key: "other-app".to_string(),
+            display_name: "Other App".to_string(),
+            ..example_program()
+        };
+        let mut app = app();
+        app.programs = vec![program.clone(), other.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let outcome = DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        };
+        app.tx.send(Msg::Removed(outcome)).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // Another program is picked while the re-scan runs, so its answer is
+        // dropped. The list reload is left out to keep that selection.
+        app.select(other.id());
+        let answers = wait_for_answers(&mut app, 2);
+        app.job_done();
+        for msg in answers {
+            if matches!(msg, Msg::Scan { .. }) {
+                app.tx.send(msg).unwrap();
+            }
+        }
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+
+        // Back to the first program and a scan of it.
+        app.select(program.id());
+        app.act(&ctx, Action::Scan(program.clone()));
+        assert_eq!(app.status, "Scanning for leftovers of Example Player...");
+        for msg in wait_for_answers(&mut app, 1) {
+            app.tx.send(msg).unwrap();
+        }
+        app.drain_messages(&ctx);
+        let found = app.scan.as_ref().expect("the scan is shown").total();
+        assert_eq!(
+            app.status,
+            format!(
+                "{} of Example Player.",
+                count(found, "leftover", "leftovers")
+            )
+        );
+    }
+
+    /// Takes `n` answers of the background work off the channel.
+    fn wait_for_answers(app: &mut OxidizeApp, n: usize) -> Vec<Msg> {
+        let mut answers = Vec::new();
+        let start = std::time::Instant::now();
+        while answers.len() < n && start.elapsed() < std::time::Duration::from_secs(300) {
+            match app.rx.try_recv() {
+                Ok(msg) => answers.push(msg),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        assert_eq!(answers.len(), n, "the background work answers");
+        answers
     }
 
     #[test]
