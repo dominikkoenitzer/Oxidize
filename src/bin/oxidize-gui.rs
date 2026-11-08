@@ -941,8 +941,7 @@ impl OxidizeApp {
         }
     }
 
-    /// The arrow and page keys are the table's while focus is on nothing,
-    /// the search field or the table itself, and no menu is open.
+    /// True while focus is on the table, the search field or nothing, and no menu is open.
     fn table_has_keys(&self, ctx: &egui::Context) -> bool {
         !egui::Popup::is_any_open(ctx)
             && ctx
@@ -4921,8 +4920,7 @@ mod tests {
         out.textures_delta.clear();
     }
 
-    /// Two programs in the table, the first one selected and scanned with one
-    /// leftover ticked. Also returns both ids in table order.
+    /// Two programs, the first selected and scanned with one leftover ticked, and both ids.
     fn two_programs_one_scanned() -> (egui::Context, OxidizeApp, [String; 2]) {
         let ctx = egui::Context::default();
         apply_style(&ctx);
