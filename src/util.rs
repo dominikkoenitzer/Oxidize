@@ -197,22 +197,6 @@ pub fn expand_env_vars(s: &str) -> String {
     out
 }
 
-/// Split a Windows command line into arguments following the
-/// `CommandLineToArgvW` / MSVCRT rules (so a quoted path containing spaces is
-/// one argument). `argv[0]` is the executable, the rest are its arguments.
-///
-/// Rules implemented:
-///  * a run of `2n` backslashes before a `"` => `n` backslashes and the quote
-///    toggles quoting;
-///  * a run of `2n+1` backslashes before a `"` => `n` backslashes and a literal
-///    `"`;
-///  * backslashes not before a quote are literal;
-///  * `""` while inside quotes => a literal `"`;
-///  * outside quotes, runs of spaces/tabs separate arguments.
-///
-/// Note: the real API treats `argv[0]` slightly specially, but program paths in
-/// uninstall strings are either quoted or contain no embedded quotes, so the
-/// general rules produce the correct result for our inputs.
 /// Split a registry uninstall command into argv.
 ///
 /// `CommandLineToArgvW` splits an unquoted program path on its spaces, but
@@ -286,6 +270,22 @@ pub fn program_prefix_end(s: &str) -> Option<usize> {
     candidate
 }
 
+/// Split a Windows command line into arguments following the
+/// `CommandLineToArgvW` / MSVCRT rules (so a quoted path containing spaces is
+/// one argument). `argv[0]` is the executable, the rest are its arguments.
+///
+/// Rules implemented:
+///  * a run of `2n` backslashes before a `"` => `n` backslashes and the quote
+///    toggles quoting;
+///  * a run of `2n+1` backslashes before a `"` => `n` backslashes and a literal
+///    `"`;
+///  * backslashes not before a quote are literal;
+///  * `""` while inside quotes => a literal `"`;
+///  * outside quotes, runs of spaces/tabs separate arguments.
+///
+/// Note: the real API treats `argv[0]` slightly specially, but program paths in
+/// uninstall strings are either quoted or contain no embedded quotes, so the
+/// general rules produce the correct result for our inputs.
 pub fn split_command_line(cmd: &str) -> Vec<String> {
     let chars: Vec<char> = cmd.chars().collect();
     let n = chars.len();
