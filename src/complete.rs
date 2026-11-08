@@ -660,6 +660,8 @@ mod tests {
         stays: Vec<u32>,
         /// Items a scan finds only once the item at the path is gone.
         shows_once_gone: RefCell<Vec<(String, Leftover)>>,
+        /// The backup folder cannot be made.
+        no_backup: bool,
         /// Backups made so far.
         backups: RefCell<usize>,
         calls: RefCell<Vec<String>>,
@@ -675,6 +677,7 @@ mod tests {
                 never_ends: false,
                 stays: Vec::new(),
                 shows_once_gone: RefCell::new(Vec::new()),
+                no_backup: false,
                 backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
             }
@@ -792,6 +795,11 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("remove {}", items.len()));
+            if self.no_backup {
+                return Err(anyhow::Error::new(BackupRefused {
+                    reason: "Access is denied. (os error 5)".to_string(),
+                }));
+            }
             let n = self.backups.replace_with(|n| *n + 1) + 1;
             Ok(DeletionOutcome {
                 backup_name: Some(format!("backup {n}")),
@@ -883,6 +891,34 @@ mod tests {
             assert!(out.removal.is_none(), "{out:?}");
             assert!(!out.complete(), "{out:?}");
         }
+    }
+
+    #[test]
+    fn a_backup_folder_that_cannot_be_made_stops_the_removal_as_a_refusal() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.no_backup = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(
+            pc.calls().contains(&"remove 2".to_string()),
+            "{:?}",
+            pc.calls()
+        );
+        assert_eq!(pc.items.borrow().len(), 3);
+        assert!(out.removal.is_none(), "{out:?}");
+        assert!(!out.complete(), "{out:?}");
+        assert_eq!(
+            out.refused,
+            Some(BackupRefused {
+                reason: "Access is denied. (os error 5)".to_string()
+            })
+        );
+        // The command line keeps its flag.
+        let said = out.error.unwrap_or_default();
+        assert!(
+            said.ends_with("Pass --no-backup to delete anyway."),
+            "{said}"
+        );
     }
 
     #[test]
