@@ -562,6 +562,31 @@ mod tests {
     }
 
     #[test]
+    fn an_unquoted_path_without_an_extension_stays_whole_until_it_names_a_file() {
+        let root = crate::backup::TestDir::new("oxidize_split_noext_test");
+        let folder = root.join("Vendor App");
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join("Uninstaller");
+        let program = program.to_str().unwrap();
+        let cmd = format!("{program} /S");
+        assert_eq!(split_uninstall_command(&cmd), [cmd.as_str()]);
+        std::fs::write(program, b"").unwrap();
+        assert_eq!(split_uninstall_command(&cmd), [program, "/S"]);
+    }
+
+    #[test]
+    fn a_real_program_before_an_exe_argument_is_the_program() {
+        let root = crate::backup::TestDir::new("oxidize_split_bat_test");
+        let folder = root.join("My Tools");
+        std::fs::create_dir_all(&folder).unwrap();
+        let bat = folder.join("start.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        let bat = bat.to_str().unwrap();
+        let v = split_uninstall_command(&format!(r"{bat} C:\App\app.exe"));
+        assert_eq!(v, [bat, r"C:\App\app.exe"]);
+    }
+
+    #[test]
     fn the_extension_has_to_end_the_program_path() {
         let v = split_uninstall_command(r"C:\Tools\Foo.exeBackup\uninst.exe /S");
         assert_eq!(v[0], r"C:\Tools\Foo.exeBackup\uninst.exe");
