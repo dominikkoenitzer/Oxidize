@@ -384,14 +384,13 @@ pub fn plain_reason(e: &(dyn std::error::Error + 'static)) -> String {
     let text = cause.to_string();
     let mut plain = String::with_capacity(text.len());
     let mut rest = text.as_str();
-    while let Some(at) = rest.find(" (os error ") {
+    while let Some(at) = rest.find(" (") {
         plain.push_str(&rest[..at]);
-        let tail = &rest[at + " (os error ".len()..];
-        let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
-        match tail[digits..].strip_prefix(')') {
-            Some(after) if digits > 0 => rest = after,
-            _ => {
-                plain.push_str(" (os error ");
+        let tail = &rest[at + 2..];
+        match error_code_len(tail) {
+            Some(len) => rest = &tail[len..],
+            None => {
+                plain.push_str(" (");
                 rest = tail;
             }
         }
@@ -403,6 +402,27 @@ pub fn plain_reason(e: &(dyn std::error::Error + 'static)) -> String {
         .unwrap_or(plain)
         .trim_end()
         .to_string()
+}
+
+/// The length of "os error 5)" or "0x80070005)" at the start of `s`, the codes Rust and Windows append.
+fn error_code_len(s: &str) -> Option<usize> {
+    let (body, hex) = match (s.strip_prefix("os error "), s.strip_prefix("0x")) {
+        (Some(body), _) => (body, false),
+        (_, Some(body)) => (body, true),
+        _ => return None,
+    };
+    let len = body
+        .bytes()
+        .take_while(|b| {
+            if hex {
+                b.is_ascii_hexdigit()
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+        .count();
+    let fits = if hex { len == 8 } else { len > 0 };
+    (fits && body[len..].starts_with(')')).then(|| s.len() - body.len() + len + 1)
 }
 
 /// Parse a raw `InstallDate` value into `YYYY-MM-DD`. Installers write the
@@ -475,6 +495,8 @@ mod tests {
             plain_reason(&quoted),
             "part is gone: Not here.; stopped: Busy"
         );
+        let coded = std::io::Error::other("Catastrophic failure (0x8000FFFF)");
+        assert_eq!(plain_reason(&coded), "Catastrophic failure");
         // Without an io error the root cause speaks, and other parentheses stay.
         let root =
             anyhow::anyhow!("dism.exe ended with exit code 5 (os error x)").context("cleaning");

@@ -553,6 +553,21 @@ fn a_failed_trace_keeps_the_words_of_windows_without_the_number() {
 }
 
 #[test]
+fn a_failed_windows_call_reads_without_its_code() {
+    use windows::core::HRESULT;
+    let refused = windows::core::Error::from_hresult(HRESULT(0x8007_0005_u32 as i32));
+    let words = refused.message();
+    let e = anyhow::Error::from(refused).context("emptying the thumbnail cache");
+    let text = plain_reason(e.as_ref());
+    assert!(!text.contains("0x"), "{text}");
+    assert!(!text.ends_with('.'), "{text}");
+    assert!(
+        !text.is_empty() && words.starts_with(&text),
+        "{text} is not the start of {words}"
+    );
+}
+
+#[test]
 fn a_refusal_from_windows_reads_without_the_chain() {
     let p = Profile::used("refused_words");
     let mut shell = FakeShell::new(&p.places, ClipboardState::Absent);
