@@ -95,12 +95,17 @@ pub fn yellow(text: &str) -> String {
 
 /// A plain line on stdout.
 pub fn info(msg: &str) {
-    println!("{msg}");
+    crate::out::write(format_args!("{msg}\n"));
 }
 
 /// `warning: ...` on stderr.
 pub fn warn(msg: &str) {
     eprintln!("{}", warn_line(&switches(), msg));
+}
+
+/// [`warn`], for when stderr may be gone too.
+pub(crate) fn try_warn(msg: &str) {
+    let _ = writeln!(io::stderr(), "{}", warn_line(&switches(), msg));
 }
 
 /// `error: ...` on stderr.
@@ -115,8 +120,7 @@ pub fn confirm(question: &str, default_yes: bool) -> bool {
     if !io::stdin().is_terminal() {
         return false;
     }
-    print!("{question} {hint} ");
-    let _ = io::stdout().flush();
+    crate::out::write(format_args!("{question} {hint} "));
 
     let mut line = String::new();
     if io::stdin().read_line(&mut line).is_err() {
