@@ -394,6 +394,40 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_destlist_shorter_than_its_header_is_an_error_not_a_panic() {
+        let file = compound(&[("DestList", vec![4, 0, 0, 0, 9, 0, 0, 0])]);
+        let err = parse(&file).unwrap_err();
+        assert_eq!(err.to_string(), "the DestList is too short");
+    }
+
+    #[test]
+    fn an_unknown_sector_size_is_an_error_not_a_panic() {
+        // One small stream at mini sector 0, so a mini sector as large as a
+        // sector would still read.
+        let good = compound(&[("DestList", dest_list(3, 1, 32))]);
+        assert!(parse(&good).is_ok());
+        // A sector shift far past 16, then a mini shift equal to the shift.
+        for (at, shift) in [(0x1E, 0xFFFFu16), (0x20, 9)] {
+            let mut file = good.clone();
+            file[at..at + 2].copy_from_slice(&shift.to_le_bytes());
+            let err = parse(&file).unwrap_err();
+            assert_eq!(err.to_string(), "unknown sector size", "{at:#x}");
+        }
+    }
+
+    #[test]
+    fn a_stream_that_claims_more_than_its_sectors_hold_is_an_error() {
+        let mut file = compound(&[("DestList", dest_list(3, 1, 32))]);
+        // The DestList is the entry after the root; its 32 bytes fill one
+        // mini sector of 64. Claim 200, still under the 4096-byte cutoff.
+        let size = (u32_at(&file, 0x30) as usize + 1) * SECTOR + DIR_ENTRY + 0x78;
+        assert_eq!(u32_at(&file, size), 32);
+        file[size..size + 4].copy_from_slice(&200u32.to_le_bytes());
+        let err = parse(&file).unwrap_err();
+        assert_eq!(err.to_string(), "the stream is cut short");
+    }
+
+    #[test]
     fn a_looping_chain_is_an_error_not_a_hang() {
         let mut file = compound(&[("DestList", dest_list(40, 0, 5200))]);
         // Point the stream's last sector back at its first.
