@@ -3559,6 +3559,12 @@ unsafe fn hicon_to_rgba(
         &mut bi,
         DIB_RGB_COLORS,
     );
+    // An icon without alpha keeps its clear parts in the AND mask.
+    let mask = if lines != 0 && buf.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+        mask_pixels(hdc, info.hbmMask, w, h)
+    } else {
+        None
+    };
     ReleaseDC(None, hdc);
     cleanup(&info);
     if lines == 0 {
@@ -3570,13 +3576,66 @@ unsafe fn hicon_to_rgba(
     for px in pixels.iter_mut() {
         px.swap(0, 2);
     }
-    // Some icons report no alpha at all (all zero); treat those as opaque.
-    if pixels.iter().all(|p| p[3] == 0) {
-        for px in pixels.iter_mut() {
-            px[3] = 255;
-        }
-    }
+    fill_alpha(pixels, mask.as_deref().map(|m| m.as_chunks::<4>().0));
     Some((buf, w as u32, h as u32))
+}
+
+/// The AND mask of an icon as 32-bit rows, when it is the size of the colour bitmap.
+#[cfg(windows)]
+unsafe fn mask_pixels(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    mask: windows::Win32::Graphics::Gdi::HBITMAP,
+    w: i32,
+    h: i32,
+) -> Option<Vec<u8>> {
+    use std::ffi::c_void;
+    use windows::Win32::Graphics::Gdi::{
+        GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
+    };
+
+    let mut bm = BITMAP::default();
+    let got = GetObjectW(
+        HGDIOBJ(mask.0),
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut _ as *mut c_void),
+    );
+    if got == 0 || bm.bmWidth != w || bm.bmHeight != h {
+        return None;
+    }
+
+    let mut bi = BITMAPINFO::default();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = 0; // BI_RGB
+
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    let lines = GetDIBits(
+        hdc,
+        mask,
+        0,
+        h as u32,
+        Some(buf.as_mut_ptr() as *mut c_void),
+        &mut bi,
+        DIB_RGB_COLORS,
+    );
+    (lines == h).then_some(buf)
+}
+
+/// Alpha for an icon that has none: clear where Windows shows what is behind it, else opaque.
+#[cfg(any(windows, test))]
+fn fill_alpha(pixels: &mut [[u8; 4]], mask: Option<&[[u8; 4]]>) {
+    if pixels.iter().any(|p| p[3] != 0) {
+        return;
+    }
+    let mask = mask.filter(|m| m.len() == pixels.len());
+    for (i, px) in pixels.iter_mut().enumerate() {
+        // A set mask bit over black is see-through; over a colour Windows inverts, so keep it.
+        let clear = mask.is_some_and(|m| m[i][..3] != [0, 0, 0]) && px[..3] == [0, 0, 0];
+        px[3] = if clear { 0 } else { 255 };
+    }
 }
 
 #[cfg(test)]
@@ -3597,6 +3656,75 @@ mod tests {
     #[test]
     fn the_tests_keep_to_a_stand_in_protected_list() {
         assert_eq!(app().cleanup.list_file, Ok(stand_in_list()));
+    }
+
+    #[test]
+    fn an_icon_without_alpha_is_clear_where_its_mask_is_set() {
+        let mut pixels = [[10, 20, 30, 0], [0, 0, 0, 0], [40, 50, 60, 0], [0, 0, 0, 0]];
+        let mask = [
+            [0, 0, 0, 0],
+            [255, 255, 255, 0],
+            [0, 0, 0, 0],
+            [255, 255, 255, 0],
+        ];
+        fill_alpha(&mut pixels, Some(&mask));
+        assert_eq!(pixels.map(|p| p[3]), [255, 0, 255, 0]);
+        assert_eq!(pixels[0], [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn an_icon_with_alpha_keeps_it_whatever_its_mask_says() {
+        let mut pixels = [[10, 20, 30, 128], [0, 0, 0, 0], [40, 50, 60, 255]];
+        fill_alpha(&mut pixels, Some(&[[255, 255, 255, 0]; 3]));
+        assert_eq!(pixels.map(|p| p[3]), [128, 0, 255]);
+    }
+
+    #[test]
+    fn an_icon_without_alpha_or_a_mask_that_fits_is_opaque() {
+        let mut pixels = [[10, 20, 30, 0]; 2];
+        fill_alpha(&mut pixels, None);
+        assert_eq!(pixels.map(|p| p[3]), [255, 255]);
+
+        let mut pixels = [[10, 20, 30, 0]; 2];
+        fill_alpha(&mut pixels, Some(&[[255, 255, 255, 0]]));
+        assert_eq!(pixels.map(|p| p[3]), [255, 255]);
+    }
+
+    #[test]
+    fn a_coloured_pixel_under_a_set_mask_bit_stays_visible() {
+        let mut pixels = [[200, 0, 0, 0], [0, 0, 0, 0]];
+        fill_alpha(&mut pixels, Some(&[[255, 255, 255, 0]; 2]));
+        assert_eq!(pixels.map(|p| p[3]), [255, 0]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_icon_made_without_alpha_comes_out_clear_where_its_mask_is_set() {
+        use windows::Win32::UI::WindowsAndMessaging::{CreateIcon, DestroyIcon};
+        // Left half masked over black, right half red under a clear mask.
+        let and_bits: Vec<u8> = (0..16).flat_map(|_| [0xFF, 0x00]).collect();
+        let xor_bits: Vec<u8> = (0..16 * 16)
+            .flat_map(|i| {
+                if i % 16 < 8 {
+                    [0, 0, 0, 0]
+                } else {
+                    [0, 0, 255, 0]
+                }
+            })
+            .collect();
+        let (rgba, w, h) = unsafe {
+            let icon = CreateIcon(None, 16, 16, 1, 32, and_bits.as_ptr(), xor_bits.as_ptr())
+                .expect("a 16 by 16 icon");
+            let out = hicon_to_rgba(icon);
+            let _ = DestroyIcon(icon);
+            out.expect("the icon converts")
+        };
+        assert_eq!((w, h), (16, 16));
+        let (pixels, _) = rgba.as_chunks::<4>();
+        assert_eq!(pixels[0], [0, 0, 0, 0]);
+        assert_eq!(pixels[15], [255, 0, 0, 255]);
+        assert_eq!(pixels[16 * 15 + 7], [0, 0, 0, 0]);
+        assert_eq!(pixels[16 * 15 + 8], [255, 0, 0, 255]);
     }
 
     #[test]
