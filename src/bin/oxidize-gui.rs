@@ -410,7 +410,10 @@ impl OxidizeApp {
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
                 Ok(outcome) => Msg::Removed(outcome),
-                Err(e) => Msg::Error(format!("Removal failed: {e:#}")),
+                Err(e) => Msg::Error(match safety::BackupRefused::of(&e) {
+                    Some(refused) => refused.window_text(),
+                    None => format!("Removal failed: {e:#}"),
+                }),
             }
         });
     }

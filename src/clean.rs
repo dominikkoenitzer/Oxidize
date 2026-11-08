@@ -168,6 +168,8 @@ pub enum KeptReason {
     /// In a git checkout git could not be asked about.
     CheckoutUnknown,
     Failed(String),
+    /// Not deleted, as the backup folder could not be made.
+    NoBackup(safety::BackupRefused),
 }
 
 impl KeptReason {
@@ -187,7 +189,8 @@ impl KeptReason {
             KeptReason::LeftOut => "left_out",
             KeptReason::Uncommitted => "uncommitted",
             KeptReason::CheckoutUnknown => "checkout_unknown",
-            KeptReason::Failed(_) => "failed",
+            // Scripts read a backup refusal as the failure it always was.
+            KeptReason::Failed(_) | KeptReason::NoBackup(_) => "failed",
         }
     }
 
@@ -207,6 +210,7 @@ impl KeptReason {
             KeptReason::Uncommitted => "in a git checkout with uncommitted work".to_string(),
             KeptReason::CheckoutUnknown => "in a git checkout git could not check".to_string(),
             KeptReason::Failed(e) => e.clone(),
+            KeptReason::NoBackup(refused) => refused.to_string(),
         }
     }
 }
@@ -1298,7 +1302,7 @@ impl Cleaned {
     pub fn failed(&self) -> bool {
         self.kept
             .iter()
-            .any(|k| matches!(k.reason, KeptReason::Failed(_)))
+            .any(|k| matches!(k.reason, KeptReason::Failed(_) | KeptReason::NoBackup(_)))
     }
 }
 
@@ -1556,6 +1560,12 @@ fn remove_dirs(
             }
             if outcome.backup_name.is_some() {
                 c.backup = outcome.backup_name;
+            }
+        }
+        Err(e) if safety::BackupRefused::of(&e).is_some() => {
+            if let Some(refused) = safety::BackupRefused::of(&e) {
+                let bytes = items.iter().map(|(_, b)| b).sum();
+                c.keep(KeptReason::NoBackup(refused.clone()), items.len(), bytes);
             }
         }
         Err(e) => c.keep(

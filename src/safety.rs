@@ -85,6 +85,39 @@ impl DeletionOutcome {
     }
 }
 
+/// A removal refused because backups are on and the backup folder could not
+/// be made. Its text is the command line's; the window words it its own way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupRefused {
+    /// Why the folder could not be made.
+    pub reason: String,
+}
+
+impl BackupRefused {
+    /// The refusal that stopped a removal, if that is what `e` is.
+    pub fn of(e: &anyhow::Error) -> Option<&BackupRefused> {
+        e.downcast_ref()
+    }
+
+    /// The refusal for someone in the window, who has no flag to pass.
+    pub fn window_text(&self) -> String {
+        format!("Removal failed: {self}")
+    }
+}
+
+impl std::fmt::Display for BackupRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "could not create the backup folder ({}); refusing to delete without a backup. \
+             Pass --no-backup to delete anyway.",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for BackupRefused {}
+
 // Elevation
 // ---------
 
@@ -408,10 +441,9 @@ pub fn remove_leftovers_into(
         };
         match session {
             Ok(session) => Some(session),
-            Err(e) => bail!(
-                "could not create the backup folder ({e:#}); refusing to delete without a backup. \
-                 Pass --no-backup to delete anyway."
-            ),
+            Err(e) => bail!(BackupRefused {
+                reason: format!("{e:#}")
+            }),
         }
     } else {
         None
