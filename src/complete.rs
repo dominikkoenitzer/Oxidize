@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::model::{
     Confidence, Hive, Leftover, LeftoverKind, Package, Program, ScanReport, ScanTarget,
 };
-use crate::safety::{DeletionOutcome, SafetyContext};
+use crate::safety::{BackupRefused, DeletionOutcome, SafetyContext};
 use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
 
@@ -322,6 +322,8 @@ pub struct Outcome {
     pub verdict: Verdict,
     /// Why the flow stopped early, when it did.
     pub error: Option<String>,
+    /// The backup refusal that stopped the removal, for the window to word.
+    pub refused: Option<BackupRefused>,
     pub seconds: f64,
 }
 
@@ -380,6 +382,7 @@ pub fn remove_completely(
             ..Verdict::default()
         },
         error: None,
+        refused: None,
         seconds: 0.0,
     };
 
@@ -445,7 +448,7 @@ pub fn remove_completely(
     if !out.selected.is_empty() {
         match pc.remove(&out.selected, &program.display_name) {
             Ok(o) => out.removal = Some(o),
-            Err(e) => out.error = Some(format!("{e:#}")),
+            Err(e) => stopped(&mut out, &e),
         }
     }
     if installed {
@@ -461,7 +464,7 @@ pub fn remove_completely(
         if let Some(first) = out.removal.as_mut().filter(|_| !late.is_empty()) {
             match pc.remove_more(&late, &program.display_name, first) {
                 Ok(o) => first.absorb(o),
-                Err(e) => out.error = Some(format!("{e:#}")),
+                Err(e) => stopped(&mut out, &e),
             }
             out.report.items.extend(late.iter().cloned());
             out.selected.extend(late);
@@ -471,6 +474,12 @@ pub fn remove_completely(
     out.verdict = verdict(installed, &rescan, opts.level);
     out.seconds = start.elapsed().as_secs_f64();
     out
+}
+
+/// Keep why the removal stopped, and its kind when it was a backup refusal.
+fn stopped(out: &mut Outcome, e: &anyhow::Error) {
+    out.refused = BackupRefused::of(e).cloned();
+    out.error = Some(format!("{e:#}"));
 }
 
 /// The High items of `rescan` that the scan the removal worked from did not

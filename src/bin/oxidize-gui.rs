@@ -1170,11 +1170,16 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
             lines.push(format!("Backup kept: {backup}"));
         }
     }
-    if let Some(e) = &out.error {
-        lines.push(format!("ERROR: {}", window_error(e)));
+    if let Some(e) = complete_error(out) {
+        lines.push(format!("ERROR: {e}"));
     }
     lines.push(complete_status(name, out, false));
     lines
+}
+
+/// Why a complete removal stopped, as the window words it.
+fn complete_error(out: &Outcome) -> Option<String> {
+    out.error.as_deref().map(window_error)
 }
 
 /// An error as the window shows it: the window has a button where the
@@ -2227,8 +2232,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             .color(t.weak),
         );
     }
-    if let Some(e) = &out.error {
-        ui.add(egui::Label::new(RichText::new(window_error(e)).color(t.red)).wrap());
+    if let Some(e) = complete_error(out) {
+        ui.add(egui::Label::new(RichText::new(e).color(t.red)).wrap());
     }
     if undo {
         ui.add_space(6.0);
@@ -3912,6 +3917,7 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            refused: None,
             seconds: 4.2,
         }
     }
