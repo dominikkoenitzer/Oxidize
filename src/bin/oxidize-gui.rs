@@ -186,6 +186,9 @@ struct OxidizeApp {
     reveal: bool,
     /// The table's scroll offset and visible height, from the last frame.
     table_view: (f32, f32),
+    /// The search field and the table's own widgets, from the last frame.
+    search_id: Option<egui::Id>,
+    table_ids: egui::IdSet,
     show_log: bool,
 
     // Options (mirror the CLI flags).
@@ -243,6 +246,8 @@ impl OxidizeApp {
             focus_search: true,
             reveal: false,
             table_view: (0.0, 0.0),
+            search_id: None,
+            table_ids: egui::IdSet::default(),
             show_log: false,
             dry_run: false,
             make_backups: true,
@@ -908,7 +913,7 @@ impl OxidizeApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.focus_search = true;
         }
-        if display.is_empty() {
+        if display.is_empty() || !self.table_has_keys(ctx) {
             return;
         }
         let page = ((self.table_view.1 / ROW_HEIGHT).floor() as isize).max(1);
@@ -934,6 +939,15 @@ impl OxidizeApp {
             self.select(&id);
             self.reveal = true;
         }
+    }
+
+    /// The arrow and page keys are the table's while focus is on nothing,
+    /// the search field or the table itself, and no menu is open.
+    fn table_has_keys(&self, ctx: &egui::Context) -> bool {
+        !egui::Popup::is_any_open(ctx)
+            && ctx
+                .memory(|m| m.focused())
+                .is_none_or(|id| self.search_id == Some(id) || self.table_ids.contains(&id))
     }
 
     /// Render the confirmation modal, if any, and act on the user's choice.
@@ -1687,6 +1701,7 @@ impl OxidizeApp {
                     .desired_width(width)
                     .margin(egui::Margin::symmetric(8, 5)),
             );
+            self.search_id = Some(search.id);
             if self.focus_search {
                 search.request_focus();
                 self.focus_search = false;
@@ -1732,6 +1747,7 @@ impl OxidizeApp {
     /// The program table: a header to sort by and one row per program,
     /// drawn only where it is visible.
     fn table(&mut self, ui: &mut egui::Ui, t: &Tint, display: &[usize]) {
+        self.table_ids.clear();
         let cols = columns(ui.available_width());
         self.table_header(ui, t, &cols);
         if display.is_empty() {
@@ -1789,7 +1805,9 @@ impl OxidizeApp {
                 let mut clicked = None;
                 for row in rows {
                     let i = display[row];
-                    if self.program_row(ui, t, &cols, i, &body) {
+                    let response = self.program_row(ui, t, &cols, i, &body);
+                    self.table_ids.insert(response.id);
+                    if response.clicked() {
                         clicked = Some(i);
                     }
                 }
@@ -1818,6 +1836,7 @@ impl OxidizeApp {
             };
             let id = ui.scope_id().with(("sort", col.column.title()));
             let response = ui.interact(hit, id, egui::Sense::click());
+            self.table_ids.insert(id);
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::Button, true, col.column.title())
             });
@@ -1853,7 +1872,7 @@ impl OxidizeApp {
         );
     }
 
-    /// One program's row. True when it was clicked.
+    /// One program's row.
     fn program_row(
         &self,
         ui: &mut egui::Ui,
@@ -1861,7 +1880,7 @@ impl OxidizeApp {
         cols: &[Placed],
         i: usize,
         font: &egui::FontId,
-    ) -> bool {
+    ) -> egui::Response {
         let program = &self.programs[i];
         let selected = self.selected.as_deref() == Some(program.id());
         let (rect, response) = ui.allocate_exact_size(
@@ -1872,7 +1891,7 @@ impl OxidizeApp {
             egui::WidgetInfo::selected(egui::Role::Button, true, selected, &program.display_name)
         });
         if !ui.is_rect_visible(rect) {
-            return response.clicked();
+            return response;
         }
         let painter = ui.painter_at(rect);
         if selected {
@@ -1911,7 +1930,7 @@ impl OxidizeApp {
                 Column::Source => weak(scope_label(program)),
             }
         }
-        response.clicked()
+        response
     }
 
     /// The panel on the right: the selected program, its three actions, what
@@ -4875,6 +4894,130 @@ mod tests {
             Some(2.0 * ROW_HEIGHT)
         );
         assert_eq!(scroll_to_show(14, 5.0 * ROW_HEIGHT, height), None);
+    }
+
+    /// One frame of the whole window at 1180 by 760 with `keys` pressed.
+    fn frame_with(ctx: &egui::Context, app: &mut OxidizeApp, keys: &[egui::Key]) {
+        use eframe::App as _;
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            events: keys
+                .iter()
+                .map(|&key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+    }
+
+    /// Two programs in the table, the first one selected and scanned with one
+    /// leftover ticked. Also returns both ids in table order.
+    fn two_programs_one_scanned() -> (egui::Context, OxidizeApp, [String; 2]) {
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let mut app = app();
+        let mut other = example_program();
+        other.registry_key = "example-editor".to_string();
+        other.display_name = "Example Editor".to_string();
+        app.programs = vec![example_program(), other];
+        let display = app.display_indices(chrono::Local::now().date_naive());
+        let ids = [0, 1].map(|row| app.programs[display[row]].id().to_string());
+        app.selected = Some(ids[0].clone());
+        app.jobs = 1;
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            std::path::PathBuf::from(r"D:\Apps\Example"),
+            Confidence::High,
+            "found",
+            None,
+            false,
+        );
+        let report = ScanReport {
+            program_name: "Example".to_string(),
+            installed: false,
+            items: vec![item],
+        };
+        app.tx
+            .send(Msg::Scan {
+                id: ids[0].clone(),
+                report,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.checked, [true]);
+        (ctx, app, ids)
+    }
+
+    /// Press Tab until the focused widget's rect passes `wanted`.
+    fn tab_to(ctx: &egui::Context, app: &mut OxidizeApp, wanted: impl Fn(egui::Rect) -> bool) {
+        for _ in 0..80 {
+            frame_with(ctx, app, &[egui::Key::Tab]);
+            frame_with(ctx, app, &[]);
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                let rect = ctx
+                    .read_response(id)
+                    .expect("the focused widget is shown")
+                    .rect;
+                if wanted(rect) {
+                    return;
+                }
+            }
+        }
+        panic!("Tab never reached the widget it was sent to");
+    }
+
+    #[test]
+    fn the_arrow_keys_leave_the_table_alone_while_the_details_or_a_menu_have_focus() {
+        let (ctx, mut app, ids) = two_programs_one_scanned();
+        frame_with(&ctx, &mut app, &[]);
+        // The details column, below the toolbar and above the status bar.
+        let details = 1180.0 - details_width(1180.0);
+        tab_to(&ctx, &mut app, |rect| {
+            rect.left() >= details && rect.top() > 60.0 && rect.bottom() < 700.0
+        });
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[0].as_str()));
+        assert!(app.scan.is_some(), "the scan and its ticks stay");
+        assert_eq!(app.checked, [true]);
+
+        // A menu such as Options keeps its open state in egui's memory.
+        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap()));
+        egui::Popup::open_id(&ctx, egui::Id::unique("a menu"));
+        frame_with(&ctx, &mut app, &[egui::Key::PageDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[0].as_str()));
+        assert!(app.scan.is_some());
+    }
+
+    #[test]
+    fn the_arrow_keys_move_the_table_from_the_search_field_a_row_or_nothing() {
+        let (ctx, mut app, ids) = two_programs_one_scanned();
+        // The search field has focus once the window opens.
+        frame_with(&ctx, &mut app, &[]);
+        assert!(ctx.memory(|m| m.focused()).is_some());
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[1].as_str()));
+
+        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap()));
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowUp]);
+        assert_eq!(app.selected.as_deref(), Some(ids[0].as_str()));
+
+        let details = 1180.0 - details_width(1180.0);
+        tab_to(&ctx, &mut app, |rect| {
+            rect.right() <= details && (rect.height() - ROW_HEIGHT).abs() < 0.5
+        });
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[1].as_str()));
     }
 
     #[test]
