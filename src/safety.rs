@@ -761,6 +761,103 @@ mod tests {
     }
 
     #[test]
+    fn services_rules_tasks_and_program_folders_need_administrator_rights() {
+        let service = Leftover::service("ExampleSvc", "", Confidence::High, "test");
+        let rule = Leftover::firewall_rule("{rule}", "Example", "", "", Confidence::High, "test");
+        let task = Leftover::task(r"\Example\Updater", "", Confidence::High, "test");
+        for item in [service, rule, task] {
+            assert!(
+                needs_elevation(std::slice::from_ref(&item)),
+                "{}",
+                item.path
+            );
+        }
+        // The paths are only compared with the roots, never touched.
+        let folder = |p: PathBuf| {
+            Leftover::fs(
+                LeftoverKind::Directory,
+                p,
+                Confidence::High,
+                "test",
+                None,
+                false,
+            )
+        };
+        for var in ["ProgramFiles", "ProgramData"] {
+            let root = scanner::env_dir(var).unwrap();
+            assert!(
+                needs_elevation(&[folder(root.join("Example Vendor"))]),
+                "{var}"
+            );
+        }
+        let base = crate::backup::TestDir::new("oxidize_rights_test");
+        assert!(!needs_elevation(&[folder(base.join("Example Vendor"))]));
+    }
+
+    #[test]
+    fn an_emptied_folder_under_a_shared_name_stays() {
+        let base = crate::backup::TestDir::new("oxidize_shared_name_test");
+        let shared = base.join("Microsoft").join("Example");
+        let vendor = base.join("Example Vendor").join("Example");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&vendor).unwrap();
+        assert!(!may_remove_emptied_beside(&shared, &[]));
+        assert!(may_remove_emptied_beside(&vendor, &[]));
+    }
+
+    #[test]
+    fn a_later_removal_adds_up_with_the_first_field_by_field() {
+        let item = |path: &str| ItemOutcome {
+            path: path.to_string(),
+            kind: LeftoverKind::File,
+            status: ItemStatus::Removed,
+        };
+        let mut first = DeletionOutcome {
+            attempted: 3,
+            deleted: 2,
+            skipped: 1,
+            failed: 0,
+            backup_dir: Some(PathBuf::from("first backup")),
+            backup_name: Some("first".to_string()),
+            items: vec![item("a"), item("b")],
+            emptied_parents: vec![PathBuf::from("p1")],
+            emptied_keys: vec!["k1".to_string()],
+            dry_run: false,
+        };
+        let later = DeletionOutcome {
+            attempted: 20,
+            deleted: 10,
+            skipped: 4,
+            failed: 6,
+            backup_dir: Some(PathBuf::from("later backup")),
+            backup_name: Some("later".to_string()),
+            items: vec![item("c")],
+            emptied_parents: vec![PathBuf::from("p2")],
+            emptied_keys: vec!["k2".to_string()],
+            dry_run: false,
+        };
+        first.absorb(later.clone());
+        let counts = (first.attempted, first.deleted, first.skipped, first.failed);
+        assert_eq!(counts, (23, 12, 5, 6));
+        let paths: Vec<&str> = first.items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["a", "b", "c"]);
+        assert_eq!(
+            first.emptied_parents,
+            [PathBuf::from("p1"), PathBuf::from("p2")]
+        );
+        assert_eq!(first.emptied_keys, ["k1", "k2"]);
+        // The first backup stays.
+        assert_eq!(first.backup_dir, Some(PathBuf::from("first backup")));
+        assert_eq!(first.backup_name.as_deref(), Some("first"));
+
+        // A backup only the later removal made is taken.
+        let mut none = DeletionOutcome::default();
+        none.absorb(later);
+        assert_eq!(none.backup_dir, Some(PathBuf::from("later backup")));
+        assert_eq!(none.backup_name.as_deref(), Some("later"));
+    }
+
+    #[test]
     fn two_path_entries_come_back_where_they_were() {
         let before = [r"C:\A", r"C:\Tool", r"C:\B", r"C:\Tool\", r"C:\C"];
         let matches: Vec<(usize, String)> = before
