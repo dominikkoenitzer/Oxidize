@@ -18,6 +18,12 @@ pub fn write(text: fmt::Arguments<'_>) {
     write_bytes(text.to_string().as_bytes());
 }
 
+/// [`write`] for a question: whether it reached the reader, who can answer only then.
+pub fn ask(text: fmt::Arguments<'_>) -> bool {
+    write(text);
+    !CLOSED.load(Ordering::Relaxed)
+}
+
 /// [`write`] for bytes another run printed, such as the elevated run's result.
 pub fn write_bytes(bytes: &[u8]) {
     if let Some(e) = write_to(&mut io::stdout().lock(), &CLOSED, bytes) {
