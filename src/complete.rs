@@ -333,8 +333,7 @@ impl Outcome {
             && self.removal.as_ref().is_none_or(|o| o.failed == 0)
     }
 
-    /// The vendor's uninstaller ran with nothing gone wrong, yet the program
-    /// is still registered: it may have been cancelled or still be running.
+    /// The vendor's uninstaller ran without error and the program is still registered.
     pub fn uninstaller_left_it_registered(&self) -> bool {
         self.vendor.runs() && self.verdict.still_installed && self.error.is_none()
     }
