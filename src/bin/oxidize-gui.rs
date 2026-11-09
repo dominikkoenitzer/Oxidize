@@ -2202,7 +2202,7 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             ))
             .color(t.weak),
         );
-    } else if v.still_installed && !never_started(out) {
+    } else if v.still_installed && out.error.is_none() {
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
@@ -5136,6 +5136,37 @@ mod tests {
             }
         }
         assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("cancelled"), "{shown}");
+    }
+
+    #[test]
+    fn a_program_that_would_not_close_is_not_called_cancelled_in_the_details() {
+        let mut out = finished(None);
+        out.closed[0].how = CloseHow::Running;
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = complete::still_running(&out.closed);
+        let done = Completed {
+            program: example_program(),
+            outcome: out,
+            dry_run: false,
+        };
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let t = Tint::of(ctx.global_style().visuals.dark_mode);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_complete(ui, &t, &done, false, true);
+        });
+        output.textures_delta.clear();
+        let mut shown = String::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                shown.push_str(text.galley.text());
+                shown.push('\n');
+            }
+        }
+        assert!(shown.contains("player.exe is still running"), "{shown}");
         assert!(!shown.contains("cancelled"), "{shown}");
     }
 
