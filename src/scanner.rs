@@ -2193,12 +2193,7 @@ fn scan_software_root(
         if (hive == Hive::CurrentUser && vendor_alone && is_publisher_exactly(&child, target))
             || is_brand_name(&child, target)
         {
-            out.push(Leftover::reg_key(
-                hive,
-                child_path,
-                Confidence::High,
-                "the vendor's key, nothing else of theirs is installed",
-            ));
+            take_vendor_key(hive, &child_path, &child, target, out);
             continue;
         }
         if matches_publisher(&child, target) {
@@ -2216,6 +2211,152 @@ fn scan_software_root(
             out.push(Leftover::reg_key(hive, child_path, conf, reason));
         }
     }
+}
+
+/// Subkeys where other programs register themselves with the vendor's
+/// program, such as a browser's native messaging hosts and its extensions.
+const OTHERS_SLOTS: &[&str] = &["NativeMessagingHosts", "Extensions"];
+
+/// How far the walk of a vendor key goes before it stops and keeps the key.
+const VENDOR_WALK_DEPTH: usize = 8;
+const VENDOR_WALK_KEYS: usize = 5000;
+
+/// The vendor's key goes whole when it holds nothing of other programs.
+/// When it does, only its subkeys that go with the program go, and a subkey
+/// that holds both is narrowed the same way.
+fn take_vendor_key(
+    hive: Hive,
+    path: &str,
+    vendor: &str,
+    target: &ScanTarget,
+    out: &mut Vec<Leftover>,
+) {
+    if !holds_others(hive, path, target) {
+        out.push(Leftover::reg_key(
+            hive,
+            path,
+            Confidence::High,
+            "the vendor's key, nothing else of theirs is installed",
+        ));
+        return;
+    }
+    take_own_subkeys(hive, path, vendor, target, 1, out);
+}
+
+fn take_own_subkeys(
+    hive: Hive,
+    path: &str,
+    vendor: &str,
+    target: &ScanTarget,
+    depth: usize,
+    out: &mut Vec<Leftover>,
+) {
+    if depth > VENDOR_WALK_DEPTH {
+        return;
+    }
+    for name in registry::enum_subkeys(hive, path) {
+        if reg_denied(&name) {
+            continue;
+        }
+        let sub = format!("{path}\\{name}");
+        if holds_others(hive, &sub, target) {
+            take_own_subkeys(hive, &sub, vendor, target, depth + 1, out);
+        } else if let Some((conf, why)) = key_goes_with_program(hive, &sub, &name, target) {
+            out.push(Leftover::reg_key(
+                hive,
+                sub,
+                conf,
+                format!("{why}, in vendor key {vendor}"),
+            ));
+        }
+    }
+}
+
+/// A path a registry value names, if it names one by its full path.
+fn value_path(data: &str) -> Option<PathBuf> {
+    system::command_exe(data).filter(|p| p.is_absolute())
+}
+
+/// Does the path belong to the program: inside its folders, or named after it?
+fn path_goes_with_program(p: &Path, target: &ScanTarget) -> bool {
+    owned_folders(target)
+        .into_iter()
+        .any(|dir| system::path_under(p, dir))
+        || path_names_product(p, target)
+}
+
+/// Does the key or anything below it belong to another program? It does when
+/// a value names a file that is there and is not the program's, or when
+/// another program registered itself in one of the slots made for that. A
+/// key too deep or too big to read through is kept as if it did.
+fn holds_others(hive: Hive, path: &str, target: &ScanTarget) -> bool {
+    let mut seen = 0;
+    holds_others_below(hive, path, target, 0, &mut seen)
+}
+
+fn holds_others_below(
+    hive: Hive,
+    path: &str,
+    target: &ScanTarget,
+    depth: usize,
+    seen: &mut usize,
+) -> bool {
+    *seen += 1;
+    if depth > VENDOR_WALK_DEPTH || *seen > VENDOR_WALK_KEYS {
+        return true;
+    }
+    let foreign_file = registry::enum_string_values(hive, path)
+        .iter()
+        .filter_map(|(_, data)| value_path(data))
+        .any(|p| p.exists() && !path_goes_with_program(&p, target));
+    if foreign_file {
+        return true;
+    }
+    let slot = path
+        .rsplit('\\')
+        .next()
+        .is_some_and(|leaf| OTHERS_SLOTS.iter().any(|s| s.eq_ignore_ascii_case(leaf)));
+    registry::enum_subkeys(hive, path).into_iter().any(|name| {
+        let sub = format!("{path}\\{name}");
+        (slot && key_goes_with_program(hive, &sub, &name, target).is_none())
+            || holds_others_below(hive, &sub, target, depth + 1, seen)
+    })
+}
+
+/// Why a subkey of the vendor's key goes with the program: it is named after
+/// it, or a value in it or below it names one of its files.
+fn key_goes_with_program(
+    hive: Hive,
+    path: &str,
+    name: &str,
+    target: &ScanTarget,
+) -> Option<(Confidence, String)> {
+    if let Some(hit) = score_product(name, target) {
+        return Some(hit);
+    }
+    let mut seen = 0;
+    names_program_file(hive, path, target, 0, &mut seen)
+        .then(|| (Confidence::High, "names a file of the program".to_string()))
+}
+
+fn names_program_file(
+    hive: Hive,
+    path: &str,
+    target: &ScanTarget,
+    depth: usize,
+    seen: &mut usize,
+) -> bool {
+    *seen += 1;
+    if depth > VENDOR_WALK_DEPTH || *seen > VENDOR_WALK_KEYS {
+        return false;
+    }
+    registry::enum_string_values(hive, path)
+        .iter()
+        .filter_map(|(_, data)| value_path(data))
+        .any(|p| path_goes_with_program(&p, target))
+        || registry::enum_subkeys(hive, path).iter().any(|name| {
+            names_program_file(hive, &format!("{path}\\{name}"), target, depth + 1, seen)
+        })
 }
 
 fn scan_app_paths(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Leftover>) {
@@ -2264,38 +2405,50 @@ fn match_run_value(name: &str, data: &str, target: &ScanTarget) -> Option<(Confi
     None
 }
 
+/// The keys whose values Windows starts at sign-in.
+const RUN_KEYS: &[(Hive, &str)] = &[
+    (
+        Hive::CurrentUser,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    ),
+    (
+        Hive::CurrentUser,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+    ),
+];
+
+/// Every autostart value: its key, name and command.
+fn read_run_values() -> Vec<(Hive, &'static str, String, String)> {
+    RUN_KEYS
+        .iter()
+        .flat_map(|&(hive, base)| {
+            registry::enum_string_values(hive, base)
+                .into_iter()
+                .map(move |(name, data)| (hive, base, name, data))
+        })
+        .collect()
+}
+
 fn scan_run_keys(target: &ScanTarget, out: &mut Vec<Leftover>) {
-    const RUN_KEYS: &[(Hive, &str)] = &[
-        (
-            Hive::CurrentUser,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-        ),
-        (
-            Hive::CurrentUser,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
-        ),
-    ];
-    for (hive, base) in RUN_KEYS {
-        for (name, data) in registry::enum_string_values(*hive, base) {
-            if let Some((conf, reason)) = match_run_value(&name, &data, target) {
-                out.push(Leftover::reg_value(*hive, *base, name, conf, reason));
-            }
+    for (hive, base, name, data) in read_run_values() {
+        if let Some((conf, reason)) = match_run_value(&name, &data, target) {
+            out.push(Leftover::reg_value(hive, base, name, conf, reason));
         }
     }
 }
@@ -2359,6 +2512,47 @@ fn match_exe_item(
         }
     }
     score_product(name, target)
+}
+
+/// Tasks and autostart values that start a file in `dirs`, the folders that
+/// go with the program, but not in another program's install folder: once
+/// those folders are gone they start nothing. Whatever they are called, an
+/// updater's task into the vendor's folder goes too.
+fn starts_into_removed(
+    tasks: &[system::TaskInfo],
+    runs: &[(Hive, &'static str, String, String)],
+    dirs: &[PathBuf],
+    other_installs: &[PathBuf],
+) -> Vec<Leftover> {
+    const WHY: &str = "starts a file in a folder that goes with the program";
+    let inside = |p: &Path, list: &[PathBuf]| list.iter().any(|d| system::path_under(p, d));
+    let goes = |exe: &Path| {
+        let exe = locate_exe(exe);
+        exe.is_absolute()
+            && !system::in_windows_dir(&exe)
+            && inside(&exe, dirs)
+            && !inside(&exe, other_installs)
+    };
+    let tasks = tasks.iter().filter_map(|task| {
+        let exe = task.exe.as_deref().filter(|exe| goes(exe))?;
+        Some(Leftover::task(
+            task.name.clone(),
+            &exe.to_string_lossy(),
+            Confidence::High,
+            WHY,
+        ))
+    });
+    let runs = runs.iter().filter_map(|(hive, base, name, data)| {
+        system::command_exe(data).filter(|exe| goes(exe))?;
+        Some(Leftover::reg_value(
+            *hive,
+            *base,
+            name.clone(),
+            Confidence::High,
+            WHY,
+        ))
+    });
+    tasks.chain(runs).collect()
 }
 
 /// Is this service Windows' own host process, or a driver Windows installed?
@@ -2609,6 +2803,12 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
     if !removed.is_empty() {
         handlers.append(&mut shortcuts);
         items.extend(links::into_removed(handlers, &removed, &others));
+        items.extend(starts_into_removed(
+            snap.tasks(),
+            &read_run_values(),
+            &removed,
+            &others,
+        ));
     }
     // Windows' own records of a file in those folders or of a single file
     // that goes, such as a shortcut, of a missing file that names the
@@ -2734,6 +2934,157 @@ mod tests {
         // No publisher, no claim.
         let bare = name_target("Example Player", None);
         assert!(!vendor_alone(&bare, &[], &[]));
+    }
+
+    /// A stand-in key under `HKCU\Software`, removed when the test ends,
+    /// passed or failed.
+    struct TestKey(String);
+
+    impl Drop for TestKey {
+        fn drop(&mut self) {
+            let _ = registry::delete_key_tree(Hive::CurrentUser, &self.0);
+        }
+    }
+
+    fn set_test_value(key: &str, name: &str, value: &str) {
+        let (k, _) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .create_subkey(key)
+            .unwrap();
+        k.set_value(name, &value).unwrap();
+    }
+
+    fn subpaths(items: &[Leftover]) -> Vec<String> {
+        let mut paths: Vec<String> = items.iter().filter_map(|l| l.subpath.clone()).collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn a_vendor_key_other_programs_write_into_keeps_what_is_theirs() {
+        let root = TestKey(format!(
+            r"Software\OxidizeVendorKeyTest{}",
+            std::process::id()
+        ));
+        let files = crate::backup::TestDir::new("oxidize_vendor_key_test");
+        let manifest = files.join("Other Tool").join("org.other.helper.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "{}").unwrap();
+        let launcher = files
+            .join("Brightway")
+            .join("Brightway Notes")
+            .join("NotesLauncher.exe");
+
+        let vendor = format!(r"{}\Brightway", root.0);
+        let browser = format!(r"{vendor}\Brightway Browser");
+        // A host another program registered for the vendor's browser, and the
+        // settings of a test build of that browser.
+        set_test_value(
+            &format!(r"{browser}\NativeMessagingHosts\org.other.helper"),
+            "",
+            &manifest.display().to_string(),
+        );
+        set_test_value(
+            &format!(r"{vendor}\Brightway Browser for Testing\BLBeacon"),
+            "version",
+            "153.0.1.2",
+        );
+        // The updater that came with the program, and the program's own key.
+        set_test_value(
+            &format!(r"{vendor}\Update"),
+            "LastInstallerSuccessLaunchCmdLine",
+            &format!("\"{}\" --launch-app", launcher.display()),
+        );
+        set_test_value(
+            &format!(r"{vendor}\Update\Clients\{{00000000-0000-0000-0000-0000000000B1}}"),
+            "pv",
+            "1.2.3",
+        );
+        set_test_value(&format!(r"{vendor}\Brightway Notes"), "Theme", "dark");
+
+        let t = name_target("Brightway Notes", Some("Brightway Corporation"));
+        let mut out = Vec::new();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(
+            subpaths(&out),
+            vec![
+                format!(r"{vendor}\Brightway Notes"),
+                format!(r"{vendor}\Update")
+            ]
+        );
+        assert!(out.iter().all(|l| l.confidence == Confidence::High));
+
+        // With the other program's host gone, nothing in the key is anyone
+        // else's, and the vendor's key goes whole again.
+        registry::delete_key_tree(Hive::CurrentUser, &browser).unwrap();
+        out.clear();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(subpaths(&out), vec![vendor.clone()]);
+    }
+
+    #[test]
+    fn a_task_or_autostart_into_a_folder_that_goes_goes_with_it() {
+        let files = crate::backup::TestDir::new("oxidize_starts_into_removed_test");
+        let vendor = files.join("Brightway");
+        let updater = vendor.join("BrightwayUpdater");
+        let exe = updater.join("1.2.3").join("updater.exe");
+        let browser = vendor.join("Brightway Browser");
+        let browser_exe = browser.join("browser.exe");
+        for file in [&exe, &browser_exe] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"").unwrap();
+        }
+        let windows_exe = PathBuf::from(std::env::var("SystemRoot").unwrap())
+            .join("System32")
+            .join("notepad.exe");
+        let task = |name: &str, exe: &Path| system::TaskInfo {
+            name: name.to_string(),
+            file: PathBuf::new(),
+            command: Some(format!("\"{}\" --wake", exe.display())),
+            exe: Some(exe.to_path_buf()),
+        };
+        let updater_task = r"\BrightwayUser\BrightwayUpdater\BrightwayUpdaterTaskUser1.2.3{00000000-0000-0000-0000-0000000000B2}";
+        let tasks = vec![
+            task(updater_task, &exe),
+            task(r"\Brightway Browser Task", &browser_exe),
+            task(r"\Windows Task", &windows_exe),
+        ];
+        let run = |name: &str, exe: &Path| {
+            let data = format!("\"{}\" --wake", exe.display());
+            (Hive::CurrentUser, RUN_KEYS[0].1, name.to_string(), data)
+        };
+        let runs = vec![
+            run("BrightwayUpdaterTaskUser1.2.3", &exe),
+            run("Brightway Browser", &browser_exe),
+        ];
+
+        // By their names and their files that are still there, neither says
+        // whose it is.
+        let t = name_target("BrightwayUpdater", None);
+        let leaf = "BrightwayUpdaterTaskUser1.2.3";
+        assert!(match_exe_item(leaf, Some(&exe), &t).is_none());
+        assert!(match_run_value(leaf, &runs[0].3, &t).is_none());
+
+        // The vendor's folder goes, but the browser is installed in it.
+        let found = starts_into_removed(
+            &tasks,
+            &runs,
+            std::slice::from_ref(&vendor),
+            std::slice::from_ref(&browser),
+        );
+        let mut paths: Vec<String> = found.iter().map(|l| l.path.clone()).collect();
+        paths.sort();
+        let mut want = vec![
+            Leftover::task(updater_task, &exe.to_string_lossy(), Confidence::High, "").path,
+            Leftover::reg_value(Hive::CurrentUser, RUN_KEYS[0].1, leaf, Confidence::High, "").path,
+        ];
+        want.sort();
+        assert_eq!(paths, want);
+        assert!(found.iter().all(|l| l.confidence == Confidence::High));
+
+        // With only the updater's own folder going, the same two go.
+        let found = starts_into_removed(&tasks, &runs, std::slice::from_ref(&updater), &[]);
+        assert_eq!(found.len(), 2);
+        assert!(starts_into_removed(&tasks, &runs, &[], &[]).is_empty());
     }
 
     #[test]
