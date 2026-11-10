@@ -198,9 +198,10 @@
     }
   },
   "new": {
-    "version": "0.2.15",
+    "version": "0.2.16",
     "items": [
-      "A scan also finds a program's settings in your user folder and in .config, which used to stay behind while the report said nothing was left."
+      "A scan leaves alone what other programs keep in a vendor's settings, such as the helpers a browser runs for other apps.",
+      "Tasks and startup entries that start a file in a removed folder now go with it."
     ]
   },
   "requirements": [
