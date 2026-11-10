@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.16, 2026-11-10
+
+- The vendor's key under `HKCU\Software` no longer goes whole when other
+  programs registered themselves in it, such as the native messaging hosts
+  a browser keeps for other programs, or when a value in it names another
+  program's file that is still there. Only the subkeys that go with the
+  program are taken and the rest stays. Before, removing one product could
+  take a browser's key along with the hosts of other programs inside it.
+- Scheduled tasks and autostart values that start a file in a folder the
+  scan removes go with that folder, whatever they are called. An updater's
+  task and its autostart value had stayed behind while the folder they
+  start from was removed.
+
 ## 0.2.15, 2026-11-06
 
 - The scan looks for a program's settings in the user's folder and in its
