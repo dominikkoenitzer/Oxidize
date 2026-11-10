@@ -2405,38 +2405,50 @@ fn match_run_value(name: &str, data: &str, target: &ScanTarget) -> Option<(Confi
     None
 }
 
+/// The keys whose values Windows starts at sign-in.
+const RUN_KEYS: &[(Hive, &str)] = &[
+    (
+        Hive::CurrentUser,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    ),
+    (
+        Hive::CurrentUser,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
+    ),
+    (
+        Hive::LocalMachine,
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
+    ),
+];
+
+/// Every autostart value: its key, name and command.
+fn read_run_values() -> Vec<(Hive, &'static str, String, String)> {
+    RUN_KEYS
+        .iter()
+        .flat_map(|&(hive, base)| {
+            registry::enum_string_values(hive, base)
+                .into_iter()
+                .map(move |(name, data)| (hive, base, name, data))
+        })
+        .collect()
+}
+
 fn scan_run_keys(target: &ScanTarget, out: &mut Vec<Leftover>) {
-    const RUN_KEYS: &[(Hive, &str)] = &[
-        (
-            Hive::CurrentUser,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-        ),
-        (
-            Hive::CurrentUser,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run",
-        ),
-        (
-            Hive::LocalMachine,
-            r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce",
-        ),
-    ];
-    for (hive, base) in RUN_KEYS {
-        for (name, data) in registry::enum_string_values(*hive, base) {
-            if let Some((conf, reason)) = match_run_value(&name, &data, target) {
-                out.push(Leftover::reg_value(*hive, *base, name, conf, reason));
-            }
+    for (hive, base, name, data) in read_run_values() {
+        if let Some((conf, reason)) = match_run_value(&name, &data, target) {
+            out.push(Leftover::reg_value(hive, base, name, conf, reason));
         }
     }
 }
@@ -2500,6 +2512,47 @@ fn match_exe_item(
         }
     }
     score_product(name, target)
+}
+
+/// Tasks and autostart values that start a file in `dirs`, the folders that
+/// go with the program, but not in another program's install folder: once
+/// those folders are gone they start nothing. Whatever they are called, an
+/// updater's task into the vendor's folder goes too.
+fn starts_into_removed(
+    tasks: &[system::TaskInfo],
+    runs: &[(Hive, &'static str, String, String)],
+    dirs: &[PathBuf],
+    other_installs: &[PathBuf],
+) -> Vec<Leftover> {
+    const WHY: &str = "starts a file in a folder that goes with the program";
+    let inside = |p: &Path, list: &[PathBuf]| list.iter().any(|d| system::path_under(p, d));
+    let goes = |exe: &Path| {
+        let exe = locate_exe(exe);
+        exe.is_absolute()
+            && !system::in_windows_dir(&exe)
+            && inside(&exe, dirs)
+            && !inside(&exe, other_installs)
+    };
+    let tasks = tasks.iter().filter_map(|task| {
+        let exe = task.exe.as_deref().filter(|exe| goes(exe))?;
+        Some(Leftover::task(
+            task.name.clone(),
+            &exe.to_string_lossy(),
+            Confidence::High,
+            WHY,
+        ))
+    });
+    let runs = runs.iter().filter_map(|(hive, base, name, data)| {
+        system::command_exe(data).filter(|exe| goes(exe))?;
+        Some(Leftover::reg_value(
+            *hive,
+            *base,
+            name.clone(),
+            Confidence::High,
+            WHY,
+        ))
+    });
+    tasks.chain(runs).collect()
 }
 
 /// Is this service Windows' own host process, or a driver Windows installed?
@@ -2750,6 +2803,12 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
     if !removed.is_empty() {
         handlers.append(&mut shortcuts);
         items.extend(links::into_removed(handlers, &removed, &others));
+        items.extend(starts_into_removed(
+            snap.tasks(),
+            &read_run_values(),
+            &removed,
+            &others,
+        ));
     }
     // Windows' own records of a file in those folders or of a single file
     // that goes, such as a shortcut, of a missing file that names the
@@ -2960,6 +3019,72 @@ mod tests {
         out.clear();
         scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
         assert_eq!(subpaths(&out), vec![vendor.clone()]);
+    }
+
+    #[test]
+    fn a_task_or_autostart_into_a_folder_that_goes_goes_with_it() {
+        let files = crate::backup::TestDir::new("oxidize_starts_into_removed_test");
+        let vendor = files.join("Brightway");
+        let updater = vendor.join("BrightwayUpdater");
+        let exe = updater.join("1.2.3").join("updater.exe");
+        let browser = vendor.join("Brightway Browser");
+        let browser_exe = browser.join("browser.exe");
+        for file in [&exe, &browser_exe] {
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, b"").unwrap();
+        }
+        let windows_exe = PathBuf::from(std::env::var("SystemRoot").unwrap())
+            .join("System32")
+            .join("notepad.exe");
+        let task = |name: &str, exe: &Path| system::TaskInfo {
+            name: name.to_string(),
+            file: PathBuf::new(),
+            command: Some(format!("\"{}\" --wake", exe.display())),
+            exe: Some(exe.to_path_buf()),
+        };
+        let updater_task = r"\BrightwayUser\BrightwayUpdater\BrightwayUpdaterTaskUser1.2.3{00000000-0000-0000-0000-0000000000B2}";
+        let tasks = vec![
+            task(updater_task, &exe),
+            task(r"\Brightway Browser Task", &browser_exe),
+            task(r"\Windows Task", &windows_exe),
+        ];
+        let run = |name: &str, exe: &Path| {
+            let data = format!("\"{}\" --wake", exe.display());
+            (Hive::CurrentUser, RUN_KEYS[0].1, name.to_string(), data)
+        };
+        let runs = vec![
+            run("BrightwayUpdaterTaskUser1.2.3", &exe),
+            run("Brightway Browser", &browser_exe),
+        ];
+
+        // By their names and their files that are still there, neither says
+        // whose it is.
+        let t = name_target("BrightwayUpdater", None);
+        let leaf = "BrightwayUpdaterTaskUser1.2.3";
+        assert!(match_exe_item(leaf, Some(&exe), &t).is_none());
+        assert!(match_run_value(leaf, &runs[0].3, &t).is_none());
+
+        // The vendor's folder goes, but the browser is installed in it.
+        let found = starts_into_removed(
+            &tasks,
+            &runs,
+            std::slice::from_ref(&vendor),
+            std::slice::from_ref(&browser),
+        );
+        let mut paths: Vec<String> = found.iter().map(|l| l.path.clone()).collect();
+        paths.sort();
+        let mut want = vec![
+            Leftover::task(updater_task, &exe.to_string_lossy(), Confidence::High, "").path,
+            Leftover::reg_value(Hive::CurrentUser, RUN_KEYS[0].1, leaf, Confidence::High, "").path,
+        ];
+        want.sort();
+        assert_eq!(paths, want);
+        assert!(found.iter().all(|l| l.confidence == Confidence::High));
+
+        // With only the updater's own folder going, the same two go.
+        let found = starts_into_removed(&tasks, &runs, std::slice::from_ref(&updater), &[]);
+        assert_eq!(found.len(), 2);
+        assert!(starts_into_removed(&tasks, &runs, &[], &[]).is_empty());
     }
 
     #[test]
