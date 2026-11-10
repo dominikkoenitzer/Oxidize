@@ -198,8 +198,9 @@
     }
   },
   "new": {
-    "version": "0.2.17",
+    "version": "0.2.18",
     "items": [
+      "Start menu records of a program whose folder its own uninstaller already took are found now.",
       "Notification settings, the Start menu record and taskbar history of a removed program now go too.",
       "So does the entry that let its notifications start it again."
     ]
