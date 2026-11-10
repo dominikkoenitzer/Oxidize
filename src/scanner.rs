@@ -2193,12 +2193,7 @@ fn scan_software_root(
         if (hive == Hive::CurrentUser && vendor_alone && is_publisher_exactly(&child, target))
             || is_brand_name(&child, target)
         {
-            out.push(Leftover::reg_key(
-                hive,
-                child_path,
-                Confidence::High,
-                "the vendor's key, nothing else of theirs is installed",
-            ));
+            take_vendor_key(hive, &child_path, &child, target, out);
             continue;
         }
         if matches_publisher(&child, target) {
@@ -2216,6 +2211,152 @@ fn scan_software_root(
             out.push(Leftover::reg_key(hive, child_path, conf, reason));
         }
     }
+}
+
+/// Subkeys where other programs register themselves with the vendor's
+/// program, such as a browser's native messaging hosts and its extensions.
+const OTHERS_SLOTS: &[&str] = &["NativeMessagingHosts", "Extensions"];
+
+/// How far the walk of a vendor key goes before it stops and keeps the key.
+const VENDOR_WALK_DEPTH: usize = 8;
+const VENDOR_WALK_KEYS: usize = 5000;
+
+/// The vendor's key goes whole when it holds nothing of other programs.
+/// When it does, only its subkeys that go with the program go, and a subkey
+/// that holds both is narrowed the same way.
+fn take_vendor_key(
+    hive: Hive,
+    path: &str,
+    vendor: &str,
+    target: &ScanTarget,
+    out: &mut Vec<Leftover>,
+) {
+    if !holds_others(hive, path, target) {
+        out.push(Leftover::reg_key(
+            hive,
+            path,
+            Confidence::High,
+            "the vendor's key, nothing else of theirs is installed",
+        ));
+        return;
+    }
+    take_own_subkeys(hive, path, vendor, target, 1, out);
+}
+
+fn take_own_subkeys(
+    hive: Hive,
+    path: &str,
+    vendor: &str,
+    target: &ScanTarget,
+    depth: usize,
+    out: &mut Vec<Leftover>,
+) {
+    if depth > VENDOR_WALK_DEPTH {
+        return;
+    }
+    for name in registry::enum_subkeys(hive, path) {
+        if reg_denied(&name) {
+            continue;
+        }
+        let sub = format!("{path}\\{name}");
+        if holds_others(hive, &sub, target) {
+            take_own_subkeys(hive, &sub, vendor, target, depth + 1, out);
+        } else if let Some((conf, why)) = key_goes_with_program(hive, &sub, &name, target) {
+            out.push(Leftover::reg_key(
+                hive,
+                sub,
+                conf,
+                format!("{why}, in vendor key {vendor}"),
+            ));
+        }
+    }
+}
+
+/// A path a registry value names, if it names one by its full path.
+fn value_path(data: &str) -> Option<PathBuf> {
+    system::command_exe(data).filter(|p| p.is_absolute())
+}
+
+/// Does the path belong to the program: inside its folders, or named after it?
+fn path_goes_with_program(p: &Path, target: &ScanTarget) -> bool {
+    owned_folders(target)
+        .into_iter()
+        .any(|dir| system::path_under(p, dir))
+        || path_names_product(p, target)
+}
+
+/// Does the key or anything below it belong to another program? It does when
+/// a value names a file that is there and is not the program's, or when
+/// another program registered itself in one of the slots made for that. A
+/// key too deep or too big to read through is kept as if it did.
+fn holds_others(hive: Hive, path: &str, target: &ScanTarget) -> bool {
+    let mut seen = 0;
+    holds_others_below(hive, path, target, 0, &mut seen)
+}
+
+fn holds_others_below(
+    hive: Hive,
+    path: &str,
+    target: &ScanTarget,
+    depth: usize,
+    seen: &mut usize,
+) -> bool {
+    *seen += 1;
+    if depth > VENDOR_WALK_DEPTH || *seen > VENDOR_WALK_KEYS {
+        return true;
+    }
+    let foreign_file = registry::enum_string_values(hive, path)
+        .iter()
+        .filter_map(|(_, data)| value_path(data))
+        .any(|p| p.exists() && !path_goes_with_program(&p, target));
+    if foreign_file {
+        return true;
+    }
+    let slot = path
+        .rsplit('\\')
+        .next()
+        .is_some_and(|leaf| OTHERS_SLOTS.iter().any(|s| s.eq_ignore_ascii_case(leaf)));
+    registry::enum_subkeys(hive, path).into_iter().any(|name| {
+        let sub = format!("{path}\\{name}");
+        (slot && key_goes_with_program(hive, &sub, &name, target).is_none())
+            || holds_others_below(hive, &sub, target, depth + 1, seen)
+    })
+}
+
+/// Why a subkey of the vendor's key goes with the program: it is named after
+/// it, or a value in it or below it names one of its files.
+fn key_goes_with_program(
+    hive: Hive,
+    path: &str,
+    name: &str,
+    target: &ScanTarget,
+) -> Option<(Confidence, String)> {
+    if let Some(hit) = score_product(name, target) {
+        return Some(hit);
+    }
+    let mut seen = 0;
+    names_program_file(hive, path, target, 0, &mut seen)
+        .then(|| (Confidence::High, "names a file of the program".to_string()))
+}
+
+fn names_program_file(
+    hive: Hive,
+    path: &str,
+    target: &ScanTarget,
+    depth: usize,
+    seen: &mut usize,
+) -> bool {
+    *seen += 1;
+    if depth > VENDOR_WALK_DEPTH || *seen > VENDOR_WALK_KEYS {
+        return false;
+    }
+    registry::enum_string_values(hive, path)
+        .iter()
+        .filter_map(|(_, data)| value_path(data))
+        .any(|p| path_goes_with_program(&p, target))
+        || registry::enum_subkeys(hive, path).iter().any(|name| {
+            names_program_file(hive, &format!("{path}\\{name}"), target, depth + 1, seen)
+        })
 }
 
 fn scan_app_paths(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Leftover>) {
@@ -2734,6 +2875,91 @@ mod tests {
         // No publisher, no claim.
         let bare = name_target("Example Player", None);
         assert!(!vendor_alone(&bare, &[], &[]));
+    }
+
+    /// A stand-in key under `HKCU\Software`, removed when the test ends,
+    /// passed or failed.
+    struct TestKey(String);
+
+    impl Drop for TestKey {
+        fn drop(&mut self) {
+            let _ = registry::delete_key_tree(Hive::CurrentUser, &self.0);
+        }
+    }
+
+    fn set_test_value(key: &str, name: &str, value: &str) {
+        let (k, _) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .create_subkey(key)
+            .unwrap();
+        k.set_value(name, &value).unwrap();
+    }
+
+    fn subpaths(items: &[Leftover]) -> Vec<String> {
+        let mut paths: Vec<String> = items.iter().filter_map(|l| l.subpath.clone()).collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn a_vendor_key_other_programs_write_into_keeps_what_is_theirs() {
+        let root = TestKey(format!(
+            r"Software\OxidizeVendorKeyTest{}",
+            std::process::id()
+        ));
+        let files = crate::backup::TestDir::new("oxidize_vendor_key_test");
+        let manifest = files.join("Other Tool").join("org.other.helper.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "{}").unwrap();
+        let launcher = files
+            .join("Brightway")
+            .join("Brightway Notes")
+            .join("NotesLauncher.exe");
+
+        let vendor = format!(r"{}\Brightway", root.0);
+        let browser = format!(r"{vendor}\Brightway Browser");
+        // A host another program registered for the vendor's browser, and the
+        // settings of a test build of that browser.
+        set_test_value(
+            &format!(r"{browser}\NativeMessagingHosts\org.other.helper"),
+            "",
+            &manifest.display().to_string(),
+        );
+        set_test_value(
+            &format!(r"{vendor}\Brightway Browser for Testing\BLBeacon"),
+            "version",
+            "153.0.1.2",
+        );
+        // The updater that came with the program, and the program's own key.
+        set_test_value(
+            &format!(r"{vendor}\Update"),
+            "LastInstallerSuccessLaunchCmdLine",
+            &format!("\"{}\" --launch-app", launcher.display()),
+        );
+        set_test_value(
+            &format!(r"{vendor}\Update\Clients\{{00000000-0000-0000-0000-0000000000B1}}"),
+            "pv",
+            "1.2.3",
+        );
+        set_test_value(&format!(r"{vendor}\Brightway Notes"), "Theme", "dark");
+
+        let t = name_target("Brightway Notes", Some("Brightway Corporation"));
+        let mut out = Vec::new();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(
+            subpaths(&out),
+            vec![
+                format!(r"{vendor}\Brightway Notes"),
+                format!(r"{vendor}\Update")
+            ]
+        );
+        assert!(out.iter().all(|l| l.confidence == Confidence::High));
+
+        // With the other program's host gone, nothing in the key is anyone
+        // else's, and the vendor's key goes whole again.
+        registry::delete_key_tree(Hive::CurrentUser, &browser).unwrap();
+        out.clear();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(subpaths(&out), vec![vendor.clone()]);
     }
 
     #[test]
