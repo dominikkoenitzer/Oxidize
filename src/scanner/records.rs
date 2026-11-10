@@ -40,6 +40,9 @@ const NOTIFICATION_BACKUP: &str =
 const APP_ID_CLASSES: &str = r"Software\Classes\AppUserModelId";
 const COM_CLASSES: &str = r"Software\Classes\CLSID";
 const COM_SERVERS: [&str; 2] = ["LocalServer32", "InprocServer32"];
+/// How deep and how far the walk through Start's path records goes.
+const TILE_WALK_DEPTH: usize = 31;
+const TILE_WALK_KEYS: usize = 31_000;
 
 /// Which files go: those inside a removed folder or removed themselves, but
 /// not inside another program's install folder, and missing ones whose path
@@ -185,6 +188,8 @@ pub(super) fn scan_windows_records(
             }
         }
     }
+    // The same records of a folder that was already gone before the scan.
+    out.extend(tiles_of_missing_folders(hive, START_TILES, &gone));
     out.extend(com_classes(hive, COM_CLASSES, &gone));
     if program_gone {
         out.extend(app_id_records(hive, &AppIdPlaces::current(), target));
@@ -208,6 +213,69 @@ pub(super) fn scan_windows_records(
         }
     }
     out
+}
+
+/// Start's records of paths that no longer exist and that `gone` covers.
+/// Each `W~` root stands for a drive (`W~C:`) or a known folder
+/// (`W~{6D809377-...}`), and each key below it for one part of the path.
+fn tiles_of_missing_folders(hive: Hive, base: &str, gone: &Gone) -> Vec<Leftover> {
+    let mut out = Vec::new();
+    let mut budget = TILE_WALK_KEYS;
+    for sub in registry::enum_subkeys(hive, base) {
+        let Some(root) = sub.strip_prefix("W~") else {
+            continue;
+        };
+        let start = if root.len() == 2 && root.ends_with(':') {
+            Some(PathBuf::from(format!(r"{root}\")))
+        } else if root.starts_with('{') && root.ends_with('}') {
+            resolve(root)
+        } else {
+            None
+        };
+        if let Some(start) = start.filter(|p| p.is_dir()) {
+            let key = format!(r"{base}\{sub}");
+            walk_tiles(hive, &key, &start, gone, 0, &mut budget, &mut out);
+        }
+    }
+    out
+}
+
+fn walk_tiles(
+    hive: Hive,
+    key: &str,
+    path: &Path,
+    gone: &Gone,
+    depth: usize,
+    budget: &mut usize,
+    out: &mut Vec<Leftover>,
+) {
+    if depth >= TILE_WALK_DEPTH {
+        return;
+    }
+    for name in registry::enum_subkeys(hive, key) {
+        if *budget == 0 {
+            return;
+        }
+        *budget -= 1;
+        let child_key = format!(r"{key}\{name}");
+        let child = path.join(&name);
+        if child.exists() {
+            if child.is_dir() {
+                walk_tiles(hive, &child_key, &child, gone, depth + 1, budget, out);
+            }
+        } else if gone.covers(&child.to_string_lossy()) {
+            out.push(Leftover::reg_key(
+                hive,
+                child_key,
+                Confidence::High,
+                "Start menu records of the program",
+            ));
+        } else {
+            // Everything below a missing path is missing too, and a part
+            // further down may name the product.
+            walk_tiles(hive, &child_key, &child, gone, depth + 1, budget, out);
+        }
+    }
 }
 
 /// A COM class whose servers are all files that go, such as the class a
@@ -864,6 +932,41 @@ mod tests {
                 format!(r"{}\W~{ours}", base("Tiles")),
                 format!(r"{} : {ours}", base("Usage")),
             ]
+        );
+    }
+
+    #[test]
+    fn the_start_records_of_a_missing_folder_named_after_the_product_go() {
+        let root = TestKey(format!(r"Software\OxidizeTileTest{}", std::process::id()));
+        let files = crate::backup::TestDir::new("oxidize_tile_test");
+        let vendor = files.join("Brightway");
+        std::fs::create_dir_all(vendor.join("Lumen Live")).unwrap();
+        std::fs::write(vendor.join("Lumen Live").join("notes.txt"), "").unwrap();
+
+        // `W~C:` and then one key per part of the path.
+        let vendor_s = vendor.to_string_lossy().to_string();
+        let (drive, rest) = vendor_s.split_once('\\').unwrap();
+        let tiles = format!(r"{}\W~{drive}\{rest}", root.0);
+        for record in [
+            r"Lumen\Lumen.exe",
+            r"Other\tool.exe",
+            r"Old\Lumen\Lumen.exe",
+            r"Lumen Live\notes.txt",
+        ] {
+            set_value(&format!(r"{tiles}\{record}"), "Category", "0");
+        }
+
+        let target = super::super::name_target("Lumen", Some("Brightway Labs"));
+        let gone = Gone {
+            dirs: &[],
+            files: &[],
+            others: &[],
+            target: &target,
+        };
+        let found = tiles_of_missing_folders(Hive::CurrentUser, &root.0, &gone);
+        assert_eq!(
+            subpaths(&found),
+            vec![format!(r"{tiles}\Lumen"), format!(r"{tiles}\Old\Lumen")]
         );
     }
 
