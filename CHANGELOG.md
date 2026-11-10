@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.17, 2026-11-10
+
+- Once a program is gone, the records Windows keeps under its app id go
+  too: notification settings, the Start menu record and taskbar usage. An
+  app id is taken only when it carries both the product's and the vendor's
+  name, such as `com.vendor.product`. These records had stayed behind after
+  every uninstall.
+- A COM class goes when every server it lists is a file of the program,
+  such as the class a program registers so its notifications can start it.
+  A class with a server that is still there stays.
+
 ## 0.2.16, 2026-11-10
 
 - The vendor's key under `HKCU\Software` no longer goes whole when other
