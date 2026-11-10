@@ -3,12 +3,13 @@
 //! compatibility notes and the cached display name. Each names a file by its
 //! path. Once the folder that holds the file goes, the record points nowhere,
 //! so it goes too; one whose file is already missing goes when the path
-//! names the product.
+//! names the product. Notification settings and some usage records name the
+//! program by its app id instead, and a COM class by the file it starts.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use super::{exe_missing, path_names_product, same_vendor};
+use super::{exe_missing, path_names_product, same_vendor, score_product};
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, ScanTarget};
 use crate::{registry, system};
 
@@ -32,6 +33,13 @@ const NAME_CACHE: &str =
     r"Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache";
 const NAME_FIELD: &str = ".FriendlyAppName";
 const COMPANY_FIELD: &str = ".ApplicationCompany";
+const NOTIFICATION_SETTINGS: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\Notifications\Settings";
+const NOTIFICATION_BACKUP: &str =
+    r"Software\Microsoft\Windows\CurrentVersion\PushNotifications\Backup";
+const APP_ID_CLASSES: &str = r"Software\Classes\AppUserModelId";
+const COM_CLASSES: &str = r"Software\Classes\CLSID";
+const COM_SERVERS: [&str; 2] = ["LocalServer32", "InprocServer32"];
 
 /// Which files go: those inside a removed folder or removed themselves, but
 /// not inside another program's install folder, and missing ones whose path
@@ -61,13 +69,16 @@ impl Gone<'_> {
 /// Every record of the current user that names a file `gone` covers.
 /// `removed` are the folders that go, `removed_files` the single files.
 /// `vendor_alone`: nothing else of the publisher's is installed, so files
-/// Windows remembers as theirs are this program's.
+/// Windows remembers as theirs are this program's. `program_gone`: the
+/// program is no longer installed, so the records under its app id are left
+/// over too.
 pub(super) fn scan_windows_records(
     target: &ScanTarget,
     removed: &[PathBuf],
     removed_files: &[PathBuf],
     other_installs: &[PathBuf],
     vendor_alone: bool,
+    program_gone: bool,
 ) -> Vec<Leftover> {
     let gone = Gone {
         dirs: removed,
@@ -174,6 +185,10 @@ pub(super) fn scan_windows_records(
             }
         }
     }
+    out.extend(com_classes(hive, COM_CLASSES, &gone));
+    if program_gone {
+        out.extend(app_id_records(hive, &AppIdPlaces::current(), target));
+    }
 
     // A shortcut and the file it opened, kept as a list.
     for (name, entries) in registry::enum_multi_values(hive, SHORTCUT_HISTORY) {
@@ -193,6 +208,132 @@ pub(super) fn scan_windows_records(
         }
     }
     out
+}
+
+/// A COM class whose servers are all files that go, such as the class a
+/// program registers so its notifications can start it.
+fn com_classes(hive: Hive, base: &str, gone: &Gone) -> Vec<Leftover> {
+    let mut out = Vec::new();
+    for sub in registry::enum_subkeys(hive, base) {
+        if !(sub.starts_with('{') && sub.ends_with('}')) {
+            continue;
+        }
+        let key = format!(r"{base}\{sub}");
+        let servers: Vec<PathBuf> = COM_SERVERS
+            .iter()
+            .filter_map(|server| registry::read_string(hive, &format!(r"{key}\{server}"), ""))
+            .filter_map(|command| system::command_exe(&command))
+            .collect();
+        if !servers.is_empty() && servers.iter().all(|p| gone.covers(&p.to_string_lossy())) {
+            out.push(Leftover::reg_key(
+                hive,
+                key,
+                Confidence::High,
+                "a COM class that starts the program's file",
+            ));
+        }
+    }
+    out
+}
+
+/// Where Windows keeps records under a program's app id.
+struct AppIdPlaces {
+    /// Keys named by the app id, each with its reason.
+    keys: Vec<(String, &'static str)>,
+    /// Start's records, under `W~` and the app id.
+    tiles: String,
+    /// Keys whose values are named by the app id.
+    usage: Vec<String>,
+}
+
+impl AppIdPlaces {
+    fn current() -> Self {
+        AppIdPlaces {
+            keys: vec![
+                (
+                    NOTIFICATION_SETTINGS.to_string(),
+                    "notification settings of the program",
+                ),
+                (
+                    NOTIFICATION_BACKUP.to_string(),
+                    "notification settings of the program",
+                ),
+                (
+                    APP_ID_CLASSES.to_string(),
+                    "the program's app id registration",
+                ),
+            ],
+            tiles: START_TILES.to_string(),
+            usage: FEATURE_USAGE_KINDS
+                .iter()
+                .map(|kind| format!(r"{FEATURE_USAGE}\{kind}"))
+                .collect(),
+        }
+    }
+}
+
+/// The records Windows keeps under the app id of a program that is gone.
+fn app_id_records(hive: Hive, places: &AppIdPlaces, target: &ScanTarget) -> Vec<Leftover> {
+    let mut out = Vec::new();
+    for (base, reason) in &places.keys {
+        for id in registry::enum_subkeys(hive, base) {
+            if app_id_is_programs(&id, target) {
+                out.push(Leftover::reg_key(
+                    hive,
+                    format!(r"{base}\{id}"),
+                    Confidence::High,
+                    *reason,
+                ));
+            }
+        }
+    }
+    for sub in registry::enum_subkeys(hive, &places.tiles) {
+        if sub
+            .strip_prefix("W~")
+            .is_some_and(|id| app_id_is_programs(id, target))
+        {
+            out.push(Leftover::reg_key(
+                hive,
+                format!(r"{}\{sub}", places.tiles),
+                Confidence::High,
+                "Start menu records of the program",
+            ));
+        }
+    }
+    for base in &places.usage {
+        for name in registry::enum_value_names(hive, base) {
+            if app_id_is_programs(&name, target) {
+                out.push(Leftover::reg_value(
+                    hive,
+                    base.clone(),
+                    name,
+                    Confidence::High,
+                    "taskbar usage record of the program",
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// An app id such as `com.brightway.lumen.windows`: dotted words, one of
+/// them the product and another the vendor. Paths and packaged app ids
+/// (`Vendor.App_hash!App`) are not this kind of name.
+fn app_id_is_programs(id: &str, target: &ScanTarget) -> bool {
+    if id.is_empty() || !id.contains('.') || id.contains(['\\', '/', '!', ' ']) {
+        return false;
+    }
+    let words: Vec<String> = id.split('.').map(str::to_lowercase).collect();
+    let is_vendor = |w: &String| target.publisher_tokens.contains(w);
+    let product = words.iter().position(|w| {
+        !is_vendor(w) && matches!(score_product(w, target), Some((Confidence::High, _)))
+    });
+    product.is_some_and(|i| {
+        words
+            .iter()
+            .enumerate()
+            .any(|(j, w)| j != i && is_vendor(w))
+    })
 }
 
 /// The company Windows cached for the files it shows as `name`: the
@@ -651,5 +792,119 @@ mod tests {
             Some(format!(r"{drive}\Apps\app.exe"))
         );
         assert_eq!(device_to_drive(r"\Device\NoSuchVolume\x"), None);
+    }
+
+    /// A stand-in key under the current user's hive, gone again after the test.
+    struct TestKey(String);
+
+    impl Drop for TestKey {
+        fn drop(&mut self) {
+            let _ = registry::delete_key_tree(Hive::CurrentUser, &self.0);
+        }
+    }
+
+    fn set_value(key: &str, name: &str, value: &str) {
+        let (k, _) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .create_subkey(key)
+            .unwrap();
+        k.set_value(name, &value).unwrap();
+    }
+
+    fn subpaths(items: &[Leftover]) -> Vec<String> {
+        let mut paths: Vec<String> = items
+            .iter()
+            .map(|l| match &l.value_name {
+                Some(v) => format!("{} : {v}", l.subpath.clone().unwrap_or_default()),
+                None => l.subpath.clone().unwrap_or_default(),
+            })
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    #[test]
+    fn an_app_id_names_the_program_by_product_and_vendor() {
+        let target = super::super::name_target("Lumen", Some("Brightway Labs"));
+        assert!(app_id_is_programs("com.brightway.lumen.windows", &target));
+        assert!(app_id_is_programs("Brightway.Lumen", &target));
+        // Another product of the vendor's, or the product without its vendor.
+        assert!(!app_id_is_programs("com.brightway.other", &target));
+        assert!(!app_id_is_programs("lumen.app", &target));
+        assert!(!app_id_is_programs("com.brightway", &target));
+        // A packaged app, a path or a name without dots is another kind.
+        assert!(!app_id_is_programs("Brightway.Lumen_x1y2z3!App", &target));
+        assert!(!app_id_is_programs(r"C:\Apps\brightway.lumen.exe", &target));
+        assert!(!app_id_is_programs("BrightwayLumen", &target));
+    }
+
+    #[test]
+    fn the_records_under_a_gone_programs_app_id_go() {
+        let root = TestKey(format!(r"Software\OxidizeAppIdTest{}", std::process::id()));
+        let base = |name: &str| format!(r"{}\{name}", root.0);
+        let places = AppIdPlaces {
+            keys: vec![(base("Settings"), "notification settings of the program")],
+            tiles: base("Tiles"),
+            usage: vec![base("Usage")],
+        };
+        let ours = "com.brightway.lumen.windows";
+        let theirs = "com.brightway.other";
+        for id in [ours, theirs] {
+            set_value(&format!(r"{}\{id}", base("Settings")), "Enabled", "0");
+            set_value(&format!(r"{}\W~{id}", base("Tiles")), "x", "1");
+            set_value(&base("Usage"), id, "1");
+        }
+        set_value(&format!(r"{}\W~C:\Apps", base("Tiles")), "x", "1");
+
+        let target = super::super::name_target("Lumen", Some("Brightway Labs"));
+        let found = app_id_records(Hive::CurrentUser, &places, &target);
+        assert_eq!(
+            subpaths(&found),
+            vec![
+                format!(r"{}\{ours}", base("Settings")),
+                format!(r"{}\W~{ours}", base("Tiles")),
+                format!(r"{} : {ours}", base("Usage")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_com_class_that_only_starts_files_that_go_goes() {
+        let root = TestKey(format!(r"Software\OxidizeComTest{}", std::process::id()));
+        let files = crate::backup::TestDir::new("oxidize_com_test");
+        let kept = files.join("Other").join("other.exe");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "").unwrap();
+        let missing = files
+            .join(unique("Brightway"))
+            .join("Lumen")
+            .join("Lumen.exe");
+        let missing = missing.to_string_lossy().to_string();
+        let kept = kept.to_string_lossy().to_string();
+        let class = |id: &str, server: &str| format!(r"{}\{{{id}}}\{server}", root.0);
+
+        set_value(
+            &class("1-GONE", "LocalServer32"),
+            "",
+            &format!("\"{missing}\" -ToastActivated"),
+        );
+        set_value(&class("2-KEPT", "LocalServer32"), "", &kept);
+        set_value(&class("3-MIXED", "LocalServer32"), "", &missing);
+        set_value(&class("3-MIXED", "InprocServer32"), "", &kept);
+        set_value(&class("4-NONE", "ProgID"), "", "Lumen.Document");
+        set_value(
+            &format!(r"{}\NotAClass\LocalServer32", root.0),
+            "",
+            &missing,
+        );
+
+        let target = super::super::name_target("Lumen", Some("Brightway Labs"));
+        let gone = Gone {
+            dirs: &[],
+            files: &[],
+            others: &[],
+            target: &target,
+        };
+        let found = com_classes(Hive::CurrentUser, &root.0, &gone);
+        assert_eq!(subpaths(&found), vec![format!(r"{}\{{1-GONE}}", root.0)]);
     }
 }
