@@ -2826,6 +2826,7 @@ pub fn scan_with(target: &ScanTarget, installed: bool, snap: &Snapshot) -> ScanR
         &removed_files,
         &others,
         alone,
+        !installed,
     ));
     dedupe_by_path(&mut items);
     drop_files_inside_removed_folders(&mut items);
