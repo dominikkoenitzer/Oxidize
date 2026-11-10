@@ -159,12 +159,13 @@ Reads only. Without `--check` it prints the protected list; with `--json`, its `
 
 ## Where it looks
 
-Registry keys and values under `SOFTWARE` in HKCU and HKLM, in both the 32- and 64-bit views, App Paths and autostart entries. Folders under Program Files, ProgramData, AppData, the Start Menu, Startup and the Desktop. Services, scheduled tasks, firewall rules and PATH entries. Link types (`name://` links) and file types whose command runs from the program's folder, open-with entries, shortcuts that lead into the program's folder whatever they are called, its folders in the user's temp folder, other uninstall entries left pointing into it, and the vendor's own key under `HKCU\Software` when nothing else of the vendor's is installed. A vendor folder or key that held nothing but the program goes with it.
+Registry keys and values under `SOFTWARE` in HKCU and HKLM, in both the 32- and 64-bit views, App Paths and autostart entries. Folders under Program Files, ProgramData, AppData, the Start Menu, Startup and the Desktop. Services, scheduled tasks, firewall rules and PATH entries. Link types (`name://` links) and file types whose command runs from the program's folder, open-with entries, shortcuts, scheduled tasks and autostart values that lead into the program's folder whatever they are called, its folders in the user's temp folder, other uninstall entries left pointing into it, and the vendor's own key under `HKCU\Software` when nothing else of the vendor's is installed. Where other programs registered themselves in that key, as with a browser's native messaging hosts, only the subkeys that go with the program are taken. A vendor folder or key that held nothing but the program goes with it.
 
 ## What it never removes
 
 - Drive roots, the Windows folder and everything under it.
 - The scanned roots themselves (Program Files, ProgramData, AppData, the Start Menu, Startup, the Desktop), the user profile, the Users folder, the Public folder, Documents and `%LOCALAPPDATA%\Packages`.
 - A vendor folder that also holds other products.
+- Subkeys of the vendor's key that name another program's files or hold what other programs registered there.
 - Scheduled tasks under `\Microsoft`.
 - Store apps that are part of Windows, frameworks, resource packages, bundles, packages that belong to a normal program, apps other apps depend on, and the ones on its keep list: the Store, its helpers, Windows components and app runtimes. `list` shows these as `protected` with the reason.
