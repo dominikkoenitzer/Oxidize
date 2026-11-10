@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.18, 2026-11-10
+
+- Start's records of a program folder that was already gone before the
+  scan now go too, when the missing path names the product. Before, only
+  the records of folders the scan itself removed were found, so a program
+  whose uninstaller had taken its folder left them behind.
+
 ## 0.2.17, 2026-11-10
 
 - Once a program is gone, the records Windows keeps under its app id go
