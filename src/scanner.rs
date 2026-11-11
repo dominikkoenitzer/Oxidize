@@ -4437,6 +4437,175 @@ mod tests {
         assert!(path_names_product(&gone, &t));
     }
 
+    /// A test's own folder right below `%LOCALAPPDATA%`, where programs keep
+    /// their folders, removed when the test ends, passed or failed.
+    struct LocalDir(PathBuf);
+
+    impl LocalDir {
+        fn new(name: &str) -> LocalDir {
+            let path = env_dir("LOCALAPPDATA")
+                .expect("LOCALAPPDATA")
+                .join(format!("{name}_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            LocalDir(path)
+        }
+    }
+
+    impl Drop for LocalDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    impl std::ops::Deref for LocalDir {
+        type Target = Path;
+
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    #[test]
+    fn a_product_key_keeps_the_hosts_other_programs_registered_in_it() {
+        let root = TestKey(format!(
+            r"Software\OxidizeProductKeyTest{}",
+            std::process::id()
+        ));
+        let files = crate::backup::TestDir::new("oxidize_product_key_test");
+        let manifest = files.join("Other Tool").join("org.other.helper.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "{}").unwrap();
+
+        // The browser's key under its vendor's, with a host another program
+        // registered in it next to the browser's own host and settings.
+        let browser = format!(r"{}\Brightway\Lumen", root.0);
+        set_test_value(
+            &format!(r"{browser}\NativeMessagingHosts\org.other.helper"),
+            "",
+            &manifest.display().to_string(),
+        );
+        set_test_value(
+            &format!(r"{browser}\NativeMessagingHosts\com.brightway.lumen"),
+            "",
+            "lumen-host.json",
+        );
+        set_test_value(
+            &format!(r"{browser}\PreferenceMACs\Default"),
+            "homepage",
+            "0A1B",
+        );
+
+        let t = name_target("Lumen", Some("Brightway LLC"));
+        // Whether the vendor's key is taken as the vendor's or only looked
+        // into, the other program's host stays.
+        for vendor_alone in [false, true] {
+            let mut out = Vec::new();
+            scan_software_root(Hive::CurrentUser, &root.0, &t, vendor_alone, &mut out);
+            assert_eq!(
+                subpaths(&out),
+                vec![
+                    format!(r"{browser}\NativeMessagingHosts\com.brightway.lumen"),
+                    format!(r"{browser}\PreferenceMACs"),
+                ],
+                "{vendor_alone}"
+            );
+        }
+
+        // Without the other program's host, the browser's key goes whole.
+        registry::delete_key_tree(
+            Hive::CurrentUser,
+            &format!(r"{browser}\NativeMessagingHosts\org.other.helper"),
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, false, &mut out);
+        assert_eq!(subpaths(&out), vec![browser.clone()]);
+    }
+
+    #[test]
+    fn a_longer_product_name_is_another_product() {
+        let root = TestKey(format!(
+            r"Software\OxidizeLongerNameTest{}",
+            std::process::id()
+        ));
+        let vendor = format!(r"{}\Brightway", root.0);
+        set_test_value(&format!(r"{}\Lumen for Testing", root.0), "usagestats", "1");
+        set_test_value(
+            &format!(r"{vendor}\Lumen for Testing\BLBeacon"),
+            "version",
+            "1.2",
+        );
+        set_test_value(&format!(r"{vendor}\Lumen\BLBeacon"), "version", "1.2");
+        set_test_value(
+            &format!(r"{vendor}\Lumen-Browser\BLBeacon"),
+            "version",
+            "1.2",
+        );
+
+        let mut t = name_target("Lumen", Some("Brightway LLC"));
+        for vendor_alone in [false, true] {
+            let mut out = Vec::new();
+            scan_software_root(Hive::CurrentUser, &root.0, &t, vendor_alone, &mut out);
+            assert_eq!(
+                subpaths(&out),
+                vec![format!(r"{vendor}\Lumen")],
+                "{vendor_alone}"
+            );
+        }
+
+        // The name its own install folder carries is the program's too.
+        t.install_location = Some(program_files().join(r"Brightway\Lumen-Browser\Application"));
+        for vendor_alone in [false, true] {
+            let mut out = Vec::new();
+            scan_software_root(Hive::CurrentUser, &root.0, &t, vendor_alone, &mut out);
+            assert_eq!(
+                subpaths(&out),
+                vec![
+                    format!(r"{vendor}\Lumen"),
+                    format!(r"{vendor}\Lumen-Browser")
+                ],
+                "{vendor_alone}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_in_another_programs_folder_is_theirs() {
+        // A test tool's own copies of the browser, one there and two gone,
+        // in its folder below `%LOCALAPPDATA%`.
+        let tools = LocalDir::new("OxidizeOthersFolderTest");
+        let there = tools.join(r"lumen-1243\lumen-win64\lumen.exe");
+        fs::create_dir_all(there.parent().unwrap()).unwrap();
+        fs::write(&there, "MZ").unwrap();
+        let gone = tools.join(r"lumen-1234\lumen-win64\lumen.exe");
+        let shell = tools.join(r"lumen_headless_shell-1234\lumen-headless-shell.exe");
+
+        let mut t = name_target("Lumen", Some("Brightway LLC"));
+        for round in ["by name", "with its install record"] {
+            for exe in [&there, &gone, &shell] {
+                let name = exe.file_name().unwrap().to_str().unwrap();
+                let hit = match_exe_item(name, Some(exe), &t);
+                assert!(hit.is_none(), "{round}, {}: {hit:?}", exe.display());
+                assert!(!path_names_product(exe, &t), "{round}, {}", exe.display());
+            }
+            t.install_location = Some(program_files().join(r"Brightway\Lumen\Application"));
+            t.exe_names = vec!["lumen.exe".to_string()];
+        }
+
+        // A folder of the program's own name in there is the program's, as a
+        // game's folder in a store's library is the game's.
+        let own = tools.join(r"library\common\Lumen\lumen.exe");
+        assert!(path_names_product(&own, &t));
+        assert!(matches!(
+            match_exe_item("lumen.exe", Some(&own), &t),
+            Some((Confidence::High, _))
+        ));
+        // A path into the vendor's folder that is gone still names it.
+        let t = name_target("Lumen", Some("Brightway LLC"));
+        let vendors = program_files().join(r"Brightway\Lumen\lumen.exe");
+        assert!(path_names_product(&vendors, &t));
+    }
+
     #[test]
     fn the_user_folder_counts_the_exact_name_and_nothing_else() {
         let t = name_target("Quillmark", None);
