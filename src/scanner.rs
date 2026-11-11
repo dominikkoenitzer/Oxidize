@@ -1371,7 +1371,7 @@ fn owned_exe(p: &Path, target: &ScanTarget) -> Option<(Confidence, &'static str)
         }
     }
     let base = util::file_basename_lower(&p.to_string_lossy())?;
-    if target.exe_names.contains(&base) {
+    if target.exe_names.contains(&base) && !in_others_folder(p, target) {
         // The program's own copy is gone once it is uninstalled. A file of
         // that name that is still there sits somewhere else and can be
         // another program's: every runtime ships its own `node.exe`.
@@ -1407,6 +1407,9 @@ fn exe_missing(exe: &Path) -> bool {
 /// an install root, one that carries the brand does too when nothing else of
 /// the vendor's is installed.
 fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
+    if in_others_folder(p, target) {
+        return false;
+    }
     let named = p.components().any(|c| {
         c.as_os_str()
             .to_str()
@@ -1414,6 +1417,51 @@ fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
             .unwrap_or(false)
     });
     named || path_names_brand(p, target)
+}
+
+/// Folders right below an install root that hold the folders of many
+/// programs, not one program's own: the folder below says whose it is.
+const SHARED_TOPS: &[&str] = &["Temp", "Packages", "Common Files", "WindowsApps"];
+
+/// Is `p` in another program's folder? It is when its folder right below an
+/// install root is there and is neither the program's nor its vendor's, and
+/// no folder on the way down has the program's exact name, as a game's
+/// folder in a store's library has. What is in there is that program's,
+/// whatever the file is called, there or gone.
+fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
+    if owned_folders(target)
+        .into_iter()
+        .chain(target.install_location.as_deref())
+        .any(|dir| system::path_under(p, dir))
+    {
+        return false;
+    }
+    let Some((root, segments)) = below_root(p, &install_roots()) else {
+        return false;
+    };
+    let shared = segments
+        .iter()
+        .take_while(|s| SHARED_TOPS.iter().any(|t| t.eq_ignore_ascii_case(s)))
+        .count();
+    let Some((_, folders)) = segments[shared..].split_last() else {
+        return false;
+    };
+    let Some(top) = folders.first() else {
+        return false;
+    };
+    let ours = score_product(top, target).is_some()
+        || matches_publisher(top, target)
+        || is_publisher_exactly(top, target)
+        || target
+            .brand
+            .as_deref()
+            .is_some_and(|b| carries_brand(top, b))
+        || folders.iter().any(|f| is_exact_product(f, target));
+    !ours
+        && segments[..=shared]
+            .iter()
+            .fold(root, |dir, s| dir.join(s))
+            .is_dir()
 }
 
 fn path_names_brand(p: &Path, target: &ScanTarget) -> bool {
@@ -2211,24 +2259,100 @@ fn scan_software_root(
         }
         if matches_publisher(&child, target) {
             for grand in registry::enum_subkeys(hive, &child_path) {
-                if let Some((conf, reason)) = score_product(&grand, target) {
-                    out.push(Leftover::reg_key(
+                if let Some((conf, reason)) = key_names_product(&grand, target) {
+                    take_product_key(
                         hive,
-                        format!("{child_path}\\{grand}"),
+                        &format!("{child_path}\\{grand}"),
+                        target,
                         conf,
-                        format!("{reason}, in vendor key {child}"),
-                    ));
+                        &format!("{reason}, in vendor key {child}"),
+                        0,
+                        out,
+                    );
                 }
             }
-        } else if let Some((conf, reason)) = score_product(&child, target) {
-            out.push(Leftover::reg_key(hive, child_path, conf, reason));
+        } else if let Some((conf, reason)) = key_names_product(&child, target) {
+            take_product_key(hive, &child_path, target, conf, &reason, 0, out);
         }
+    }
+}
+
+/// Why a key named `name` is the program's: it carries the program's name
+/// and nothing else, give or take the noise, or a name the folders of its
+/// install path carry. A longer name made of it and other words, such as a
+/// test build's, is another product's.
+fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
+    let hit = score_product(name, target)?;
+    if is_exact_product(name, target) {
+        return Some(hit);
+    }
+    let own = own_name_words(target);
+    significant_tokens(name)
+        .iter()
+        .all(|w| own.contains(w))
+        .then_some(hit)
+}
+
+/// The words of the program's own names: its name, its vendor's, and those
+/// of the folders of its install path that are named after it.
+fn own_name_words(target: &ScanTarget) -> Vec<String> {
+    let mut words: Vec<String> = target
+        .name_tokens
+        .iter()
+        .chain(&target.publisher_tokens)
+        .cloned()
+        .collect();
+    if let Some(loc) = &target.install_location {
+        for part in loc.components().filter_map(|c| c.as_os_str().to_str()) {
+            if matches!(score_product(part, target), Some((Confidence::High, _))) {
+                words.extend(significant_tokens(part));
+            }
+        }
+    }
+    words
+}
+
+/// The program's own key goes whole unless another program registered
+/// itself in it. Then what is the program's in it goes and their entries
+/// stay, as in the vendor's key.
+fn take_product_key(
+    hive: Hive,
+    path: &str,
+    target: &ScanTarget,
+    conf: Confidence,
+    why: &str,
+    depth: usize,
+    out: &mut Vec<Leftover>,
+) {
+    if !holds_others(hive, path, target) {
+        out.push(Leftover::reg_key(hive, path, conf, why));
+        return;
+    }
+    if depth >= VENDOR_WALK_DEPTH {
+        return;
+    }
+    let slot = is_others_slot(path);
+    for name in registry::enum_subkeys(hive, path) {
+        if reg_denied(&name) {
+            continue;
+        }
+        let sub = format!("{path}\\{name}");
+        if slot && key_goes_with_program(hive, &sub, &name, target).is_none() {
+            continue;
+        }
+        take_product_key(hive, &sub, target, conf, why, depth + 1, out);
     }
 }
 
 /// Subkeys where other programs register themselves with the vendor's
 /// program, such as a browser's native messaging hosts and its extensions.
 const OTHERS_SLOTS: &[&str] = &["NativeMessagingHosts", "Extensions"];
+
+fn is_others_slot(path: &str) -> bool {
+    path.rsplit('\\')
+        .next()
+        .is_some_and(|leaf| OTHERS_SLOTS.iter().any(|s| s.eq_ignore_ascii_case(leaf)))
+}
 
 /// How far the walk of a vendor key goes before it stops and keeps the key.
 const VENDOR_WALK_DEPTH: usize = 8;
@@ -2251,7 +2375,7 @@ fn take_vendor_key(
             let sub = format!("{path}\\{name}");
             !reg_denied(name)
                 && !holds_others(hive, &sub, target)
-                && key_goes_with_program(hive, &sub, name, target).is_some()
+                && subkey_goes_with_program(hive, &sub, name, target).is_some()
         });
     if whole {
         out.push(Leftover::reg_key(
@@ -2281,9 +2405,12 @@ fn take_own_subkeys(
             continue;
         }
         let sub = format!("{path}\\{name}");
-        if holds_others(hive, &sub, target) {
+        if let Some((conf, why)) = key_names_product(&name, target) {
+            let why = format!("{why}, in vendor key {vendor}");
+            take_product_key(hive, &sub, target, conf, &why, depth, out);
+        } else if holds_others(hive, &sub, target) {
             take_own_subkeys(hive, &sub, vendor, target, depth + 1, out);
-        } else if let Some((conf, why)) = key_goes_with_program(hive, &sub, &name, target) {
+        } else if let Some((conf, why)) = subkey_goes_with_program(hive, &sub, &name, target) {
             out.push(Leftover::reg_key(
                 hive,
                 sub,
@@ -2339,10 +2466,7 @@ fn holds_others_below(
     if names_others_file(hive, path, target) {
         return true;
     }
-    let slot = path
-        .rsplit('\\')
-        .next()
-        .is_some_and(|leaf| OTHERS_SLOTS.iter().any(|s| s.eq_ignore_ascii_case(leaf)));
+    let slot = is_others_slot(path);
     registry::enum_subkeys(hive, path).into_iter().any(|name| {
         let sub = format!("{path}\\{name}");
         (slot && key_goes_with_program(hive, &sub, &name, target).is_none())
@@ -2350,17 +2474,34 @@ fn holds_others_below(
     })
 }
 
-/// Why a subkey of the vendor's key goes with the program: it is named after
-/// it, or a value in it or below it names one of its files.
+/// Why an entry another program could have made, a host or an extension,
+/// is the program's: its id carries the program's name, or a value in it or
+/// below it names one of its files.
 fn key_goes_with_program(
     hive: Hive,
     path: &str,
     name: &str,
     target: &ScanTarget,
 ) -> Option<(Confidence, String)> {
-    if let Some(hit) = score_product(name, target) {
-        return Some(hit);
-    }
+    score_product(name, target).or_else(|| key_names_program_file(hive, path, target))
+}
+
+/// Why a subkey of the vendor's key goes with the program: it has the
+/// program's name, or a value in it or below it names one of its files.
+fn subkey_goes_with_program(
+    hive: Hive,
+    path: &str,
+    name: &str,
+    target: &ScanTarget,
+) -> Option<(Confidence, String)> {
+    key_names_product(name, target).or_else(|| key_names_program_file(hive, path, target))
+}
+
+fn key_names_program_file(
+    hive: Hive,
+    path: &str,
+    target: &ScanTarget,
+) -> Option<(Confidence, String)> {
     let mut seen = 0;
     names_program_file(hive, path, target, 0, &mut seen)
         .then(|| (Confidence::High, "names a file of the program".to_string()))
@@ -2399,9 +2540,13 @@ fn scan_app_paths(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Lef
             let key = format!("{base}\\{child}");
             // The entry names the file it starts. One that starts a file of
             // the same name in someone else's folder is theirs, not ours.
-            let conf = registry::read_string(hive, &key, "")
+            let exe = registry::read_string(hive, &key, "")
                 .and_then(|data| system::command_exe(&data))
-                .filter(|exe| exe.is_absolute())
+                .filter(|exe| exe.is_absolute());
+            if exe.as_deref().is_some_and(|e| in_others_folder(e, target)) {
+                continue;
+            }
+            let conf = exe
                 .map(|exe| owned_exe(&exe, target).map_or(Confidence::Medium, |(c, _)| c))
                 .unwrap_or(Confidence::High);
             out.push(Leftover::reg_key(
@@ -2416,10 +2561,14 @@ fn scan_app_paths(hive: Hive, base: &str, target: &ScanTarget, out: &mut Vec<Lef
 
 /// Match an autostart (`Run`) value by its name, its executable or its path.
 fn match_run_value(name: &str, data: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
+    let exe = system::command_exe(data).map(|e| locate_exe(&e));
+    if exe.as_deref().is_some_and(|e| in_others_folder(e, target)) {
+        return None;
+    }
     if let Some((conf, reason)) = score_product(name, target) {
         return Some((conf, format!("autostart, {reason}")));
     }
-    let exe = locate_exe(&system::command_exe(data)?);
+    let exe = exe?;
     if let Some((conf, why)) = owned_exe(&exe, target) {
         return Some((conf, format!("autostart, {why}")));
     }
@@ -2533,6 +2682,9 @@ fn match_exe_item(
         let exe = locate_exe(exe);
         if let Some((conf, why)) = owned_exe(&exe, target) {
             return Some((conf, why.to_string()));
+        }
+        if in_others_folder(&exe, target) {
+            return None;
         }
         if exe_missing(&exe) && path_names_product(&exe, target) {
             return Some((Confidence::High, "points to a missing file".to_string()));
@@ -2660,8 +2812,15 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             continue;
         }
         let label = svc.display_name.as_deref().unwrap_or(&svc.name);
-        let hit = match_exe_item(&svc.name, svc.exe.as_deref(), target)
-            .or_else(|| match_exe_item(label, None, target));
+        let theirs = svc
+            .exe
+            .as_deref()
+            .is_some_and(|e| in_others_folder(&locate_exe(e), target));
+        let hit = match_exe_item(&svc.name, svc.exe.as_deref(), target).or_else(|| {
+            (!theirs)
+                .then(|| match_exe_item(label, None, target))
+                .flatten()
+        });
         if let Some((conf, reason)) = hit {
             let image = svc
                 .exe
@@ -3728,28 +3887,26 @@ mod tests {
     fn a_file_named_like_the_programs_elsewhere_is_not_the_programs() {
         let base = crate::backup::TestDir::new("oxidize_exe_name_test");
         let own = base.join("Example Runtime");
-        let other = base.join("Other App").join("bin");
         fs::create_dir_all(&own).unwrap();
-        fs::create_dir_all(&other).unwrap();
-        fs::write(other.join("node.exe"), "MZ").unwrap();
+        let other = LocalDir::new("OxidizeExeNameTest");
+        let theirs = other.join("bin").join("node.exe");
+        fs::create_dir_all(theirs.parent().unwrap()).unwrap();
+        fs::write(&theirs, "MZ").unwrap();
         let mut t = name_target("Example Runtime", Some("Example Foundation"));
         t.exe_names = vec!["node.exe".to_string()];
         t.install_location = Some(own.clone());
         t.install_vouched = true;
 
-        // Another program's copy that is still there: a guess at most.
-        let theirs = other.join("node.exe");
-        assert!(matches!(
-            match_exe_item("Other App", Some(&theirs), &t),
-            Some((Confidence::Medium, _))
-        ));
+        // Another program's copy in its own folder is theirs.
+        assert!(match_exe_item("Other App", Some(&theirs), &t).is_none());
         // The program's own copy, or one that is gone with it, is its own.
         assert!(matches!(
             match_exe_item("x", Some(&own.join("node.exe")), &t),
             Some((Confidence::High, _))
         ));
+        let gone = program_files().join(format!("OxidizeGoneTest{}", std::process::id()));
         assert!(matches!(
-            match_exe_item("x", Some(&base.join("Gone").join("node.exe")), &t),
+            match_exe_item("x", Some(&gone.join("node.exe")), &t),
             Some((Confidence::High, _))
         ));
     }
