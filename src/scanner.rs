@@ -1809,10 +1809,14 @@ fn holds_namesake_child(dir: &Path, target: &ScanTarget) -> bool {
     })
 }
 
-/// Flag product-matching children of `parent`, never `parent` itself.
+/// Flag product-matching children of `parent`, never `parent` itself. A
+/// child counts by the key rule, so the folders of the vendor's other
+/// channels and test builds stay, and a child that is or holds another
+/// program's install folder stays whole.
 fn flag_product_children(
     parent: &Path,
     target: &ScanTarget,
+    other_installs: &[PathBuf],
     out: &mut Vec<Leftover>,
     note: &str,
     roots: &[PathBuf],
@@ -1826,7 +1830,14 @@ fn flag_product_children(
             continue;
         }
         if child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            if let Some((conf, reason)) = score_product(&cname, target) {
+            let key = norm_path_key(&child.path());
+            if other_installs.iter().any(|o| {
+                let o = norm_path_key(o);
+                o == key || dir_contains(&key, &o)
+            }) {
+                continue;
+            }
+            if let Some((conf, reason)) = key_names_product(&cname, target) {
                 push_dir_leftover(out, child.path(), conf, format!("{reason}, {note}"), roots);
             }
         }
@@ -1927,7 +1938,7 @@ fn scan_dir_children(
                 push_dir_leftover(out, path, Confidence::High, "exact name".to_string(), roots);
             } else if matches_publisher(&name, target) {
                 let note = format!("in vendor folder {name}");
-                flag_product_children(&path, target, out, &note, roots);
+                flag_product_children(&path, target, other_installs, out, &note, roots);
             } else if houses_other || contains_install {
                 // Another program is installed inside, and the folder is not
                 // the vendor's, so it is shared whatever its name says:
@@ -2092,7 +2103,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
 
             if houses_other {
-                flag_product_children(loc, target, &mut out, &note, roots);
+                flag_product_children(loc, target, other_installs, &mut out, &note, roots);
             } else if target.install_vouched {
                 push_dir_leftover(
                     &mut out,
@@ -2102,7 +2113,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
                     roots,
                 );
             } else if vendor_root {
-                flag_product_children(loc, target, &mut out, &note, roots);
+                flag_product_children(loc, target, other_installs, &mut out, &note, roots);
             } else {
                 let (conf, reason) = install_folder_score(leaf, target);
                 push_dir_leftover(&mut out, loc.clone(), conf, reason, roots);
