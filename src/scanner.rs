@@ -4764,6 +4764,45 @@ mod tests {
     }
 
     #[test]
+    fn a_vendor_folder_keeps_the_other_channels_and_installs_in_it() {
+        // The program's folder next to a test build's, a channel's that is
+        // installed and one that is not, each with a profile in it.
+        let root = crate::backup::TestDir::new("oxidize_channel_folder_test");
+        for dir in [
+            r"Brightway\Lumen\User Data",
+            r"Brightway\Lumen for Testing\User Data",
+            r"Brightway\Lumen Beta\Application",
+            r"Brightway\Lumen Beta\User Data",
+            r"Brightway\Lumen Canary\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let beta = root.join(r"Brightway\Lumen Beta\Application");
+        let mut t = name_target("Lumen", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen\Application"));
+
+        for others in [vec![beta.clone()], vec![root.join(r"Brightway\Lumen Beta")]] {
+            let mut out = Vec::new();
+            scan_dir_children(&root, &t, &others, false, &fs_roots(), &mut out);
+            let found: Vec<&str> = out.iter().map(|l| l.path.as_str()).collect();
+            assert_eq!(
+                found,
+                [root.join(r"Brightway\Lumen").display().to_string()],
+                "{}",
+                others[0].display()
+            );
+        }
+
+        // A folder of the program's own name that another program is
+        // installed in is shared, so it stays whole.
+        let updater = root.join(r"Brightway\Lumen\Updater");
+        fs::create_dir_all(&updater).unwrap();
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[beta, updater], false, &fs_roots(), &mut out);
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
     fn the_user_folder_counts_the_exact_name_and_nothing_else() {
         let t = name_target("Quillmark", None);
         let home = crate::backup::TestDir::new("oxidize_user_folder_test");
