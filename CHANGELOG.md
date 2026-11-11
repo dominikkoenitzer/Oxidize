@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.20, 2026-11-11
+
+- A program's own registry key now goes whole only when nothing of another
+  program's is in it. A browser's key that holds native messaging hosts
+  other programs registered keeps them, and only what is the browser's goes.
+- A registry key matches a program only by the program's own name, or by a
+  name its install folders carry. A longer name made from it, such as a test
+  build's, is another product's and stays.
+- A file in another program's folder is that program's, even when it is
+  named like the program's own or has its name in it. Firewall rules,
+  services, tasks, autostart values, sound device choices and other records
+  that point there stay.
+
 ## 0.2.19, 2026-11-11
 
 - A vendor's registry key now goes whole only when everything in it goes
