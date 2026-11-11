@@ -194,6 +194,20 @@ impl Snapshot {
         self
     }
 
+    /// Start from the scheduled tasks already read.
+    #[cfg(test)]
+    fn with_tasks(self, tasks: Vec<system::TaskInfo>) -> Self {
+        let _ = self.tasks.set(tasks);
+        self
+    }
+
+    /// Start from the folders whose children are inspected by name.
+    #[cfg(test)]
+    fn with_roots(self, roots: Vec<PathBuf>) -> Self {
+        let _ = self.roots.set(roots);
+        self
+    }
+
     /// Every registered program, system components included.
     pub fn programs(&self) -> &[Program] {
         self.programs
@@ -2186,10 +2200,9 @@ fn scan_software_root(
             continue;
         }
         let child_path = format!("{base}\\{child}");
-        // The user's own settings from a vendor with nothing else installed
-        // belong to this program, whatever the subkeys are called. So does
-        // the machine's key named after the brand when no other program
-        // carries it.
+        // The user's key of a vendor with nothing else installed, and the
+        // machine's key named after the brand when no other program carries
+        // it, go as far as what is in them goes with this program.
         if (hive == Hive::CurrentUser && vendor_alone && is_publisher_exactly(&child, target))
             || is_brand_name(&child, target)
         {
@@ -2221,8 +2234,10 @@ const OTHERS_SLOTS: &[&str] = &["NativeMessagingHosts", "Extensions"];
 const VENDOR_WALK_DEPTH: usize = 8;
 const VENDOR_WALK_KEYS: usize = 5000;
 
-/// The vendor's key goes whole when it holds nothing of other programs.
-/// When it does, only its subkeys that go with the program go, and a subkey
+/// The vendor's key goes whole only when every subkey in it goes with the
+/// program. One that does not, another product's settings or a slot where
+/// other programs registered, keeps the key, installed or not, file or no
+/// file: then only the subkeys that go with the program go, and a subkey
 /// that holds both is narrowed the same way.
 fn take_vendor_key(
     hive: Hive,
@@ -2231,12 +2246,19 @@ fn take_vendor_key(
     target: &ScanTarget,
     out: &mut Vec<Leftover>,
 ) {
-    if !holds_others(hive, path, target) {
+    let whole = !names_others_file(hive, path, target)
+        && registry::enum_subkeys(hive, path).iter().all(|name| {
+            let sub = format!("{path}\\{name}");
+            !reg_denied(name)
+                && !holds_others(hive, &sub, target)
+                && key_goes_with_program(hive, &sub, name, target).is_some()
+        });
+    if whole {
         out.push(Leftover::reg_key(
             hive,
             path,
             Confidence::High,
-            "the vendor's key, nothing else of theirs is installed",
+            "the vendor's key, everything in it goes with the program",
         ));
         return;
     }
@@ -2285,6 +2307,15 @@ fn path_goes_with_program(p: &Path, target: &ScanTarget) -> bool {
         || path_names_product(p, target)
 }
 
+/// Does a value of the key itself name a file that is there and is not the
+/// program's?
+fn names_others_file(hive: Hive, path: &str, target: &ScanTarget) -> bool {
+    registry::enum_string_values(hive, path)
+        .iter()
+        .filter_map(|(_, data)| value_path(data))
+        .any(|p| p.exists() && !path_goes_with_program(&p, target))
+}
+
 /// Does the key or anything below it belong to another program? It does when
 /// a value names a file that is there and is not the program's, or when
 /// another program registered itself in one of the slots made for that. A
@@ -2305,11 +2336,7 @@ fn holds_others_below(
     if depth > VENDOR_WALK_DEPTH || *seen > VENDOR_WALK_KEYS {
         return true;
     }
-    let foreign_file = registry::enum_string_values(hive, path)
-        .iter()
-        .filter_map(|(_, data)| value_path(data))
-        .any(|p| p.exists() && !path_goes_with_program(&p, target));
-    if foreign_file {
+    if names_others_file(hive, path, target) {
         return true;
     }
     let slot = path
@@ -3014,12 +3041,59 @@ mod tests {
         );
         assert!(out.iter().all(|l| l.confidence == Confidence::High));
 
-        // With the other program's host gone, nothing in the key is anyone
-        // else's, and the vendor's key goes whole again.
+        // With the other program's host gone, the test build's settings are
+        // still another product's, and the vendor's key stays.
         registry::delete_key_tree(Hive::CurrentUser, &browser).unwrap();
         out.clear();
         scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(
+            subpaths(&out),
+            vec![
+                format!(r"{vendor}\Brightway Notes"),
+                format!(r"{vendor}\Update")
+            ]
+        );
+
+        // Only once everything in it goes with the program does the vendor's
+        // key go whole.
+        registry::delete_key_tree(
+            Hive::CurrentUser,
+            &format!(r"{vendor}\Brightway Browser for Testing"),
+        )
+        .unwrap();
+        out.clear();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
         assert_eq!(subpaths(&out), vec![vendor.clone()]);
+    }
+
+    #[test]
+    fn a_vendor_key_with_another_products_settings_stays_with_no_host_in_it() {
+        let root = TestKey(format!(
+            r"Software\OxidizeVendorSettingsTest{}",
+            std::process::id()
+        ));
+        let vendor = format!(r"{}\Brightway", root.0);
+        // The vendor's browser, with no host and no extension registered for
+        // it, and the settings of its test build, which name no file.
+        winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+            .create_subkey(format!(r"{vendor}\Brightway Browser\NativeMessagingHosts"))
+            .unwrap();
+        set_test_value(
+            &format!(r"{vendor}\Brightway Browser for Testing\BLBeacon"),
+            "version",
+            "153.0.1.2",
+        );
+        set_test_value(
+            &format!(r"{vendor}\Brightway Browser for Testing\PreferenceMACs\Default"),
+            "homepage",
+            "154393A3E67D037D72D1726536DAFAEB1F3FF050F717020492443A43F5CDF4F8",
+        );
+        set_test_value(&format!(r"{vendor}\Brightway Notes"), "Theme", "dark");
+
+        let t = name_target("Brightway Notes", Some("Brightway Corporation"));
+        let mut out = Vec::new();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(subpaths(&out), vec![format!(r"{vendor}\Brightway Notes")]);
     }
 
     #[test]
@@ -3086,6 +3160,41 @@ mod tests {
         let found = starts_into_removed(&tasks, &runs, std::slice::from_ref(&updater), &[]);
         assert_eq!(found.len(), 2);
         assert!(starts_into_removed(&tasks, &runs, &[], &[]).is_empty());
+    }
+
+    #[test]
+    fn the_scan_takes_the_tasks_that_start_a_file_in_a_folder_that_goes() {
+        let files = crate::backup::TestDir::new("oxidize_scan_starts_test");
+        let exe = files
+            .join("Brightway Notes")
+            .join("Updater")
+            .join("wake.exe");
+        fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        fs::write(&exe, b"").unwrap();
+        // Neither its name nor its file says whose it is.
+        let name = r"\Daily Wake";
+        let tasks = vec![system::TaskInfo {
+            name: name.to_string(),
+            file: PathBuf::new(),
+            command: Some(format!("\"{}\" --wake", exe.display())),
+            exe: Some(exe.clone()),
+        }];
+        let snap = |roots: Vec<PathBuf>| {
+            Snapshot::with_programs(Vec::new())
+                .with_store_apps(Vec::new())
+                .with_tasks(tasks.clone())
+                .with_roots(roots)
+        };
+        let t = name_target("Brightway Notes", Some("Brightway Corporation"));
+        let want = Leftover::task(name, &exe.to_string_lossy(), Confidence::High, "").path;
+
+        // The scan finds the program's folder, so the task into it goes too.
+        let report = scan_with(&t, false, &snap(vec![files.to_path_buf()]));
+        assert!(report.items.iter().any(|l| l.path == want));
+
+        // With the folder not found, the task stays.
+        let report = scan_with(&t, false, &snap(Vec::new()));
+        assert!(report.items.iter().all(|l| l.path != want));
     }
 
     #[test]
