@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.19, 2026-11-11
+
+- A vendor's registry key now goes whole only when everything in it goes
+  with the program. When it also holds the settings of another of the
+  vendor's products, such as a test build of its browser, the key stays and
+  only the program's own subkeys go, whether that product is installed or
+  not.
+
 ## 0.2.18, 2026-11-10
 
 - Start's records of a program folder that was already gone before the
