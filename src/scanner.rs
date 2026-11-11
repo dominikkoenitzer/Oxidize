@@ -1809,10 +1809,14 @@ fn holds_namesake_child(dir: &Path, target: &ScanTarget) -> bool {
     })
 }
 
-/// Flag product-matching children of `parent`, never `parent` itself.
+/// Flag product-matching children of `parent`, never `parent` itself. A
+/// child counts by the key rule, so the folders of the vendor's other
+/// channels and test builds stay, and a child that is or holds another
+/// program's install folder stays whole.
 fn flag_product_children(
     parent: &Path,
     target: &ScanTarget,
+    other_installs: &[PathBuf],
     out: &mut Vec<Leftover>,
     note: &str,
     roots: &[PathBuf],
@@ -1826,7 +1830,14 @@ fn flag_product_children(
             continue;
         }
         if child.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            if let Some((conf, reason)) = score_product(&cname, target) {
+            let key = norm_path_key(&child.path());
+            if other_installs.iter().any(|o| {
+                let o = norm_path_key(o);
+                o == key || dir_contains(&key, &o)
+            }) {
+                continue;
+            }
+            if let Some((conf, reason)) = key_names_product(&cname, target) {
                 push_dir_leftover(out, child.path(), conf, format!("{reason}, {note}"), roots);
             }
         }
@@ -1927,7 +1938,7 @@ fn scan_dir_children(
                 push_dir_leftover(out, path, Confidence::High, "exact name".to_string(), roots);
             } else if matches_publisher(&name, target) {
                 let note = format!("in vendor folder {name}");
-                flag_product_children(&path, target, out, &note, roots);
+                flag_product_children(&path, target, other_installs, out, &note, roots);
             } else if houses_other || contains_install {
                 // Another program is installed inside, and the folder is not
                 // the vendor's, so it is shared whatever its name says:
@@ -2092,7 +2103,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
 
             if houses_other {
-                flag_product_children(loc, target, &mut out, &note, roots);
+                flag_product_children(loc, target, other_installs, &mut out, &note, roots);
             } else if target.install_vouched {
                 push_dir_leftover(
                     &mut out,
@@ -2102,7 +2113,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
                     roots,
                 );
             } else if vendor_root {
-                flag_product_children(loc, target, &mut out, &note, roots);
+                flag_product_children(loc, target, other_installs, &mut out, &note, roots);
             } else {
                 let (conf, reason) = install_folder_score(leaf, target);
                 push_dir_leftover(&mut out, loc.clone(), conf, reason, roots);
@@ -4761,6 +4772,45 @@ mod tests {
         let t = name_target("Lumen", Some("Brightway LLC"));
         let vendors = program_files().join(r"Brightway\Lumen\lumen.exe");
         assert!(path_names_product(&vendors, &t));
+    }
+
+    #[test]
+    fn a_vendor_folder_keeps_the_other_channels_and_installs_in_it() {
+        // The program's folder next to a test build's, a channel's that is
+        // installed and one that is not, each with a profile in it.
+        let root = crate::backup::TestDir::new("oxidize_channel_folder_test");
+        for dir in [
+            r"Brightway\Lumen\User Data",
+            r"Brightway\Lumen for Testing\User Data",
+            r"Brightway\Lumen Beta\Application",
+            r"Brightway\Lumen Beta\User Data",
+            r"Brightway\Lumen Canary\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let beta = root.join(r"Brightway\Lumen Beta\Application");
+        let mut t = name_target("Lumen", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen\Application"));
+
+        for others in [vec![beta.clone()], vec![root.join(r"Brightway\Lumen Beta")]] {
+            let mut out = Vec::new();
+            scan_dir_children(&root, &t, &others, false, &fs_roots(), &mut out);
+            let found: Vec<&str> = out.iter().map(|l| l.path.as_str()).collect();
+            assert_eq!(
+                found,
+                [root.join(r"Brightway\Lumen").display().to_string()],
+                "{}",
+                others[0].display()
+            );
+        }
+
+        // A folder of the program's own name that another program is
+        // installed in is shared, so it stays whole.
+        let updater = root.join(r"Brightway\Lumen\Updater");
+        fs::create_dir_all(&updater).unwrap();
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[beta, updater], false, &fs_roots(), &mut out);
+        assert!(out.is_empty(), "{out:?}");
     }
 
     #[test]
