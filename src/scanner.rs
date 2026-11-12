@@ -4779,6 +4779,60 @@ mod tests {
         assert!(path_names_product(&vendors, &t));
     }
 
+    /// `p` with each part that has a short 8.3 name written that way.
+    fn short_name(p: &Path) -> PathBuf {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = p
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut buf = vec![0u16; 32_768];
+        let n = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        assert!(
+            n > 0 && n < buf.len(),
+            "{}: {}",
+            p.display(),
+            std::io::Error::last_os_error()
+        );
+        PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+    }
+
+    #[test]
+    fn a_short_path_is_read_by_its_long_names() {
+        // The program's own folder in a test tool's library below
+        // `%LOCALAPPDATA%`, written with the short names Windows keeps for
+        // long ones, as a record made from a short `%TEMP%` holds it.
+        let tools = LocalDir::new("OxidizeShortPathTest");
+        let own = tools.join(r"library\common\Lumen Browser\lumen.exe");
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, "MZ").unwrap();
+        let short = short_name(&own);
+        assert_ne!(short, own, "no short names on this volume");
+
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(path_names_product(&own, &t));
+        assert!(path_names_product(&short, &t), "{}", short.display());
+        assert!(!in_others_folder(&short, &t), "{}", short.display());
+
+        // The same root and the same folder names below it, from either side.
+        let roots = install_roots();
+        assert_eq!(below_root(&short, &roots), below_root(&own, &roots));
+        let short_tools = short_name(&tools);
+        assert_eq!(
+            below_root(&own, std::slice::from_ref(&short_tools)).map(|(_, s)| s),
+            Some(
+                ["library", "common", "Lumen Browser", "lumen.exe"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+        assert!(system::path_under(&short, &tools));
+        assert!(system::path_under(&own, &short_tools));
+    }
+
     #[test]
     fn a_vendor_folder_keeps_the_other_channels_and_installs_in_it() {
         // The program's folder next to a test build's, a channel's that is
