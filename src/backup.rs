@@ -1659,6 +1659,40 @@ mod tests {
         assert!(matches!(back, Undo::MoveBack { partial: true, .. }));
     }
 
+    #[test]
+    fn a_backup_keeps_the_day_only() {
+        let mut cleanup = TestCleanup(Vec::new());
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let session = BackupSession::new("Oxidize Day Test").unwrap();
+        cleanup.0.push(session.root().to_path_buf());
+        assert_eq!(session.name(), format!("{today} Oxidize Day Test"));
+        assert_eq!(session.manifest.created, today);
+
+        write_manifest(session.root(), &session.manifest).unwrap();
+        mark_restored(session.root()).unwrap();
+        let restored = read_manifest(session.root()).unwrap().restored;
+        assert_eq!(restored.as_deref(), Some(today.as_str()));
+    }
+
+    #[test]
+    fn backups_of_one_day_list_newest_first() {
+        let mut cleanup = TestCleanup(Vec::new());
+        let mut made = Vec::new();
+        for program in ["Oxidize Order B", "Oxidize Order A", "Oxidize Order B"] {
+            let session = BackupSession::new(program).unwrap();
+            cleanup.0.push(session.root().to_path_buf());
+            write_manifest(session.root(), &session.manifest).unwrap();
+            made.push(session.name());
+        }
+        let listed: Vec<String> = list_backups()
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        made.reverse();
+        assert_eq!(listed, made);
+    }
+
     fn info(name: &str, program: &str, created: &str) -> BackupInfo {
         BackupInfo {
             id: name.to_string(),
