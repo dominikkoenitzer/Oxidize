@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
 
 use crate::model::Program;
+use crate::system::path_under;
 use crate::util::{self, normalize, significant_tokens};
 
 /// A program matched to the hunter query, with a score and explanation.
@@ -32,23 +33,6 @@ fn looks_like_path(q: &str) -> bool {
 /// break simple prefix comparisons against registry `InstallLocation`s.
 fn absolutize(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// Is `child` equal to, or nested under, `parent` (case-insensitive)?
-fn path_under(child: &Path, parent: &Path) -> bool {
-    let normalize = |p: &Path| {
-        p.to_string_lossy()
-            .to_lowercase()
-            .replace('/', "\\")
-            .trim_end_matches('\\')
-            .to_string()
-    };
-    let c = normalize(child);
-    let p = normalize(parent);
-    if p.is_empty() {
-        return false;
-    }
-    c == p || c.starts_with(&format!("{p}\\"))
 }
 
 /// Do `a` and `b` name the same file, by their text or, when both exist, by their real names?

@@ -506,26 +506,33 @@ fn install_roots() -> Vec<PathBuf> {
 }
 
 /// The deepest of `roots` that `p` is inside, and the folder names from
-/// there down to `p`. `None` when `p` is in none of them, or is one, or
-/// climbs with `..`, which would put it somewhere else than it reads.
+/// there down to `p`, both by their long names. `None` when `p` is in none
+/// of them, or is one, or climbs with `..`, which would put it somewhere else
+/// than it reads.
 fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
     if p.components()
         .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
     {
         return None;
     }
-    let key = norm_path_key(p);
-    let root = roots
+    let p = system::long_path(p);
+    let key = norm_path_key(&p);
+    let (root, _) = roots
         .iter()
-        .filter(|r| dir_contains(&norm_path_key(r), &key))
-        .max_by_key(|r| norm_path_key(r).len())?;
+        .map(|r| {
+            let r = system::long_path(r);
+            let k = norm_path_key(&r);
+            (r, k)
+        })
+        .filter(|(_, k)| dir_contains(k, &key))
+        .max_by_key(|(_, k)| k.len())?;
     let segments = p
         .components()
         .skip(root.components().count())
         .filter_map(|c| c.as_os_str().to_str())
         .map(str::to_string)
         .collect();
-    Some((root.clone(), segments))
+    Some((root, segments))
 }
 
 /// The vendor's word, from what the program says about itself: its name,
@@ -1410,7 +1417,7 @@ fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
     if in_others_folder(p, target) {
         return false;
     }
-    let named = p.components().any(|c| {
+    let named = system::long_path(p).components().any(|c| {
         c.as_os_str()
             .to_str()
             .map(|s| matches!(score_product(s, target), Some((Confidence::High, _))))
@@ -1529,8 +1536,9 @@ fn norm_path_str(p: &str) -> String {
         .to_string()
 }
 
+/// `p` by its long names, normalised for a compare.
 fn norm_path_key(p: &Path) -> String {
-    norm_path_str(&p.to_string_lossy())
+    norm_path_str(&system::long_path(p).to_string_lossy())
 }
 
 /// Strict containment on normalised path strings, separator-aware.
