@@ -1425,9 +1425,11 @@ const SHARED_TOPS: &[&str] = &["Temp", "Packages", "Common Files", "WindowsApps"
 
 /// Is `p` in another program's folder? It is when its folder right below an
 /// install root is there and is neither the program's nor its vendor's, and
-/// no folder on the way down, `p` included, has the program's exact name, as
-/// a game's folder in a store's library has. What is in there is that
-/// program's, whatever the file is called, there or gone.
+/// no folder on the way down has the program's exact name, as a game's folder
+/// in a store's library has. What is in there is that program's, whatever
+/// the file is called, there or gone. `p` itself counts only once it is gone,
+/// as a folder of that name in Windows' records is: a file or folder there
+/// that is named like the program is still theirs.
 fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
     if owned_folders(target)
         .into_iter()
@@ -1443,7 +1445,7 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
         .iter()
         .take_while(|s| SHARED_TOPS.iter().any(|t| t.eq_ignore_ascii_case(s)))
         .count();
-    let Some((_, folders)) = segments[shared..].split_last() else {
+    let Some((leaf, folders)) = segments[shared..].split_last() else {
         return false;
     };
     let Some(top) = folders.first() else {
@@ -1456,9 +1458,8 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
             .brand
             .as_deref()
             .is_some_and(|b| carries_brand(top, b))
-        || segments[shared..]
-            .iter()
-            .any(|f| is_exact_product(f, target));
+        || folders.iter().any(|f| is_exact_product(f, target))
+        || (is_exact_product(leaf, target) && !p.exists());
     !ours
         && segments[..=shared]
             .iter()
