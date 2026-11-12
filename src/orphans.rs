@@ -200,11 +200,15 @@ fn path_folder_gone(dir: &Path, roots: &[PathBuf]) -> bool {
     let Some(parent) = dir.parent().filter(|p| p.exists()) else {
         return true;
     };
+    // The same folder may be spelled with slashes, dots or a short name.
+    let real = parent.canonicalize().ok();
     let name = parent.to_string_lossy();
     parent.parent().is_none()
-        || roots
-            .iter()
-            .any(|r| system::same_path_entry(&name, &r.to_string_lossy()))
+        || real.as_deref().is_some_and(|p| p.parent().is_none())
+        || roots.iter().any(|r| {
+            system::same_path_entry(&name, &r.to_string_lossy())
+                || (real.is_some() && r.canonicalize().ok() == real)
+        })
 }
 
 /// PATH entries, autostart values, services and tasks pointing at files that
@@ -362,6 +366,17 @@ mod tests {
         assert!(path_folder_gone(&app, std::slice::from_ref(&root.0)));
         let spelled = PathBuf::from(format!("{}\\", root.0.display()).to_uppercase());
         assert!(path_folder_gone(&app, &[spelled]));
+    }
+
+    #[test]
+    fn a_missing_program_folder_spelled_another_way_is_still_gone() {
+        let root = scratch("spelled");
+        std::fs::create_dir(root.0.join("sdk")).unwrap();
+        let roots = std::slice::from_ref(&root.0);
+        let slashes = PathBuf::from(root.0.join("app").to_string_lossy().replace('\\', "/"));
+        assert!(path_folder_gone(&slashes, roots));
+        let dots = root.0.join("sdk").join("..").join("app");
+        assert!(path_folder_gone(&dots, roots));
     }
 
     #[test]
