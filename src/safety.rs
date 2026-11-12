@@ -750,6 +750,109 @@ mod tests {
         assert!(may_remove_emptied_beside(&installers, &[]));
     }
 
+    fn with_backups() -> SafetyContext {
+        SafetyContext {
+            dry_run: false,
+            make_backups: true,
+            keep_emptied_parents: true,
+        }
+    }
+
+    fn no_backup_folder_left() -> bool {
+        let base = crate::backup::backups_base().unwrap();
+        std::fs::read_dir(base).map_or(true, |mut entries| entries.next().is_none())
+    }
+
+    #[test]
+    fn a_removal_where_everything_is_already_gone_names_no_backup() {
+        let _cleanup = crate::backup::TestCleanup(vec![crate::backup::backups_base().unwrap()]);
+        let base = crate::backup::TestDir::new("oxidize_nothing_backed_up_test");
+        let item = Leftover::fs(
+            LeftoverKind::File,
+            base.join("gone.txt"),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let outcome = remove_leftovers(&[item], "Example Gone", &with_backups()).unwrap();
+        assert_eq!(outcome.skipped, 1);
+        assert!(outcome.backup_name.is_none() && outcome.backup_dir.is_none());
+        assert!(no_backup_folder_left());
+    }
+
+    #[test]
+    fn a_removal_where_every_item_fails_names_no_backup() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _cleanup = crate::backup::TestCleanup(vec![crate::backup::backups_base().unwrap()]);
+        // Declared before the held file, so it is closed when the guard runs.
+        let base = crate::backup::TestDir::new("oxidize_nothing_moved_test");
+        std::fs::create_dir_all(&*base).unwrap();
+        let file = base.join("held.txt");
+        std::fs::write(&file, "held").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&file)
+            .unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::File,
+            file.clone(),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let outcome = remove_leftovers(&[item], "Example Held", &with_backups()).unwrap();
+        assert_eq!(outcome.failed, 1);
+        assert!(outcome.backup_name.is_none() && outcome.backup_dir.is_none());
+        assert!(no_backup_folder_left());
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "held");
+    }
+
+    #[test]
+    fn a_removal_that_backs_something_up_names_the_backup() {
+        let _cleanup = crate::backup::TestCleanup(vec![crate::backup::backups_base().unwrap()]);
+        let base = crate::backup::TestDir::new("oxidize_one_backed_up_test");
+        std::fs::create_dir_all(&*base).unwrap();
+        let file = base.join("settings.ini");
+        std::fs::write(&file, "x=1").unwrap();
+        let leftover = |name: &str| {
+            Leftover::fs(
+                LeftoverKind::File,
+                base.join(name),
+                Confidence::High,
+                "test",
+                None,
+                false,
+            )
+        };
+        let items = [leftover("settings.ini"), leftover("gone.txt")];
+        let outcome = remove_leftovers(&items, "Example Kept", &with_backups()).unwrap();
+        assert_eq!((outcome.deleted, outcome.skipped), (1, 1));
+        assert!(!file.exists());
+        let dir = outcome.backup_dir.clone().unwrap();
+        assert_eq!(
+            outcome.backup_name.as_deref(),
+            dir.file_name().and_then(|n| n.to_str())
+        );
+        let manifest = crate::backup::read_manifest(&dir).unwrap();
+        assert_eq!(manifest.entries.len(), 1);
+
+        // A second pass that finds nothing more still names the first pass's backup.
+        let later = remove_leftovers_into(
+            &[leftover("gone.txt")],
+            "Example Kept",
+            &with_backups(),
+            Some(&dir),
+        )
+        .unwrap();
+        assert_eq!(later.backup_dir.as_deref(), Some(dir.as_path()));
+        assert_eq!(later.backup_name, outcome.backup_name);
+        assert_eq!(crate::backup::read_manifest(&dir).unwrap().entries.len(), 1);
+    }
+
     #[test]
     fn hklm_items_need_administrator_rights() {
         let hklm = Leftover::reg_key(
