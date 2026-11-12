@@ -4780,6 +4780,55 @@ mod tests {
     }
 
     #[test]
+    fn a_file_or_folder_there_named_like_the_program_in_anothers_folder_is_theirs() {
+        // Another tool's own file and folder that carry the program's name.
+        let tools = LocalDir::new("OxidizeNamedLikeTest");
+        let file = tools.join(r"data\Lumen");
+        let folder = tools.join("Lumen");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "x").unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        let t = name_target("Lumen", Some("Brightway LLC"));
+        for p in [&file, &folder] {
+            assert!(!path_names_product(p, &t), "{}", p.display());
+        }
+        // A program named like a file, extension and all: that file is theirs.
+        let script = tools.join(r"lib\lumen.js");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "x").unwrap();
+        let js = name_target("Lumen.js", Some("Brightway LLC"));
+        assert!(!path_names_product(&script, &js));
+        // Once a folder of that name is gone, it is the program's.
+        assert!(path_names_product(&tools.join(r"old\Lumen"), &t));
+    }
+
+    #[test]
+    fn a_vendor_key_naming_such_a_file_or_folder_of_anothers_stays() {
+        let tools = LocalDir::new("OxidizeNamedLikeKeyTest");
+        let folder = tools.join("Lumen");
+        let script = tools.join(r"lib\lumen.js");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "x").unwrap();
+
+        let id = std::process::id();
+        for (program, value, there) in [
+            ("Lumen", "DataDir", &folder),
+            ("Lumen.js", "Script", &script),
+        ] {
+            let root = TestKey(format!(r"Software\OxidizeNamedLikeKeyTest{value}{id}"));
+            let vendor = format!(r"{}\Brightway", root.0);
+            set_test_value(&vendor, value, &format!("\"{}\"", there.display()));
+            set_test_value(&format!(r"{vendor}\{program}"), "Theme", "dark");
+
+            let t = name_target(program, Some("Brightway Corporation"));
+            let mut out = Vec::new();
+            scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+            assert_eq!(subpaths(&out), vec![format!(r"{vendor}\{program}")]);
+        }
+    }
+
+    #[test]
     fn a_vendor_folder_keeps_the_other_channels_and_installs_in_it() {
         // The program's folder next to a test build's, a channel's that is
         // installed and one that is not, each with a profile in it.
