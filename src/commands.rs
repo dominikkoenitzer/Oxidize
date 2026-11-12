@@ -4738,6 +4738,7 @@ mod tests {
                 path: PathBuf::from(name),
                 program: name.to_string(),
                 created: String::new(),
+                seq: 0,
                 items: 1,
                 size_bytes: 0,
                 restored: None,
