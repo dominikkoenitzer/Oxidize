@@ -192,15 +192,32 @@ pub fn unclaimed_folders(programs: &[Program]) -> Vec<OrphanFolder> {
     out
 }
 
+/// A missing folder counts, unless its parent is there and is neither a drive root nor in `roots`.
+fn path_folder_gone(dir: &Path, roots: &[PathBuf]) -> bool {
+    if !dir.is_absolute() || dir.exists() || !system::volume_available(dir) {
+        return false;
+    }
+    let Some(parent) = dir.parent().filter(|p| p.exists()) else {
+        return true;
+    };
+    let name = parent.to_string_lossy();
+    parent.parent().is_none()
+        || roots
+            .iter()
+            .any(|r| system::same_path_entry(&name, &r.to_string_lossy()))
+}
+
 /// PATH entries, autostart values, services and tasks pointing at files that
 /// are gone.
 pub fn dangling_references() -> Vec<Leftover> {
     let mut out = Vec::new();
 
+    let mut roots = orphan_roots();
+    roots.extend(scanner::env_dir("USERPROFILE"));
     for hive in [Hive::CurrentUser, Hive::LocalMachine] {
         for entry in system::path_entries(hive) {
             let dir = PathBuf::from(util::expand_env_vars(&entry));
-            if !dir.is_absolute() || dir.exists() || !system::volume_available(&dir) {
+            if !path_folder_gone(&dir, &roots) {
                 continue;
             }
             out.push(Leftover::path_entry(
@@ -301,4 +318,70 @@ pub fn folder_leftovers(report: &OrphanReport) -> Vec<Leftover> {
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(tag: &str) -> Scratch {
+        let dir =
+            std::env::temp_dir().join(format!("oxidize_orphans_path_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Scratch(dir)
+    }
+
+    #[test]
+    fn a_folder_not_made_yet_inside_a_program_folder_is_not_gone() {
+        let root = scratch("not_made");
+        std::fs::create_dir(root.0.join("sdk")).unwrap();
+        let tools = root.0.join("sdk").join("tools");
+        assert!(!path_folder_gone(&tools, std::slice::from_ref(&root.0)));
+    }
+
+    #[test]
+    fn a_folder_whose_program_folder_is_gone_is_gone() {
+        let root = scratch("program_gone");
+        let bin = root.0.join("app").join("bin");
+        assert!(path_folder_gone(&bin, std::slice::from_ref(&root.0)));
+    }
+
+    #[test]
+    fn a_missing_program_folder_right_under_a_root_is_gone() {
+        let root = scratch("under_root");
+        let app = root.0.join("app");
+        assert!(path_folder_gone(&app, std::slice::from_ref(&root.0)));
+        let spelled = PathBuf::from(format!("{}\\", root.0.display()).to_uppercase());
+        assert!(path_folder_gone(&app, &[spelled]));
+    }
+
+    #[test]
+    fn a_missing_folder_right_under_a_drive_root_is_gone() {
+        let drive = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .unwrap()
+            .to_path_buf();
+        let dir = drive.join(format!("oxidize_orphans_path_drive_{}", std::process::id()));
+        assert!(!dir.exists());
+        assert!(path_folder_gone(&dir, &[]));
+    }
+
+    #[test]
+    fn a_folder_that_is_there_is_never_gone() {
+        let root = scratch("there");
+        let tools = root.0.join("sdk").join("tools");
+        std::fs::create_dir_all(&tools).unwrap();
+        assert!(!path_folder_gone(&root.0.join("sdk"), &[]));
+        assert!(!path_folder_gone(&tools, std::slice::from_ref(&root.0)));
+    }
 }
