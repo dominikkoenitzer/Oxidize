@@ -2,7 +2,7 @@
   "slug": "oxidize",
   "name": "Oxidize",
   "url": "https://oxidize.punds.ch/",
-  "description": "Uninstall programs from your PC and clear out what they leave behind, with one button and a backup of everything removed.",
+  "description": "Uninstall programs from your PC and clear out what they leave behind, with one button. Turn on backups and every removal can be undone.",
   "colours": {
     "light": {
       "accent": "#a04e22",
@@ -25,7 +25,7 @@
     "windows": "Windows"
   },
   "hero": {
-    "lede": "Uninstall programs from your PC and clear out what they leave behind. One button removes a program completely, and Undo brings it all back.",
+    "lede": "Uninstall programs from your PC and clear out what they leave behind. One button removes a program completely, and with backups on, Undo brings it all back.",
     "notes": [
       "Windows 10 and 11, 64-bit. One file, nothing to install. The command line is <a href=\"/download/cli\">oxidize.exe</a>.",
       "If Windows says it protected your PC, click More info, then Run anyway."
@@ -43,7 +43,7 @@
       "label": "Remove",
       "title": "One button, one question first",
       "body": [
-        "Remove completely closes the program's running copies, runs its own uninstaller when it needs one, removes everything found at high confidence and keeps a backup.",
+        "Remove completely closes the program's running copies, runs its own uninstaller when it needs one, removes everything found at high confidence, and keeps a backup when backups are on.",
         "Nothing happens until you confirm."
       ],
       "main": {
@@ -105,9 +105,9 @@
     },
     {
       "label": "Undo",
-      "title": "Every removal can be undone",
+      "title": "A removal can be undone",
       "body": [
-        "Before anything is deleted, registry keys are exported and files are moved into a backup folder. Undo puts every item back, and the log names each one."
+        "Turn on Back up before deleting, and registry keys are exported and files are moved into a backup folder before anything is deleted. Undo puts every item back, and the log names each one. Without a backup a removal is permanent, and the window says so before you confirm."
       ],
       "main": {
         "name": "f4",
@@ -170,7 +170,7 @@
     "title": "Let your assistant clean up",
     "body": [
       "<code>oxidize mcp</code> lets an AI assistant on your PC list programs, find leftovers and plan a removal. Nothing goes over the network.",
-      "A removal is always a plan first: what goes, with paths, sizes and reasons, and where the backup goes. Your assistant asks you before it carries a plan out, and every removed item is backed up.",
+      "A removal is always a plan first: what goes, with paths, sizes and reasons, and whether a backup is kept. Your assistant asks you before it carries a plan out, and a plan made with a backup keeps every removed item.",
       "The command line has <code>--json</code> on every command. <a href=\"/skill/oxidize.zip\">Download the skill</a> to teach your assistant all of it."
     ],
     "caption": "Add Oxidize to your MCP client",
@@ -219,7 +219,7 @@
   "data": {
     "title": "Only the backups",
     "body": [
-      "Each removal gets one backup folder under <code>%LOCALAPPDATA%\\Oxidize\\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data."
+      "Each removal made with a backup gets one backup folder under <code>%LOCALAPPDATA%\\Oxidize\\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data."
     ]
   },
   "keys": [
@@ -282,7 +282,7 @@
     {
       "q": "Can I undo a removal?",
       "a": [
-        "Yes. Everything is backed up before it is removed. Click Undo in the window, or use <code>oxidize restore</code> from the command line; <code>oxidize backups</code> lists them."
+        "Yes, when it was made with a backup. Turn on Back up before deleting in the window, or add <code>--backup</code> on the command line, and everything is backed up before it is removed. Click Undo in the window, or use <code>oxidize restore</code>; <code>oxidize backups</code> lists them. Without a backup a removal is permanent."
       ]
     },
     {

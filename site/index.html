@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oxidize</title>
-<meta name="description" content="Uninstall programs from your PC and clear out what they leave behind, with one button and a backup of everything removed.">
+<meta name="description" content="Uninstall programs from your PC and clear out what they leave behind, with one button. Turn on backups and every removal can be undone.">
 <meta property="og:title" content="Oxidize">
-<meta property="og:description" content="Uninstall programs from your PC and clear out what they leave behind, with one button and a backup of everything removed.">
+<meta property="og:description" content="Uninstall programs from your PC and clear out what they leave behind, with one button. Turn on backups and every removal can be undone.">
 <meta property="og:url" content="https://oxidize.punds.ch/">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Oxidize">
@@ -346,7 +346,7 @@ footer p { margin: 0.3rem 0; }
 <div class="hero">
 <div>
 <h1>Oxidize</h1>
-<p class="lede">Uninstall programs from your PC and clear out what they leave behind. One button removes a program completely, and Undo brings it all back.</p>
+<p class="lede">Uninstall programs from your PC and clear out what they leave behind. One button removes a program completely, and with backups on, Undo brings it all back.</p>
 <div class="get">
 <a class="btn" id="primary" data-primary href="/download/windows">Download for Windows</a>
 <p class="small">Windows 10 and 11, 64-bit. One file, nothing to install. The command line is <a href="/download/cli">oxidize.exe</a>.</p>
@@ -366,7 +366,7 @@ footer p { margin: 0.3rem 0; }
 <div class="text">
 <p class="label">Remove</p>
 <h2>One button, one question first</h2>
-<p>Remove completely closes the program's running copies, runs its own uninstaller when it needs one, removes everything found at high confidence and keeps a backup.</p>
+<p>Remove completely closes the program's running copies, runs its own uninstaller when it needs one, removes everything found at high confidence, and keeps a backup when backups are on.</p>
 <p>Nothing happens until you confirm.</p>
 </div>
 <div class="stage">
@@ -400,8 +400,8 @@ footer p { margin: 0.3rem 0; }
 <div class="feature flip">
 <div class="text">
 <p class="label">Undo</p>
-<h2>Every removal can be undone</h2>
-<p>Before anything is deleted, registry keys are exported and files are moved into a backup folder. Undo puts every item back, and the log names each one.</p>
+<h2>A removal can be undone</h2>
+<p>Turn on Back up before deleting, and registry keys are exported and files are moved into a backup folder before anything is deleted. Undo puts every item back, and the log names each one. Without a backup a removal is permanent, and the window says so before you confirm.</p>
 </div>
 <div class="stage">
 <div class="main" style="--pos: 0 100%; --zoom: 1; --ar: 2880 / 1800"><picture><source srcset="img/f4-dark-1440.webp 1440w, img/f4-dark.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" media="(prefers-color-scheme: dark)"><img src="img/f4-light.webp" srcset="img/f4-light-1440.webp 1440w, img/f4-light.webp 2880w" sizes="(max-width: 900px) 100vw, 60vw" width="2880" height="1800" alt="After Undo, Quillmark is back with everything that belonged to it" loading="lazy" decoding="async"></picture></div>
@@ -448,7 +448,7 @@ footer p { margin: 0.3rem 0; }
 <p class="label">AI assistant</p>
 <h2 id="ai-h">Let your assistant clean up</h2>
 <p><code>oxidize mcp</code> lets an AI assistant on your PC list programs, find leftovers and plan a removal. Nothing goes over the network.</p>
-<p>A removal is always a plan first: what goes, with paths, sizes and reasons, and where the backup goes. Your assistant asks you before it carries a plan out, and every removed item is backed up.</p>
+<p>A removal is always a plan first: what goes, with paths, sizes and reasons, and whether a backup is kept. Your assistant asks you before it carries a plan out, and a plan made with a backup keeps every removed item.</p>
 <p>The command line has <code>--json</code> on every command. <a href="/skill/oxidize.zip">Download the skill</a> to teach your assistant all of it.</p>
 </div>
 <div class="codecard" tabindex="0" role="region" aria-label="Add Oxidize to your MCP client">
@@ -484,7 +484,7 @@ footer p { margin: 0.3rem 0; }
 <div class="card">
 <div class="num">Your data</div>
 <h3>Only the backups</h3>
-<p>Each removal gets one backup folder under <code>%LOCALAPPDATA%\Oxidize\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data.</p>
+<p>Each removal made with a backup gets one backup folder under <code>%LOCALAPPDATA%\Oxidize\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data.</p>
 </div>
 </div>
 </section>
@@ -533,7 +533,7 @@ footer p { margin: 0.3rem 0; }
 </details>
 <details>
 <summary>Can I undo a removal?</summary>
-<div class="answer"><p>Yes. Everything is backed up before it is removed. Click Undo in the window, or use <code>oxidize restore</code> from the command line; <code>oxidize backups</code> lists them.</p></div>
+<div class="answer"><p>Yes, when it was made with a backup. Turn on Back up before deleting in the window, or add <code>--backup</code> on the command line, and everything is backed up before it is removed. Click Undo in the window, or use <code>oxidize restore</code>; <code>oxidize backups</code> lists them. Without a backup a removal is permanent.</p></div>
 </details>
 <details>
 <summary>Does it remove things that belong to other programs?</summary>
