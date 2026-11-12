@@ -367,7 +367,7 @@ impl OxidizeApp {
     }
 
     fn start_scan(&mut self, ctx: &egui::Context, program: Program) {
-        self.status = format!("Scanning for leftovers of {}...", program.display_name);
+        self.status = scanning_status(&program.display_name);
         self.spawn(ctx, move || {
             // One reading of the machine serves both steps.
             let snap = scanner::Snapshot::new();
@@ -763,8 +763,13 @@ impl OxidizeApp {
                     self.scan = Some(report);
                     self.job_done();
                 }
-                // A scan the user has already moved on from.
-                Msg::Scan { .. } => self.job_done(),
+                // A scan the user has already moved on from; its own status goes too.
+                Msg::Scan { report, .. } => {
+                    if self.status == scanning_status(&report.program_name) {
+                        self.status.clear();
+                    }
+                    self.job_done();
+                }
                 Msg::Uninstalled {
                     program,
                     message,
@@ -1194,6 +1199,11 @@ fn window_error(text: &str) -> String {
 /// The removal stopped because the uninstaller it needed did not start.
 fn never_started(out: &Outcome) -> bool {
     out.error.is_some() && out.vendor.runs() && out.uninstaller.is_none()
+}
+
+/// The status line while a program is scanned.
+fn scanning_status(name: &str) -> String {
+    format!("Scanning for leftovers of {name}...")
 }
 
 /// One line on how a complete removal ended, for the status bar.
@@ -3785,6 +3795,52 @@ mod tests {
         // And a stray extra answer never takes the count below zero.
         app.job_done();
         assert_eq!(app.jobs, 0);
+    }
+
+    /// A scan of this program that is answered while another is selected.
+    fn stale_scan(app: &mut OxidizeApp, program: &Program) -> Msg {
+        app.select(program.id());
+        app.status = scanning_status(&program.display_name);
+        app.jobs = 1;
+        app.select("another-program");
+        Msg::Scan {
+            id: program.id().to_string(),
+            report: ScanReport {
+                program_name: program.display_name.clone(),
+                ..ScanReport::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_dropped_scan_does_not_leave_its_status_behind() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let program = example_program();
+        let msg = stale_scan(&mut app, &program);
+        app.tx.send(msg).unwrap();
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+        assert!(app.scan.is_none());
+        assert!(
+            !app.status.contains(&program.display_name),
+            "{}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_dropped_scan_keeps_a_status_written_since() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let program = example_program();
+        let msg = stale_scan(&mut app, &program);
+        assert!(app.close_step(true).is_some());
+        let since = app.status.clone();
+        app.tx.send(msg).unwrap();
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+        assert_eq!(app.status, since);
     }
 
     #[test]
