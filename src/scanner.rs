@@ -4799,8 +4799,17 @@ mod tests {
         fs::write(&script, "x").unwrap();
         let js = name_target("Lumen.js", Some("Brightway LLC"));
         assert!(!path_names_product(&script, &js));
-        // Once a folder of that name is gone, it is the program's.
-        assert!(path_names_product(&tools.join(r"old\Lumen"), &t));
+        // What is in that folder is theirs too, there or gone.
+        let plugin = folder.join("plugin.dll");
+        fs::write(&plugin, "MZ").unwrap();
+        for p in [plugin, folder.join(r"old\plugin.dll")] {
+            assert!(!path_names_product(&p, &t), "{}", p.display());
+        }
+        // Once a folder of that name is gone, it and what was in it are the
+        // program's, as a game's gone folder in a store's library is.
+        for gone in [r"old\Lumen", r"old\Lumen\plugin.dll"] {
+            assert!(path_names_product(&tools.join(gone), &t), "{gone}");
+        }
     }
 
     #[test]
@@ -4808,13 +4817,16 @@ mod tests {
         let tools = LocalDir::new("OxidizeNamedLikeKeyTest");
         let folder = tools.join("Lumen");
         let script = tools.join(r"lib\lumen.js");
+        let plugin = folder.join("plugin.dll");
         fs::create_dir_all(&folder).unwrap();
+        fs::write(&plugin, "MZ").unwrap();
         fs::create_dir_all(script.parent().unwrap()).unwrap();
         fs::write(&script, "x").unwrap();
 
         let id = std::process::id();
         for (program, value, there) in [
             ("Lumen", "DataDir", &folder),
+            ("Lumen", "Plugin", &plugin),
             ("Lumen.js", "Script", &script),
         ] {
             let root = TestKey(format!(r"Software\OxidizeNamedLikeKeyTest{value}{id}"));
