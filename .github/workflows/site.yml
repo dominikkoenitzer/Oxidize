@@ -1,0 +1,72 @@
+name: Site
+
+on:
+  push:
+    branches: [main]
+    paths: ['site/**', '.github/workflows/site.yml']
+  pull_request:
+    paths: ['site/**', '.github/workflows/site.yml']
+  workflow_dispatch:
+
+concurrency:
+  group: site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Download page in three engines
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The browsers and the fonts they draw with come from this image, so screenshots match from run to run.
+    container: mcr.microsoft.com/playwright:v1.62.1-noble
+    env:
+      HOME: /root
+    defaults:
+      run:
+        working-directory: site/test
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install
+        run: npm ci
+
+      - name: Diagnostics panel matches its source
+        run: node sync-diag.mjs --check
+
+      # A screenshot with no baseline is written, not compared; the check after this fails on it.
+      - name: Test
+        run: |
+          ls snapshots > /tmp/before 2>/dev/null || true
+          npx playwright test --update-snapshots=missing
+
+      - name: Every screenshot has a baseline
+        run: |
+          ls snapshots > /tmp/after 2>/dev/null || true
+          if ! diff /tmp/before /tmp/after > /tmp/new; then
+            echo "Screenshots with no baseline in the repo (download the snapshots artifact and commit them):"
+            grep '^>' /tmp/new
+            exit 1
+          fi
+
+      - name: Keep the report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: report
+          path: |
+            site/test/report
+            site/test/test-results
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Keep the screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: snapshots
+          path: site/test/snapshots
+          retention-days: 14
+          if-no-files-found: ignore
