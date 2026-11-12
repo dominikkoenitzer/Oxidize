@@ -1425,9 +1425,9 @@ const SHARED_TOPS: &[&str] = &["Temp", "Packages", "Common Files", "WindowsApps"
 
 /// Is `p` in another program's folder? It is when its folder right below an
 /// install root is there and is neither the program's nor its vendor's, and
-/// no folder on the way down has the program's exact name, as a game's
-/// folder in a store's library has. What is in there is that program's,
-/// whatever the file is called, there or gone.
+/// no folder on the way down, `p` included, has the program's exact name, as
+/// a game's folder in a store's library has. What is in there is that
+/// program's, whatever the file is called, there or gone.
 fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
     if owned_folders(target)
         .into_iter()
@@ -1456,7 +1456,9 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
             .brand
             .as_deref()
             .is_some_and(|b| carries_brand(top, b))
-        || folders.iter().any(|f| is_exact_product(f, target));
+        || segments[shared..]
+            .iter()
+            .any(|f| is_exact_product(f, target));
     !ours
         && segments[..=shared]
             .iter()
@@ -4764,6 +4766,9 @@ mod tests {
         // game's folder in a store's library is the game's.
         let own = tools.join(r"library\common\Lumen\lumen.exe");
         assert!(path_names_product(&own, &t));
+        // So is that folder once it is gone, even with nothing below it.
+        let own_folder = tools.join(r"library\common\Lumen");
+        assert!(path_names_product(&own_folder, &t));
         assert!(matches!(
             match_exe_item("lumen.exe", Some(&own), &t),
             Some((Confidence::High, _))
