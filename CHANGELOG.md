@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.21, 2026-11-12
+
+- Removals keep no backup unless you ask for one. Turn on Back up before
+  deleting in the window, add `--backup` on the command line, or have an
+  assistant make its plan with `backup` set to true, and everything removed
+  is backed up first, as before. Without a backup a removal is permanent,
+  and the window, a dry run and the assistant's plan say so before anything
+  goes. `--no-backup` is still accepted and changes nothing.
+- A file or folder that is still there in another program's folder stays
+  that program's, even when it is named like the program being removed. A
+  vendor key with a value that points at one stays too, and only the
+  program's own subkeys go.
+- Windows' records of a program folder that is already gone are found when
+  that folder sat inside a vendor's folder, such as
+  `%LOCALAPPDATA%\<vendor>\<program>`.
+
 ## 0.2.20, 2026-11-11
 
 - A program's own registry key now goes whole only when nothing of another
