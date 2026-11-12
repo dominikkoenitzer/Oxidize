@@ -27,8 +27,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_color: bool,
 
-    /// Delete without backups. Removals become permanent.
+    /// Keep a backup of what is removed, so restore can put it back.
+    /// Without it, removals are permanent.
     #[arg(long, global = true)]
+    pub backup: bool,
+
+    /// Removals keep no backup unless --backup is given; this flag is still
+    /// accepted and changes nothing.
+    #[arg(long, global = true, hide = true, conflicts_with = "backup")]
     pub no_backup: bool,
 
     /// Relaunch as administrator (UAC prompt) first.
@@ -260,8 +266,8 @@ pub struct CleanArgs {
     #[arg(long)]
     pub windows_old: bool,
 
-    /// Folders of removed programs, moved into a backup. High confidence
-    /// only, unless --medium or --all.
+    /// Folders of removed programs, deleted for good, or moved into a backup
+    /// with --backup. High confidence only, unless --medium or --all.
     #[arg(long)]
     pub orphans: bool,
 
@@ -269,8 +275,8 @@ pub struct CleanArgs {
     /// outright, so their space comes back at once. Proven dead: matched to
     /// a removed program at high confidence, no file in it changed for 30
     /// days or held open, nothing running from it and no git repository in
-    /// it or above it. The other folders still go into a backup. Folders
-    /// are proven dead only when this is given.
+    /// it or above it. With --backup, the other folders still go into a
+    /// backup. Folders are proven dead only when this is given.
     #[arg(long, requires = "orphans")]
     pub delete_dead: bool,
 

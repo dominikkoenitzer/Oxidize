@@ -257,6 +257,18 @@ fn clean_with(
     elevated: bool,
     tools: &FakeTools,
 ) -> Vec<Cleaned> {
+    clean_backing_up(pc, a, choice, protected, elevated, tools, true)
+}
+
+fn clean_backing_up(
+    pc: &Pc,
+    a: &Analysis,
+    choice: &Choice,
+    protected: &Protected,
+    elevated: bool,
+    tools: &FakeTools,
+    make_backups: bool,
+) -> Vec<Cleaned> {
     clean(
         a,
         choice,
@@ -264,7 +276,7 @@ fn clean_with(
             protected,
             now: SystemTime::now(),
             elevated,
-            make_backups: true,
+            make_backups,
             tools,
             system_drive: pc.places.system_drive.clone(),
         },
@@ -1186,6 +1198,38 @@ fn a_dead_folder_is_deleted_outright_and_a_living_one_goes_into_the_backup() {
     assert!(ink.path.join("today.log").exists());
     assert!(!quill.path.exists());
     crate::backup::delete_backup(&info).unwrap();
+}
+
+#[test]
+fn with_backups_off_the_folders_of_removed_programs_go_for_good() {
+    let pc = Pc::new("orphans_no_backup");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, true);
+    let choice = a.choice(&[Category::Orphans], Confidence::High);
+    let done = clean_backing_up(
+        &pc,
+        &a,
+        &choice,
+        &Protected::default(),
+        false,
+        &tools,
+        false,
+    );
+    let o = &done[0];
+    let base = crate::backup::backups_base().unwrap();
+    let _cleanup = crate::backup::TestCleanup(o.backup.iter().map(|b| base.join(b)).collect());
+    assert_eq!(o.removed, 2);
+    assert!(!quill.path.exists() && !ink.path.exists());
+    assert_eq!(o.backup, None);
+    assert!(
+        o.notes
+            .contains(&"deleted for good, backups are off".to_string()),
+        "{:?}",
+        o.notes
+    );
+    assert!(!Category::Orphans.backed_up(false));
+    assert!(Category::Orphans.backed_up(true));
+    assert!(!Category::Temp.backed_up(true));
 }
 
 #[test]

@@ -4,9 +4,10 @@
 //!
 //! Every tool only reads, except `apply_removal_plan`. `plan_removal` keeps
 //! each plan it returns under an id while the server runs, and
-//! `apply_removal_plan` carries out one such plan, exactly as shown, once,
-//! with a backup of every item it removes. The client asks the user before
-//! each tool call.
+//! `apply_removal_plan` carries out one such plan, exactly as shown, once.
+//! A plan keeps a backup of every item it removes only when it was planned
+//! with `backup`; otherwise its removal is permanent. The client asks the
+//! user before each tool call.
 //!
 //! The machine is reached through two traits: [`Inspect`] reads, [`Remove`]
 //! changes, and only `apply_removal_plan` holds the second.
@@ -61,7 +62,7 @@ pub trait Inspect: Send + Sync {
 }
 
 /// The one way the server changes anything: carrying out an approved plan.
-/// There is no removal without a backup here.
+/// Whether a removal keeps a backup is the plan's, never this side's.
 pub trait Remove: Send + Sync {
     /// Run a program's uninstaller and wait for it; says how it went.
     fn uninstall(&self, plan: &UninstallPlan) -> Result<Ran>;
@@ -73,16 +74,23 @@ pub trait Remove: Send + Sync {
     fn remove_app(&self, app: &Package, before: &mut dyn FnMut() -> Result<()>) -> Result<bool>;
     /// Ask these processes to close through their windows; none is ended.
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
-    /// Remove leftovers, each one backed up first.
-    fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome>;
+    /// Remove leftovers, each one backed up first when `backup` is true and
+    /// for good when it is not.
+    fn remove_items(
+        &self,
+        items: &[Leftover],
+        label: &str,
+        backup: bool,
+    ) -> Result<DeletionOutcome>;
 }
 
 /// Said to the assistant when it connects.
 const INSTRUCTIONS: &str = "Oxidize finds the Windows programs and Store apps installed on this PC \
 and what they leave behind. Every tool only reads, except apply_removal_plan. To remove a program, \
 call plan_removal, show the user the plan, and call apply_removal_plan with its plan_id only once the \
-user agrees. A plan is carried out exactly as shown and only once; every item it removes is backed \
-up first, and the result names the backup and the command that restores it.";
+user agrees. A plan is carried out exactly as shown and only once. A plan keeps no backup unless \
+plan_removal is called with backup set to true; without one, the removal is permanent, so say so \
+when you show the plan. With a backup, the result names it and the command that restores it.";
 
 // Tool arguments
 // --------------
@@ -153,6 +161,10 @@ pub struct PlanParams {
     /// medium) or all.
     #[serde(default)]
     pub level: Level,
+    /// Keep a backup of every leftover the plan removes, so it can be put
+    /// back. Off by default, and then the removal is permanent.
+    #[serde(default)]
+    pub backup: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
@@ -300,6 +312,8 @@ impl PlanStep {
 struct RemovalPlan {
     steps: Vec<PlanStep>,
     level: Level,
+    /// Each step's leftovers go into a backup; otherwise they go for good.
+    backup: bool,
     /// The commands that do the same from a terminal.
     commands: Vec<String>,
 }
@@ -378,10 +392,11 @@ fn make_plan(m: &dyn Inspect, p: &PlanParams) -> Result<RemovalPlan> {
             target,
         });
     }
-    let commands = user_commands(&steps, &programs, &packages, p.silent, p.level);
+    let commands = user_commands(&steps, &programs, &packages, p.silent, p.level, p.backup);
     Ok(RemovalPlan {
         steps,
         level: p.level,
+        backup: p.backup,
         commands,
     })
 }
@@ -458,8 +473,14 @@ fn user_commands(
     packages: &[Package],
     silent: bool,
     level: Level,
+    backup: bool,
 ) -> Vec<String> {
-    let flags = format!("{}{}", if silent { " --silent" } else { "" }, level.flag());
+    let keep = if backup { " --backup" } else { "" };
+    let flags = format!(
+        "{}{}{keep}",
+        if silent { " --silent" } else { "" },
+        level.flag()
+    );
     let names: Vec<String> = steps
         .iter()
         .filter(|s| !matches!(s, PlanStep::Leftovers { .. }))
@@ -471,7 +492,7 @@ fn user_commands(
     }
     for step in steps {
         if let PlanStep::Leftovers { name, .. } = step {
-            out.push(scan_remove_command(name, level));
+            out.push(format!("{}{keep}", scan_remove_command(name, level)));
         }
     }
     out
@@ -515,8 +536,9 @@ pub(crate) const HOW_IT_RUNS: &str = "Running copies of each program are closed 
     installed for this user only, with nothing machine-wide, is removed by Oxidize alone, its \
     uninstall entry included; any other uninstaller runs in turn, and Oxidize waits for it to \
     finish, up to 30 minutes, then up to two minutes for its entry to go. An uninstaller still \
-    running after that keeps its leftovers. Then exactly the leftovers listed are removed, each one \
-    backed up first. Nothing else is touched.";
+    running after that keeps its leftovers. Then exactly the leftovers listed are removed: each one \
+    backed up first when the plan keeps a backup, and permanently when it does not. Nothing else is \
+    touched.";
 
 fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
     let steps: Vec<Value> = plan
@@ -569,7 +591,9 @@ fn plan_json(id: &str, plan: &RemovalPlan, m: &dyn Inspect) -> Value {
         "bytes": file_bytes(&all),
         "needs_admin": safety::needs_elevation(&all),
         "elevated": m.is_elevated(),
-        "backup_folder": m.backups_folder(),
+        "backup": plan.backup,
+        "permanent": !plan.backup,
+        "backup_folder": if plan.backup { m.backups_folder() } else { None },
         "how": HOW_IT_RUNS,
         "apply": "apply_removal_plan with this plan_id, once the user agrees",
         "commands": plan.commands,
@@ -611,7 +635,7 @@ fn apply(m: &dyn Inspect, r: &dyn Remove, id: &str, plan: &RemovalPlan) -> Value
     let steps: Vec<Value> = plan
         .steps
         .iter()
-        .map(|step| apply_step(m, r, step, plan.level, elevated))
+        .map(|step| apply_step(m, r, step, plan, elevated))
         .collect();
     let backups: Vec<&Value> = steps
         .iter()
@@ -631,9 +655,10 @@ fn apply_step(
     m: &dyn Inspect,
     r: &dyn Remove,
     step: &PlanStep,
-    level: Level,
+    plan: &RemovalPlan,
     elevated: bool,
 ) -> Value {
+    let level = plan.level;
     let name = step.name().to_string();
     let mut out = json!({ "name": name });
     let gone = match step {
@@ -731,7 +756,7 @@ fn apply_step(
     }
 
     let planned = step.leftovers();
-    let mut failed = match r.remove_items(planned, &name) {
+    let mut failed = match r.remove_items(planned, &name, plan.backup) {
         Ok(outcome) => {
             let failed = outcome.failed > 0;
             let failed_items: Vec<Leftover> = planned
@@ -746,8 +771,11 @@ fn apply_step(
                 .collect();
             if !elevated && safety::needs_elevation(&failed_items) {
                 out["needs_admin"] = json!(true);
-                out["admin_command"] =
-                    json!(format!("{} --elevate", scan_remove_command(&name, level)));
+                let keep = if plan.backup { " --backup" } else { "" };
+                out["admin_command"] = json!(format!(
+                    "{}{keep} --elevate",
+                    scan_remove_command(&name, level)
+                ));
             }
             if let Some(backup) = &outcome.backup_name {
                 out["backup"] = json!(backup);
@@ -879,9 +907,11 @@ impl Server {
 
     /// Plan the removal of programs or Store apps: the uninstaller each one
     /// runs, then exactly which leftovers go (kind, path, size, confidence,
-    /// reason), whether administrator rights are needed, and where the
-    /// backups go. Changes nothing. Returns a plan_id; show the plan to the
-    /// user, and once they agree, apply_removal_plan carries it out.
+    /// reason), whether administrator rights are needed, and whether a backup
+    /// is kept. No backup is kept unless backup is true, and then the
+    /// removal is permanent. Changes nothing. Returns a plan_id; show the
+    /// plan to the user, and once they agree, apply_removal_plan carries it
+    /// out.
     #[tool(annotations(read_only_hint = true, open_world_hint = false))]
     async fn plan_removal(&self, Parameters(p): Parameters<PlanParams>) -> CallToolResult {
         let m = Arc::clone(&self.inspect);
@@ -900,11 +930,12 @@ impl Server {
     /// Carry out a plan from plan_removal in this session, exactly as it
     /// was shown and only once: close what runs from each program's
     /// folders, run each uninstaller the plan keeps, then remove the
-    /// leftovers it listed, each one backed up first. Returns what was
-    /// closed and removed, what was not and why, what a fresh scan still
-    /// finds and whether nothing at the plan's level is left, and the
-    /// backup with the command that restores it. Call it only after the
-    /// user agreed to that plan.
+    /// leftovers it listed, each one backed up first when the plan keeps a
+    /// backup and permanently when it does not. Returns what was closed and
+    /// removed, what was not and why, what a fresh scan still finds and
+    /// whether nothing at the plan's level is left, and any backup with the
+    /// command that restores it. Call it only after the user agreed to that
+    /// plan.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -1244,7 +1275,12 @@ mod tests {
                 })
                 .collect()
         }
-        fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome> {
+        fn remove_items(
+            &self,
+            items: &[Leftover],
+            label: &str,
+            backup: bool,
+        ) -> Result<DeletionOutcome> {
             for l in items {
                 self.log(format!("remove {}", l.path));
             }
@@ -1254,7 +1290,8 @@ mod tests {
                 attempted: items.len(),
                 deleted: items.len() - failed,
                 failed,
-                backup_name: Some(format!("2026-10-10_150000_{label}")),
+                backup_name: backup.then(|| format!("2026-10-10_150000_{label}")),
+                permanent: !backup,
                 items: items
                     .iter()
                     .map(|l| ItemOutcome {
@@ -1564,9 +1601,31 @@ mod tests {
         assert_eq!(plan["bytes"], 970);
         assert!(plan["how"].as_str().unwrap().starts_with("Running copies"));
         assert_eq!(plan["needs_admin"], false);
+        // No backup unless the plan asks for one, and the plan says so.
+        assert_eq!(plan["backup"], false);
+        assert_eq!(plan["permanent"], true);
+        assert_eq!(plan["backup_folder"], Value::Null);
+        assert!(plan["how"].as_str().unwrap().contains("permanently"));
+
+        let kept = session
+            .call(
+                "plan_removal",
+                json!({ "programs": ["Example", "OldGame"], "silent": true, "backup": true }),
+            )
+            .await;
+        let kept = &kept["structuredContent"];
+        assert_eq!(kept["backup"], true);
+        assert_eq!(kept["permanent"], false);
         assert_eq!(
-            plan["backup_folder"],
+            kept["backup_folder"],
             r"C:\Users\me\AppData\Local\Oxidize\backups"
+        );
+        assert_eq!(
+            kept["commands"],
+            json!([
+                "oxidize uninstall \"Example Player\" --silent --backup",
+                "oxidize scan \"OldGame\" --remove --backup"
+            ])
         );
 
         let medium = session
@@ -1619,11 +1678,11 @@ mod tests {
             json!([{ "pid": 100, "exe": r"C:\Users\me\AppData\Local\ExamplePlayer\player.exe", "how": "closed" }])
         );
         assert_eq!(step["removal"]["removed"], 3);
-        assert_eq!(step["backup"], "2026-10-10_150000_Example Player");
-        assert_eq!(
-            step["restore_command"],
-            "oxidize restore \"2026-10-10_150000_Example Player\""
-        );
+        // Planned without a backup: nothing to restore, and it says so.
+        assert_eq!(step["removal"]["permanent"], true, "{step}");
+        assert!(step.get("backup").is_none(), "{step}");
+        assert!(step.get("restore_command").is_none(), "{step}");
+        assert_eq!(done["structuredContent"]["backups"], json!([]));
         // The rescan finds only the Medium folder, below the plan's level.
         let left: Vec<&str> = step["remaining"]
             .as_array()
@@ -1639,6 +1698,35 @@ mod tests {
             .await;
         assert_eq!(again["isError"], true, "{again}");
         assert_eq!(recorder.calls().len(), 4, "a plan runs once");
+    }
+
+    #[tokio::test]
+    async fn a_plan_made_with_a_backup_keeps_one_and_names_its_restore() {
+        let (server, recorder) = server_on(pc());
+        let (mut session, _) = Session::open(server).await;
+        let plan = session
+            .call(
+                "plan_removal",
+                json!({ "programs": ["Example"], "backup": true }),
+            )
+            .await;
+        let id = plan_id(&plan);
+        let done = session
+            .call("apply_removal_plan", json!({ "plan_id": id }))
+            .await;
+        assert_ne!(done["isError"], true, "{done}");
+        assert_eq!(recorder.calls().len(), 4, "{:?}", recorder.calls());
+        let step = &done["structuredContent"]["steps"][0];
+        assert_eq!(step["removal"]["permanent"], false, "{step}");
+        assert_eq!(step["backup"], "2026-10-10_150000_Example Player");
+        assert_eq!(
+            step["restore_command"],
+            "oxidize restore \"2026-10-10_150000_Example Player\""
+        );
+        assert_eq!(
+            done["structuredContent"]["backups"],
+            json!(["2026-10-10_150000_Example Player"])
+        );
     }
 
     #[tokio::test]
@@ -1869,7 +1957,7 @@ mod tests {
                 let cli = Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')))
                     .unwrap_or_else(|e| panic!("{args}: {e}"));
                 if !cli.changes_nothing() {
-                    assert!(!cli.no_backup && !cli.elevate, "{args}");
+                    assert!(!cli.backup && !cli.elevate, "{args}");
                 }
                 !cli.changes_nothing()
             })
@@ -1900,7 +1988,7 @@ mod tests {
     ];
 
     #[test]
-    fn only_the_remover_reaches_the_engines_removal_and_it_always_backs_up() {
+    fn only_the_remover_reaches_the_engines_removal_and_backs_up_as_the_plan_says() {
         let source = include_str!("mcp.rs");
         let server = &source[..source.find("#[cfg(test)]").unwrap()];
         for call in ENGINE_CHANGES {
@@ -1917,7 +2005,8 @@ mod tests {
         for call in ENGINE_CHANGES {
             assert!(!reads.contains(call), "the reading side calls {call}");
         }
-        assert!(removes.contains("make_backups: true"));
+        assert!(removes.contains("make_backups: backup"));
+        assert!(!machine.contains("make_backups: true"));
         assert!(!machine.contains("make_backups: false"));
     }
 }

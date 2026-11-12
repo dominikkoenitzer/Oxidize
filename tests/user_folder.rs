@@ -89,9 +89,10 @@ fn settings_in_the_user_folder_are_found_removed_and_restored() {
     assert_eq!(code, 0);
     assert_eq!(found(&report), [folder.clone(), file.clone()]);
 
-    let (code, out) = run(&home, &["scan", NAME, "--remove", "-y"]);
+    let (code, out) = run(&home, &["scan", NAME, "--remove", "-y", "--backup"]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(out["removal"]["failed"], 0);
+    assert_eq!(out["removal"]["permanent"], false);
     assert!(!file.exists() && !folder.exists());
     assert!(notes.exists());
     // `.config` stood empty after that and is not ours to take.
@@ -109,6 +110,21 @@ fn settings_in_the_user_folder_are_found_removed_and_restored() {
         fs::read_to_string(folder.join("settings.toml")).unwrap(),
         "a = 1"
     );
+}
+
+#[test]
+fn without_backup_a_removal_keeps_nothing_to_restore() {
+    let home = Home::new("user_folder_permanent");
+    let file = home.join("quillmarkfixture.json");
+    fs::write(&file, "{}").unwrap();
+
+    let (code, out) = run(&home, &["scan", NAME, "--remove", "-y"]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(out["removal"]["failed"], 0);
+    assert_eq!(out["removal"]["permanent"], true);
+    assert!(out["removal"]["backup"].is_null(), "{out}");
+    assert!(!file.exists());
+    assert!(!home.join(r"AppData\Local\Oxidize\backups").exists());
 }
 
 #[test]

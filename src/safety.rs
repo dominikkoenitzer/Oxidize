@@ -25,7 +25,7 @@ use crate::{registry, system};
 #[derive(Debug, Clone, Copy)]
 pub struct SafetyContext {
     pub dry_run: bool,
-    /// True unless `--no-backup`.
+    /// True with `--backup`. Off by default: removals are then permanent.
     pub make_backups: bool,
     /// True where the parent is someone's own folder, such as a project
     /// whose build output goes.
@@ -65,6 +65,8 @@ pub struct DeletionOutcome {
     pub emptied_keys: Vec<String>,
     /// Nothing was touched: every item only says it would be removed.
     pub dry_run: bool,
+    /// Backups were off, so what went (or would go) is gone for good.
+    pub permanent: bool,
 }
 
 impl DeletionOutcome {
@@ -78,6 +80,7 @@ impl DeletionOutcome {
         self.items.extend(later.items);
         self.emptied_parents.extend(later.emptied_parents);
         self.emptied_keys.extend(later.emptied_keys);
+        self.permanent |= later.permanent;
         if self.backup_dir.is_none() {
             self.backup_dir = later.backup_dir;
             self.backup_name = later.backup_name;
@@ -380,7 +383,10 @@ pub fn remove_leftovers_into(
     ctx: &SafetyContext,
     backup: Option<&Path>,
 ) -> Result<DeletionOutcome> {
-    let mut outcome = DeletionOutcome::default();
+    let mut outcome = DeletionOutcome {
+        permanent: !ctx.make_backups,
+        ..DeletionOutcome::default()
+    };
     if items.is_empty() {
         return Ok(outcome);
     }
@@ -400,7 +406,7 @@ pub fn remove_leftovers_into(
     }
 
     // With backups on, failing to create the backup folder aborts. There is
-    // no fall-through to an unbacked deletion; --no-backup is the opt out.
+    // no fall-through to an unbacked deletion; backups are on only by choice.
     let mut session = if ctx.make_backups {
         let session = match backup {
             Some(dir) => BackupSession::resume(dir, program_label),
@@ -410,7 +416,7 @@ pub fn remove_leftovers_into(
             Ok(session) => Some(session),
             Err(e) => bail!(
                 "could not create the backup folder ({e:#}); refusing to delete without a backup. \
-                 Pass --no-backup to delete anyway."
+                 Leave out --backup to delete anyway."
             ),
         }
     } else {
@@ -722,6 +728,8 @@ mod tests {
             keep_emptied_parents: false,
         };
         let outcome = remove_leftovers(&[item], "Example Product", &ctx).unwrap();
+        // No backup was asked for, so the outcome says it went for good.
+        assert!(outcome.permanent && outcome.backup_name.is_none());
         assert_eq!(outcome.deleted, 1);
         assert_eq!(outcome.emptied_parents, std::slice::from_ref(&vendor));
         assert!(!vendor.exists());
