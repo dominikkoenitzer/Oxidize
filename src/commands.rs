@@ -471,11 +471,14 @@ pub(crate) fn scan_subject<'a>(
     }
 }
 
-/// Refuses a scan by name when neither the name nor the publisher has a word every match needs.
+/// Refuses a scan by name that nothing can match: no name word, no publisher word, and a whole name under the scanner's 3-character floor.
 pub(crate) fn refuse_wordless(name: &str, target: &ScanTarget) -> Result<()> {
-    if target.name_tokens.is_empty() && target.publisher_tokens.is_empty() {
+    if target.name_tokens.is_empty()
+        && target.publisher_tokens.is_empty()
+        && util::normalize(&target.display_name).len() < 3
+    {
         bail!(
-            "\"{name}\" has no word to search by, as it is too short or too common; give the name Windows listed it under, or its publisher"
+            "\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher"
         );
     }
     Ok(())
@@ -3251,19 +3254,26 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn a_name_too_short_or_too_common_gives_nothing_to_search_by() {
-        for name in ["R", "2024", "7z", "Setup"] {
-            let error = refuse_wordless(name, &scanner::name_target(name, None)).unwrap_err();
+    fn a_name_too_short_gives_nothing_to_search_by() {
+        for name in ["R", "Go", "7z", "C++"] {
+            let error = refuse_wordless(name, &scanner::name_only_target(name, None)).unwrap_err();
             assert_eq!(
                 error.to_string(),
-                format!("\"{name}\" has no word to search by, as it is too short or too common; give the name Windows listed it under, or its publisher")
+                format!("\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher")
             );
         }
         for name in ["7-Zip", "Git"] {
-            assert!(refuse_wordless(name, &scanner::name_target(name, None)).is_ok());
+            assert!(refuse_wordless(name, &scanner::name_only_target(name, None)).is_ok());
         }
-        let with_publisher = scanner::name_target("Go", Some("Example Studio"));
+        let with_publisher = scanner::name_only_target("Go", Some("Example Studio"));
         assert!(refuse_wordless("Go", &with_publisher).is_ok());
+    }
+
+    #[test]
+    fn a_name_of_only_common_words_still_scans_by_the_whole_name() {
+        for name in ["Setup", "2024", "Media Player"] {
+            assert!(refuse_wordless(name, &scanner::name_only_target(name, None)).is_ok());
+        }
     }
 
     #[test]

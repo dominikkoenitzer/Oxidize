@@ -1935,7 +1935,7 @@ mod tests {
 
     #[test]
     fn a_name_with_no_word_to_search_by_is_refused() {
-        for name in ["Go", "7z", "Setup"] {
+        for name in ["Go", "7z", "Qz"] {
             let params = ScanParams {
                 program: name.to_string(),
                 publisher: None,
@@ -1965,6 +1965,11 @@ mod tests {
             publisher: None,
         };
         assert_eq!(scan_leftovers(&pc(), gone).unwrap()["installed"], false);
+        let whole = ScanParams {
+            program: "Setup".to_string(),
+            publisher: None,
+        };
+        assert_eq!(scan_leftovers(&pc(), whole).unwrap()["installed"], false);
         let installed = ScanParams {
             program: "Example".to_string(),
             publisher: None,
