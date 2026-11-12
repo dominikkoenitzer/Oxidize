@@ -11,17 +11,20 @@ const SIZES = [
   { name: "2560", use: { viewport: { width: 2560, height: 1440 }, deviceScaleFactor: 1 } },
 ];
 const ENGINES = ["chromium", "firefox", "webkit"];
+const TEST_TIMEOUT = 60_000;
 
 export default defineConfig({
   testDir: ".",
   testMatch: "*.spec.mjs",
   snapshotPathTemplate: "snapshots/{arg}-{projectName}-{platform}{ext}",
-  timeout: 60_000,
+  timeout: TEST_TIMEOUT,
   forbidOnly: !!process.env.CI,
   workers: process.env.CI ? 4 : 2,
   reporter: process.env.CI ? [["list"], ["html", { outputFolder: "report", open: "never" }]] : [["list"]],
   expect: {
-    toHaveScreenshot: { animations: "disabled", scale: "css", maxDiffPixelRatio: 0.01 },
+    // A first screenshot needs two matching captures, and WebKit on a CI runner takes longer than the
+    // five second default for a tall phone page, so a screenshot may use the whole test's time.
+    toHaveScreenshot: { animations: "disabled", scale: "css", maxDiffPixelRatio: 0.01, timeout: TEST_TIMEOUT },
   },
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
