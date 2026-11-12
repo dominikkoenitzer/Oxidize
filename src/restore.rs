@@ -340,11 +340,7 @@ fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
         None if entry.contains('%') => (String::new(), winreg::enums::RegType::REG_EXPAND_SZ),
         None => (String::new(), winreg::enums::RegType::REG_SZ),
     };
-    // Back where it was, not at the end: the order of Path decides which of
-    // two programs of the same name runs.
-    let mut parts: Vec<&str> = current.split(';').filter(|e| !e.is_empty()).collect();
-    put_back(&mut parts, entry, index);
-    let joined = parts.join(";");
+    let joined = path_with_entry(&current, entry, index);
     let bytes: Vec<u8> = joined
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -365,9 +361,26 @@ fn path_add(hive: Hive, entry: &str, index: Option<usize>) -> Result<()> {
     Ok(())
 }
 
-/// Insert a `Path` entry at its recorded position, or at the end.
+/// `Path` with `entry` back in its place, since the order decides which of two programs of one name runs.
+fn path_with_entry(current: &str, entry: &str, index: Option<usize>) -> String {
+    // Every segment the removal kept stays, a blank one included.
+    let mut parts: Vec<&str> = match current {
+        "" => Vec::new(),
+        _ => current.split(';').collect(),
+    };
+    put_back(&mut parts, entry, index);
+    parts.join(";")
+}
+
+/// Insert a `Path` entry at its recorded position among the non-blank segments, or after the last one.
 pub(crate) fn put_back<'a>(parts: &mut Vec<&'a str>, entry: &'a str, index: Option<usize>) {
-    let at = index.unwrap_or(parts.len()).min(parts.len());
+    let filled: Vec<usize> = (0..parts.len())
+        .filter(|&i| !parts[i].trim().is_empty())
+        .collect();
+    let at = match index.and_then(|i| filled.get(i)) {
+        Some(&slot) => slot,
+        None => filled.last().map_or(0, |&last| last + 1),
+    };
     parts.insert(at, entry);
 }
 
@@ -459,6 +472,88 @@ mod tests {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
         fs::write(path, bytes).unwrap();
+    }
+
+    /// Take `entry` out of `before` as a clean does, then put it back as a restore does.
+    fn removed_and_restored(before: &str, entry: &str) -> String {
+        let trimmed: Vec<&str> = before
+            .split(';')
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .collect();
+        let index = trimmed
+            .iter()
+            .position(|e| crate::system::same_path_entry(e, entry))
+            .unwrap();
+        let after: Vec<&str> = before
+            .split(';')
+            .filter(|e| !crate::system::same_path_entry(e, entry))
+            .collect();
+        path_with_entry(&after.join(";"), trimmed[index], Some(index))
+    }
+
+    #[test]
+    fn a_path_entry_comes_back_to_its_place_with_every_segment_kept() {
+        assert_eq!(
+            removed_and_restored(r"C:\a; ;C:\b;C:\c", r"C:\c"),
+            r"C:\a; ;C:\b;C:\c"
+        );
+        assert_eq!(
+            removed_and_restored(r"C:\a;;C:\x;C:\b", r"C:\x"),
+            r"C:\a;;C:\x;C:\b"
+        );
+        assert_eq!(removed_and_restored(r"C:\a;C:\b;", r"C:\b"), r"C:\a;C:\b;");
+        assert_eq!(
+            removed_and_restored(r"C:\a;C:\x;C:\b;", r"C:\x"),
+            r"C:\a;C:\x;C:\b;"
+        );
+        assert_eq!(
+            removed_and_restored(r"C:\a;C:\b;C:\c", r"C:\b"),
+            r"C:\a;C:\b;C:\c"
+        );
+
+        // A blank segment beside the entry may land on its other side; nothing else moves.
+        let entries = |path: &str| -> Vec<String> {
+            path.split(';')
+                .filter(|e| !e.trim().is_empty())
+                .map(str::to_string)
+                .collect()
+        };
+        let segments = |path: &str| -> Vec<String> {
+            let mut all: Vec<String> = path.split(';').map(str::to_string).collect();
+            all.sort();
+            all
+        };
+        for before in [
+            r"C:\a; ;C:\b;C:\c",
+            r"C:\a;;C:\x;C:\b",
+            r"C:\x;C:\a;;C:\b",
+            r"C:\a;C:\b;",
+            r"; ;C:\a;;C:\b; ;",
+        ] {
+            for entry in entries(before) {
+                let after = removed_and_restored(before, &entry);
+                assert_eq!(entries(&after), entries(before), "{entry} out of {before}");
+                assert_eq!(
+                    segments(&after),
+                    segments(before),
+                    "{entry} out of {before}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_path_entry_with_no_place_goes_after_the_last_entry() {
+        assert_eq!(
+            path_with_entry(r"C:\a;C:\b;", r"C:\x", None),
+            r"C:\a;C:\b;C:\x;"
+        );
+        assert_eq!(
+            path_with_entry(r"C:\a; ;C:\b", r"C:\x", Some(7)),
+            r"C:\a; ;C:\b;C:\x"
+        );
+        assert_eq!(path_with_entry("", r"C:\x", Some(2)), r"C:\x");
     }
 
     #[test]
