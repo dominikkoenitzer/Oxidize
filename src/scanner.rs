@@ -4842,6 +4842,37 @@ mod tests {
     }
 
     #[test]
+    fn a_short_install_folder_is_shared_with_the_installs_in_it() {
+        // A vendor folder that another program is installed in, recorded
+        // with short names on one side and long names on the other.
+        let tools = LocalDir::new("OxidizeShortSharedTest");
+        let loc = tools.join(r"Brightway Software");
+        let other = loc.join(r"Lumen Updater Service");
+        fs::create_dir_all(&other).unwrap();
+        let short_loc = short_name(&loc);
+        let short_other = short_name(&other);
+        assert_ne!(short_loc, loc, "no short names on this volume");
+
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(shared_install_folder(
+            &loc,
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
+        assert!(
+            shared_install_folder(&short_loc, &t, std::slice::from_ref(&other), &[]),
+            "{}",
+            short_loc.display()
+        );
+        assert!(
+            shared_install_folder(&loc, &t, std::slice::from_ref(&short_other), &[]),
+            "{}",
+            short_other.display()
+        );
+    }
+
+    #[test]
     fn a_vendor_folder_keeps_the_other_channels_and_installs_in_it() {
         // The program's folder next to a test build's, a channel's that is
         // installed and one that is not, each with a profile in it.
