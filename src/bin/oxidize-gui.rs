@@ -5318,7 +5318,7 @@ mod tests {
     }
 
     /// The text from the top of the text `first` picks down to the bottom of
-    /// the one `last` picks, in the same panel, each with the smallest widget
+    /// the one `last` picks in the same panel, each with the smallest widget
     /// under its centre and the clip.
     fn texts_between(
         ctx: &egui::Context,
@@ -5333,18 +5333,18 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let find = |pick: &dyn Fn(&egui::epaint::TextShape) -> bool| {
+        let find = |pick: &dyn Fn(&egui::epaint::TextShape) -> bool, panel: Option<egui::Rect>| {
             texts
                 .iter()
-                .find(|(_, text)| pick(text))
+                .find(|(clip, text)| panel.is_none_or(|p| *clip == p) && pick(text))
                 .map(|(clip, text)| (*clip, text.visual_bounding_rect()))
                 .unwrap_or_else(|| {
                     let drawn: Vec<&str> = texts.iter().map(|(_, t)| t.galley.text()).collect();
                     panic!("not among the drawn text: {drawn:?}")
                 })
         };
-        let (clip, top) = find(&first);
-        let (_, bottom) = find(&last);
+        let (clip, top) = find(&first, None);
+        let (_, bottom) = find(&last, Some(clip));
         let widgets: Vec<egui::Rect> = ctx.viewport(|v| {
             v.prev_pass
                 .widgets
@@ -5415,6 +5415,7 @@ mod tests {
                     };
                     let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
                     out.textures_delta.clear();
+                    let case = format!("{}x{} dry run {dry_run} {tab:?} {view:?}", size.x, size.y);
                     let name = |t: &egui::epaint::TextShape| t.galley.text() == "Oxidize";
                     let mut lines = vec![texts_between(&ctx, &out.shapes, name, name)];
                     if tab == Tab::Cleanup {
@@ -5432,8 +5433,14 @@ mod tests {
                                 }
                             },
                         ));
+                        let head = &lines[1];
+                        if !head
+                            .iter()
+                            .any(|(a, ..)| a.starts_with("Protected folders"))
+                        {
+                            faults.push(format!("{case}: the head's buttons are not in {head:?}"));
+                        }
                     }
-                    let case = format!("{}x{} dry run {dry_run} {tab:?} {view:?}", size.x, size.y);
                     for line in lines {
                         for (i, (a, ra, clip)) in line.iter().enumerate() {
                             if !clip.expand(0.5).contains_rect(*ra) {
