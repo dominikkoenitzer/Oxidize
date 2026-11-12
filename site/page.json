@@ -198,10 +198,10 @@
     }
   },
   "new": {
-    "version": "0.2.20",
+    "version": "0.2.21",
     "items": [
-      "What other programs registered in a program's key or keep in their own folders stays, even when it carries the program's name.",
-      "A vendor's registry key stays when another of its products keeps settings there; only the program's own keys go."
+      "Removals keep no backup unless you turn on Back up before deleting or add --backup; without one a removal is permanent, and Oxidize says so first.",
+      "Files and folders still there in another program's folder stay theirs, even when they are named like the program."
     ]
   },
   "requirements": [
