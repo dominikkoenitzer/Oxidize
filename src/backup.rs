@@ -100,6 +100,8 @@ pub struct Manifest {
 pub struct BackupSession {
     root: PathBuf,
     manifest: Manifest,
+    /// This run made the folder, so it may take it away again while it holds no entry.
+    made: bool,
 }
 
 impl BackupSession {
@@ -121,12 +123,14 @@ impl BackupSession {
                 entries: Vec::new(),
                 restored: None,
             },
+            made: true,
         })
     }
 
     /// Go on writing into the backup at `root`, so one restore puts back
     /// what both removals took.
     pub fn resume(root: &Path, program_label: &str) -> Result<BackupSession> {
+        let made = !root.exists();
         let manifest = if root.join(MANIFEST).exists() {
             read_manifest(root)?
         } else {
@@ -141,11 +145,24 @@ impl BackupSession {
         Ok(BackupSession {
             root: root.to_path_buf(),
             manifest,
+            made,
         })
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Whether anything went into it, so a restore has something to put back.
+    pub fn has_entries(&self) -> bool {
+        !self.manifest.entries.is_empty()
+    }
+
+    /// Take away a folder this run made and wrote no entry to; only empty folders go, never a file.
+    pub fn discard_if_unused(&self) {
+        if self.made && !self.has_entries() {
+            remove_empty_folders(&self.root);
+        }
     }
 
     /// The backup's name as shown by `oxidize backups`.
@@ -330,6 +347,18 @@ impl BackupSession {
         dest.push(rel);
         dest
     }
+}
+
+/// Removes `dir` and the folders under it while nothing else is inside; links are not followed.
+fn remove_empty_folders(dir: &Path) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                remove_empty_folders(&entry.path());
+            }
+        }
+    }
+    let _ = fs::remove_dir(dir);
 }
 
 /// The stamp is only accurate to the second, and two removals of the same

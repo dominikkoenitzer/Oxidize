@@ -487,9 +487,14 @@ pub fn remove_leftovers_into(
         }
     }
 
+    // A backup with no entry cannot be restored, so it is not named.
     if let Some(s) = &session {
-        outcome.backup_dir = Some(s.root().to_path_buf());
-        outcome.backup_name = Some(s.name());
+        if s.has_entries() {
+            outcome.backup_dir = Some(s.root().to_path_buf());
+            outcome.backup_name = Some(s.name());
+        } else {
+            s.discard_if_unused();
+        }
     }
     Ok(outcome)
 }
