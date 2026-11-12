@@ -235,7 +235,11 @@ fn scan_leftovers(m: &dyn Inspect, p: ScanParams) -> Result<Value> {
         commands::scan_subject(&programs, || m.store_apps().unwrap_or_default(), &p.program)?;
     let report = match installed {
         Some(program) => m.scan(&m.target(program), true),
-        None => m.scan(&m.target_by_name(&p.program, p.publisher.as_deref()), false),
+        None => {
+            let target = m.target_by_name(&p.program, p.publisher.as_deref());
+            commands::refuse_wordless(&p.program, &target)?;
+            m.scan(&target, false)
+        }
     };
     Ok(serde_json::to_value(report)?)
 }
@@ -382,6 +386,7 @@ fn make_plan(m: &dyn Inspect, p: &PlanParams) -> Result<RemovalPlan> {
     }
     for name in gone {
         let target = m.target_by_name(&name, None);
+        commands::refuse_wordless(&name, &target)?;
         let report = m.scan(&target, false);
         if report.is_empty() {
             bail!("no installed program or Store app matches \"{name}\", and nothing by that name was found");
@@ -1926,6 +1931,47 @@ mod tests {
             .filter(|c| c.starts_with("close"))
             .collect();
         assert_eq!(closed, ["close 100", "close 300"]);
+    }
+
+    #[test]
+    fn a_name_with_no_word_to_search_by_is_refused() {
+        for name in ["Go", "7z", "Setup"] {
+            let params = ScanParams {
+                program: name.to_string(),
+                publisher: None,
+            };
+            let error = scan_leftovers(&pc(), params).unwrap_err().to_string();
+            assert!(error.contains("no word to search by"), "{name}: {error}");
+        }
+        let plan = PlanParams {
+            programs: vec!["Go".to_string()],
+            silent: false,
+            level: Level::High,
+            backup: false,
+        };
+        let error = make_plan(&pc(), &plan).unwrap_err().to_string();
+        assert!(error.contains("no word to search by"), "{error}");
+    }
+
+    #[test]
+    fn a_name_with_a_word_or_a_publisher_is_still_scanned() {
+        let named = ScanParams {
+            program: "Go".to_string(),
+            publisher: Some("Example Studio".to_string()),
+        };
+        assert_eq!(scan_leftovers(&pc(), named).unwrap()["installed"], false);
+        let gone = ScanParams {
+            program: "OldGame".to_string(),
+            publisher: None,
+        };
+        assert_eq!(scan_leftovers(&pc(), gone).unwrap()["installed"], false);
+        let installed = ScanParams {
+            program: "Example".to_string(),
+            publisher: None,
+        };
+        let report = scan_leftovers(&pc(), installed).unwrap();
+        assert_eq!(report["program_name"], "Example Player");
+        assert_eq!(report["installed"], true);
     }
 
     /// The command line each tool does the work of.
