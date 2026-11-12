@@ -90,11 +90,35 @@ pub struct ManifestEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Manifest {
     pub program: String,
+    /// The day it was made. Older backups hold the full time.
     pub created: String,
+    /// Counts up across backups, so those made on one day still list in order.
+    /// Zero in a backup made before the count existed.
+    #[serde(default)]
+    pub seq: u64,
     pub entries: Vec<ManifestEntry>,
-    /// When everything in it was put back, if it was.
+    /// The day everything in it was put back, if it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<String>,
+}
+
+/// Today, the only time a backup keeps of itself.
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+/// One more than the highest count in any backup under `base`.
+fn next_seq(base: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(base) else {
+        return 1;
+    };
+    entries
+        .flatten()
+        .filter_map(|e| read_manifest(&e.path()).ok())
+        .map(|m| m.seq)
+        .max()
+        .unwrap_or(0)
+        + 1
 }
 
 pub struct BackupSession {
@@ -105,19 +129,16 @@ pub struct BackupSession {
 impl BackupSession {
     pub fn new(program_label: &str) -> Result<BackupSession> {
         let base = backups_base()?;
-        let now = chrono::Local::now();
-        let stem = format!(
-            "{} {}",
-            now.format("%Y-%m-%d %H%M%S"),
-            sanitize(program_label)
-        );
+        let day = today();
+        let stem = format!("{day} {}", sanitize(program_label));
         let root = unused_root(&base, &stem);
         fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
         Ok(BackupSession {
             root,
             manifest: Manifest {
                 program: program_label.to_string(),
-                created: now.to_rfc3339(),
+                created: day,
+                seq: next_seq(&base),
                 entries: Vec::new(),
                 restored: None,
             },
@@ -133,7 +154,8 @@ impl BackupSession {
             fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
             Manifest {
                 program: program_label.to_string(),
-                created: chrono::Local::now().to_rfc3339(),
+                created: today(),
+                seq: root.parent().map_or(1, next_seq),
                 entries: Vec::new(),
                 restored: None,
             }
@@ -444,6 +466,8 @@ pub struct BackupInfo {
     pub path: PathBuf,
     pub program: String,
     pub created: String,
+    #[serde(skip)]
+    pub seq: u64,
     pub items: usize,
     pub size_bytes: u64,
     /// When everything in it was put back, or null.
@@ -473,6 +497,7 @@ pub fn list_backups() -> Result<Vec<BackupInfo>> {
                 .as_ref()
                 .map(|m| m.created.clone())
                 .unwrap_or_default(),
+            seq: manifest.as_ref().map(|m| m.seq).unwrap_or(0),
             items: manifest.as_ref().map(|m| m.entries.len()).unwrap_or(0),
             restored: manifest.as_ref().and_then(|m| m.restored.clone()),
             size_bytes: crate::scanner::dir_size(&path),
@@ -485,11 +510,16 @@ pub fn list_backups() -> Result<Vec<BackupInfo>> {
     Ok(out)
 }
 
-/// Newest first by the time in the manifest, then by name. The name starts
-/// with the time too, but only to the second.
+/// Newest first by the count in the manifest; backups made before the count
+/// existed come after, by the full time they hold, then by name.
 fn sort_newest_first(backups: &mut [BackupInfo]) {
     let time = |b: &BackupInfo| chrono::DateTime::parse_from_rfc3339(&b.created).ok();
-    backups.sort_by(|a, b| time(b).cmp(&time(a)).then_with(|| b.name.cmp(&a.name)));
+    backups.sort_by(|a, b| {
+        b.seq
+            .cmp(&a.seq)
+            .then_with(|| time(b).cmp(&time(a)))
+            .then_with(|| b.name.cmp(&a.name))
+    });
 }
 
 /// Write a backup's manifest. It goes beside the real file and is renamed
@@ -506,7 +536,7 @@ fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
 /// Note in a backup's manifest that everything in it was put back.
 pub fn mark_restored(dir: &Path) -> Result<()> {
     let mut manifest = read_manifest(dir)?;
-    manifest.restored = Some(chrono::Local::now().to_rfc3339());
+    manifest.restored = Some(today());
     write_manifest(dir, &manifest)
 }
 
@@ -1180,21 +1210,20 @@ mod tests {
     }
 
     #[test]
-    fn two_sessions_in_one_second_get_their_own_folder() {
-        // The clock decides whether two real sessions share a stamp, so the
-        // numbering is checked on a stamp that is taken for certain.
+    fn two_sessions_in_one_day_get_their_own_folder() {
+        // The numbering is checked on a name that is taken for certain.
         let taken = test_path("oxidize_taken_root_test");
         let _ = fs::remove_dir_all(&taken);
         let mut cleanup = TestCleanup(vec![taken.clone()]);
-        fs::create_dir_all(taken.join("2026-01-01 120000 X")).unwrap();
+        fs::create_dir_all(taken.join("2026-01-01 X")).unwrap();
         assert_eq!(
-            unused_root(&taken, "2026-01-01 120000 X"),
-            taken.join("2026-01-01 120000 X (2)")
+            unused_root(&taken, "2026-01-01 X"),
+            taken.join("2026-01-01 X (2)")
         );
-        fs::create_dir_all(taken.join("2026-01-01 120000 X (2)")).unwrap();
+        fs::create_dir_all(taken.join("2026-01-01 X (2)")).unwrap();
         assert_eq!(
-            unused_root(&taken, "2026-01-01 120000 X"),
-            taken.join("2026-01-01 120000 X (3)")
+            unused_root(&taken, "2026-01-01 X"),
+            taken.join("2026-01-01 X (3)")
         );
 
         let first = BackupSession::new("Oxidize Session Test").unwrap();
@@ -1625,6 +1654,7 @@ mod tests {
         let m = Manifest {
             program: "X".into(),
             created: "now".into(),
+            seq: 7,
             restored: None,
             entries: vec![ManifestEntry {
                 kind: LeftoverKind::PathEntry,
@@ -1639,6 +1669,23 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.seq, 7);
+
+        let before_the_count =
+            r#"{"program":"X","created":"2026-01-01T12:00:00+01:00","entries":[]}"#;
+        let old: Manifest = serde_json::from_str(before_the_count).unwrap();
+        assert_eq!(old.seq, 0);
+    }
+
+    #[test]
+    fn a_counted_backup_lists_before_one_made_before_the_count() {
+        let mut all = vec![
+            info("2026-01-02 120000 Old", "Old", "2026-01-02T12:00:00+01:00"),
+            info("2026-01-01 New", "New", "2026-01-01"),
+        ];
+        all[1].seq = 1;
+        sort_newest_first(&mut all);
+        assert_eq!(all[0].name, "2026-01-01 New");
     }
 
     #[test]
@@ -1659,6 +1706,40 @@ mod tests {
         assert!(matches!(back, Undo::MoveBack { partial: true, .. }));
     }
 
+    #[test]
+    fn a_backup_keeps_the_day_only() {
+        let mut cleanup = TestCleanup(Vec::new());
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let session = BackupSession::new("Oxidize Day Test").unwrap();
+        cleanup.0.push(session.root().to_path_buf());
+        assert_eq!(session.name(), format!("{today} Oxidize Day Test"));
+        assert_eq!(session.manifest.created, today);
+
+        write_manifest(session.root(), &session.manifest).unwrap();
+        mark_restored(session.root()).unwrap();
+        let restored = read_manifest(session.root()).unwrap().restored;
+        assert_eq!(restored.as_deref(), Some(today.as_str()));
+    }
+
+    #[test]
+    fn backups_of_one_day_list_newest_first() {
+        let mut cleanup = TestCleanup(Vec::new());
+        let mut made = Vec::new();
+        for program in ["Oxidize Order B", "Oxidize Order A", "Oxidize Order B"] {
+            let session = BackupSession::new(program).unwrap();
+            cleanup.0.push(session.root().to_path_buf());
+            write_manifest(session.root(), &session.manifest).unwrap();
+            made.push(session.name());
+        }
+        let listed: Vec<String> = list_backups()
+            .unwrap()
+            .into_iter()
+            .map(|b| b.name)
+            .collect();
+        made.reverse();
+        assert_eq!(listed, made);
+    }
+
     fn info(name: &str, program: &str, created: &str) -> BackupInfo {
         BackupInfo {
             id: name.to_string(),
@@ -1666,6 +1747,7 @@ mod tests {
             path: PathBuf::from(name),
             program: program.to_string(),
             created: created.to_string(),
+            seq: 0,
             items: 1,
             size_bytes: 0,
             restored: None,

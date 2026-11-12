@@ -101,7 +101,7 @@ Enum values, exactly as printed:
   "removed": 0,
   "already_gone": 0,
   "failed": 0,
-  "backup": "2026-01-01 120000 Example Player",
+  "backup": "2026-01-01 Example Player",
   "items": [
     { "path": "...", "status": "removed", "error": null }
   ]
@@ -116,7 +116,7 @@ Enum values, exactly as printed:
 
 ### Backup
 
-`{ "id", "name", "path", "program", "created", "items", "size_bytes", "restored" }`. `id` is the backup's folder name, the same as `name`, and `oxidize restore <id>` takes it as an exact match. `created` is an RFC 3339 time, or `""` if the backup's manifest cannot be read. `restored` is the RFC 3339 time a restore put back every item, or null; `items` still counts what the backup recorded.
+`{ "id", "name", "path", "program", "created", "items", "size_bytes", "restored" }`. `id` is the backup's folder name, the same as `name`, and `oxidize restore <id>` takes it as an exact match. `created` is the day it was made (`YYYY-MM-DD`; a backup from an older version holds an RFC 3339 time), or `""` if the backup's manifest cannot be read. `restored` is the day a restore put back every item, in the same form, or null; `items` still counts what the backup recorded.
 
 ## list
 
