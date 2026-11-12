@@ -245,7 +245,8 @@ impl OxidizeApp {
             table_view: (0.0, 0.0),
             show_log: false,
             dry_run: false,
-            make_backups: true,
+            // Removals keep no backup unless the user turns it on.
+            make_backups: false,
             silent: false,
             include_system: false,
             elevated: false,
@@ -973,7 +974,10 @@ impl OxidizeApp {
                     Some((_, a)) => format!("Clean {}", util::human_size(a.chosen_bytes(choice))),
                     None => "Clean".to_string(),
                 },
-                choice.categories.iter().any(|c| !c.backed_up()),
+                choice
+                    .categories
+                    .iter()
+                    .any(|c| !c.backed_up(self.make_backups)),
             ),
             Confirm::Traces(_) => ("Clear".to_string(), true),
         };
@@ -1383,13 +1387,17 @@ impl OxidizeApp {
                 .default_size((ui.available_height() * 0.38).max(240.0))
                 .size_range(200.0..=tallest)
                 .frame(frame)
-                .show(ui, |ui| cleanup::side(ui, t, &mut self.cleanup));
+                .show(ui, |ui| {
+                    cleanup::side(ui, t, &mut self.cleanup, self.make_backups)
+                });
         } else {
             egui::Panel::right("cleanup_side")
                 .resizable(false)
                 .exact_size(details_width(ui.available_width()))
                 .frame(frame)
-                .show(ui, |ui| cleanup::side(ui, t, &mut self.cleanup));
+                .show(ui, |ui| {
+                    cleanup::side(ui, t, &mut self.cleanup, self.make_backups)
+                });
         }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(t.base).inner_margin(egui::Margin {
@@ -1588,7 +1596,8 @@ impl OxidizeApp {
                 ui.checkbox(&mut self.make_backups, "Back up before deleting")
                     .on_hover_text(
                         "Export registry keys to .reg and quarantine files before Oxidize deletes \
-                         them. What a program's own uninstaller removes is not covered.",
+                         them, so a removal can be undone. Off, removals are permanent. What a \
+                         program's own uninstaller removes is not covered.",
                     );
             }
             Setting::Silent => {
@@ -3592,6 +3601,15 @@ mod tests {
 
     fn stand_in_list() -> std::path::PathBuf {
         std::env::temp_dir().join("oxidize-gui-test-protected.txt")
+    }
+
+    #[test]
+    fn a_new_window_keeps_no_backup_until_the_user_turns_it_on() {
+        let mut a = app();
+        assert!(!a.make_backups);
+        assert!(!a.safety_ctx().make_backups);
+        a.make_backups = true;
+        assert!(a.safety_ctx().make_backups);
     }
 
     #[test]

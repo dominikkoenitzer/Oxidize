@@ -31,14 +31,25 @@ struct Global {
     dry_run: bool,
     yes: bool,
     json: bool,
-    no_backup: bool,
+    /// `--backup`: keep a backup of what is removed. Off by default.
+    backup: bool,
 }
 
 impl Global {
+    /// The run flags as given: no backup unless `--backup` is.
+    fn from_cli(cli: &Cli) -> Global {
+        Global {
+            dry_run: cli.dry_run,
+            yes: cli.yes,
+            json: cli.json,
+            backup: cli.backup,
+        }
+    }
+
     fn safety(&self) -> SafetyContext {
         SafetyContext {
             dry_run: self.dry_run,
-            make_backups: !self.no_backup,
+            make_backups: self.backup,
             keep_emptied_parents: false,
         }
     }
@@ -56,12 +67,7 @@ impl Global {
 }
 
 pub fn dispatch(cli: Cli) -> Result<()> {
-    let g = Global {
-        dry_run: cli.dry_run,
-        yes: cli.yes,
-        json: cli.json,
-        no_backup: cli.no_backup,
-    };
+    let g = Global::from_cli(&cli);
     match &cli.command {
         Commands::List(args) => cmd_list(args, &g),
         Commands::Uninstall(args) => cmd_uninstall(args, &g),
@@ -80,14 +86,15 @@ pub fn dispatch(cli: Cli) -> Result<()> {
 }
 
 /// `oxidize mcp` serves until the assistant goes away, and its removals are
-/// planned, shown and backed up one by one. A `--dry-run` it ignored would
-/// let an assistant remove for real on a server started to try things out,
-/// so the flags that steer a single run are refused instead.
+/// planned and shown one by one, each plan saying whether it keeps a backup.
+/// A `--dry-run` it ignored would let an assistant remove for real on a
+/// server started to try things out, and an ignored `--backup` would let a
+/// removal go for good, so the flags that steer a single run are refused.
 fn mcp_takes_no_run_flags(g: &Global) -> Result<()> {
     let given: Vec<&str> = [
         (g.dry_run, "--dry-run"),
         (g.yes, "--yes"),
-        (g.no_backup, "--no-backup"),
+        (g.backup, "--backup"),
     ]
     .into_iter()
     .filter_map(|(on, flag)| on.then_some(flag))
@@ -97,7 +104,7 @@ fn mcp_takes_no_run_flags(g: &Global) -> Result<()> {
     }
     Err(Failure::usage(format!(
         "oxidize mcp does not take {}: the assistant previews with plan_removal, \
-         and every plan it applies is asked for and backed up",
+         every plan it applies is asked for, and a plan keeps a backup when it asks for one",
         given.join(" or ")
     ))
     .into())
@@ -1311,9 +1318,9 @@ impl complete::Pc for CliPc<'_> {
                 println!();
                 println!(
                     "{}",
-                    term::dim(&format!(
-                        "dry run: {} would be removed",
-                        plural(items.len(), "item", "items")
+                    term::dim(&would_remove_line(
+                        &plural(items.len(), "item", "items"),
+                        self.g.backup
                     ))
                 );
             }
@@ -2275,7 +2282,7 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     if g.json && !run {
         println!(
             "{}",
-            serde_json::to_string_pretty(&clean_plan_json(&analysis, &choice))?
+            serde_json::to_string_pretty(&clean_plan_json(&analysis, &choice, g.backup))?
         );
         return Ok(());
     }
@@ -2284,7 +2291,7 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
     }
     if !run {
         if !g.json {
-            print_clean_hints(&analysis, &choice, g.dry_run, !g.no_backup);
+            print_clean_hints(&analysis, &choice, g.dry_run, g.backup);
         }
         return Ok(());
     }
@@ -2309,7 +2316,7 @@ fn cmd_clean(args: &CleanArgs, g: &Global) -> Result<()> {
         println!();
         term::info("Cleaning...");
     }
-    let done = clean::clean_this_pc(&places, &analysis, &choice, &protected, !g.no_backup);
+    let done = clean::clean_this_pc(&places, &analysis, &choice, &protected, g.backup);
     let freed: u64 = done.iter().map(|c| c.freed).sum();
     if g.json {
         println!(
@@ -2433,8 +2440,15 @@ fn print_trace(f: &TraceFinding) {
 }
 
 /// The analysis as `--json` prints it without `--yes`.
-pub(crate) fn clean_plan_json(analysis: &Analysis, choice: &Choice) -> serde_json::Value {
+/// `backup` says whether the folders of removed programs would go into a
+/// backup; without one they are deleted for good, as everything else is.
+pub(crate) fn clean_plan_json(
+    analysis: &Analysis,
+    choice: &Choice,
+    backup: bool,
+) -> serde_json::Value {
     json!({
+        "backup": backup,
         "analysis": analysis,
         "chosen": choice.categories,
         "chosen_folders": choice.folders,
@@ -2565,6 +2579,14 @@ fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
+/// Said when chosen folders of removed programs would go for good.
+fn orphans_backup_line(choice: &Choice, backup: bool) -> Option<&'static str> {
+    (!backup && choice.categories.contains(&Category::Orphans) && !choice.folders.is_empty())
+        .then_some(
+            "The folders of removed programs are deleted permanently, with no backup. Add --backup to keep one.",
+        )
+}
+
 /// The hint for the folders proven dead, which skip the backup a clean makes.
 fn dead_folders_line(dead: usize, backup: bool) -> String {
     let dead = plural(dead, "folder", "folders");
@@ -2595,7 +2617,9 @@ fn print_clean_hints(analysis: &Analysis, choice: &Choice, dry_run: bool, backup
             ))
         );
     }
-    if !choice.outright.is_empty() {
+    if let Some(line) = orphans_backup_line(choice, backup) {
+        println!("{}", term::dim(line));
+    } else if !choice.outright.is_empty() {
         println!(
             "{}",
             term::dim(&dead_folders_line(choice.outright.len(), backup))
@@ -2883,6 +2907,16 @@ fn removal_verdict(selected: usize, removal: Option<&DeletionOutcome>, g: &Globa
     Ok(())
 }
 
+/// The last line of a dry run that would remove `what`: whether a backup
+/// would be kept, or the removal would be permanent.
+fn would_remove_line(what: &str, backup: bool) -> String {
+    if backup {
+        format!("dry run: {what} would be removed, each one backed up first")
+    } else {
+        format!("dry run: {what} would be removed permanently, with no backup. Add --backup to keep one.")
+    }
+}
+
 /// Items were selected and none was tried: the question was answered no.
 fn declined(selected: usize, o: &DeletionOutcome, dry_run: bool) -> bool {
     !dry_run && selected > 0 && o.attempted == 0
@@ -2907,9 +2941,9 @@ fn remove_items(selected: &[Leftover], label: &str, g: &Global) -> Result<Deleti
             println!();
             println!(
                 "{}",
-                term::dim(&format!(
-                    "dry run: {} would be removed",
-                    plural(selected.len(), "item", "items")
+                term::dim(&would_remove_line(
+                    &plural(selected.len(), "item", "items"),
+                    g.backup
                 ))
             );
         }
@@ -3023,6 +3057,7 @@ pub(crate) fn removal_json(outcome: &Option<DeletionOutcome>) -> serde_json::Val
             "already_gone": o.skipped,
             "failed": o.failed,
             "backup": o.backup_name,
+            "permanent": o.permanent,
             "items": o.items.iter().map(|i| json!({
                 "path": i.path,
                 "status": match &i.status {
@@ -3218,19 +3253,14 @@ mod tests {
         for flags in [
             &["--dry-run"][..],
             &["--yes"],
-            &["--no-backup"],
+            &["--backup"],
             &["--dry-run", "--yes"],
         ] {
             let mut argv = vec!["oxidize"];
             argv.extend_from_slice(flags);
             argv.push("mcp");
             let cli = Cli::try_parse_from(&argv).unwrap();
-            let g = Global {
-                dry_run: cli.dry_run,
-                yes: cli.yes,
-                json: cli.json,
-                no_backup: cli.no_backup,
-            };
+            let g = Global::from_cli(&cli);
             let err = mcp_takes_no_run_flags(&g).unwrap_err();
             let out = exit::outcome(&err);
             assert_eq!((out.code, out.exit), ("usage", exit::USAGE), "{flags:?}");
@@ -3242,9 +3272,60 @@ mod tests {
             dry_run: false,
             yes: false,
             json: true,
-            no_backup: false,
+            backup: false,
         };
         assert!(mcp_takes_no_run_flags(&plain).is_ok());
+        // --no-backup changes nothing, so the server has nothing to refuse.
+        let cli = Cli::try_parse_from(["oxidize", "--no-backup", "mcp"]).unwrap();
+        assert!(mcp_takes_no_run_flags(&Global::from_cli(&cli)).is_ok());
+    }
+
+    #[test]
+    fn a_run_keeps_no_backup_unless_backup_is_given() {
+        let run = |argv: &[&str]| Global::from_cli(&Cli::try_parse_from(argv).unwrap());
+        for argv in [
+            &["oxidize", "uninstall", "Example"][..],
+            &["oxidize", "scan", "Example", "--remove", "--yes"],
+            &["oxidize", "orphans", "--remove"],
+            &["oxidize", "clean", "--yes"],
+        ] {
+            let g = run(argv);
+            assert!(!g.backup, "{argv:?}");
+            assert!(!g.safety().make_backups, "{argv:?}");
+        }
+        let kept = run(&["oxidize", "scan", "Example", "--remove", "--backup"]);
+        assert!(kept.backup && kept.safety().make_backups);
+        let before = run(&["oxidize", "--backup", "clean"]);
+        assert!(before.safety().make_backups);
+
+        // --no-backup is still accepted and is the default anyway.
+        let old = run(&["oxidize", "scan", "Example", "--remove", "--no-backup"]);
+        assert!(!old.safety().make_backups);
+        assert!(Cli::try_parse_from(["oxidize", "--backup", "--no-backup", "clean"]).is_err());
+    }
+
+    #[test]
+    fn a_dry_run_and_the_json_say_when_a_removal_is_permanent() {
+        let off = would_remove_line("3 items", false);
+        assert!(off.contains("permanently, with no backup"), "{off}");
+        assert!(off.contains("--backup"), "{off}");
+        let on = would_remove_line("3 items", true);
+        assert!(
+            on.contains("backed up first") && !on.contains("permanent"),
+            "{on}"
+        );
+
+        let gone = DeletionOutcome {
+            permanent: true,
+            ..removed(3, 0, None)
+        };
+        let j = removal_json(&Some(gone));
+        assert_eq!(
+            (j["permanent"].clone(), j["backup"].clone()),
+            (json!(true), json!(null))
+        );
+        let j = removal_json(&Some(removed(3, 0, Some("b"))));
+        assert_eq!(j["permanent"], false);
     }
 
     #[test]
@@ -3873,7 +3954,7 @@ mod tests {
             dry_run: false,
             yes: false,
             json: true,
-            no_backup: false,
+            backup: false,
         };
         let no = DeletionOutcome::default();
         assert!(declined(3, &no, false));
@@ -3938,12 +4019,12 @@ mod tests {
     }
 
     /// Answers yes to everything and prints JSON, so nothing waits on a prompt.
-    fn unattended(dry_run: bool, no_backup: bool) -> Global {
+    fn unattended(dry_run: bool, backup: bool) -> Global {
         Global {
             dry_run,
             yes: true,
             json: true,
-            no_backup,
+            backup,
         }
     }
 
@@ -4033,7 +4114,7 @@ mod tests {
             false,
             false,
             &LevelOpts::default(),
-            &unattended(false, true),
+            &unattended(false, false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4075,7 +4156,7 @@ mod tests {
             false,
             false,
             &LevelOpts::default(),
-            &unattended(false, true),
+            &unattended(false, false),
             &mut closed,
         ) else {
             panic!("the removal was to fail");
@@ -4111,7 +4192,7 @@ mod tests {
             false,
             false,
             &LevelOpts::default(),
-            &unattended(true, true),
+            &unattended(true, false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4162,7 +4243,7 @@ mod tests {
             false,
             false,
             &LevelOpts::default(),
-            &unattended(false, true),
+            &unattended(false, false),
             &mut closed,
         ) else {
             panic!("the removal was to stop");
@@ -4212,7 +4293,7 @@ mod tests {
             &batch,
             &How::default(),
             &levels,
-            &unattended(true, false),
+            &unattended(true, true),
         )
         .unwrap();
         uninstall_package(
@@ -4220,7 +4301,7 @@ mod tests {
             &notes_and_paint()[0],
             false,
             &levels,
-            &unattended(true, false),
+            &unattended(true, true),
         )
         .unwrap();
         assert!(store.removed.borrow().is_empty());
@@ -4251,7 +4332,7 @@ mod tests {
                 ..How::default()
             },
             &LevelOpts::default(),
-            &unattended(false, false),
+            &unattended(false, true),
         )
         .unwrap_err();
         assert_eq!(
@@ -4266,7 +4347,7 @@ mod tests {
         let mut store = FakePackageStore::new(notes_and_paint());
         store.fail_with = Some("0x80073CFA, removal failed".to_string());
         let env = fake_env(&store, None);
-        let g = unattended(false, false);
+        let g = unattended(false, true);
         let levels = LevelOpts::default();
         let notes = package("Vendor.Notes", "Notes");
 
@@ -4300,7 +4381,7 @@ mod tests {
         let mut store = FakePackageStore::new(notes_and_paint());
         store.keeps_registered = true;
         let env = fake_env(&store, None);
-        let g = unattended(false, false);
+        let g = unattended(false, true);
         let notes = package("Vendor.Notes", "Notes");
         let run = run_package(
             &env,
@@ -4340,7 +4421,7 @@ mod tests {
             false,
             true,
             &LevelOpts::default(),
-            &unattended(false, false),
+            &unattended(false, true),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4375,7 +4456,7 @@ mod tests {
             false,
             false,
             &LevelOpts::default(),
-            &unattended(false, true),
+            &unattended(false, false),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4399,7 +4480,7 @@ mod tests {
             false,
             true,
             &LevelOpts::default(),
-            &unattended(false, false),
+            &unattended(false, true),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4451,7 +4532,7 @@ mod tests {
             true,
             true,
             &LevelOpts::default(),
-            &unattended(false, false),
+            &unattended(false, true),
             &mut Vec::new(),
         )
         .unwrap();
@@ -4635,6 +4716,7 @@ mod tests {
         };
         let outcome = safety::remove_leftovers(&selected, "Example Player", &ctx).unwrap();
         assert_eq!(outcome.items.len(), selected.len());
+        assert!(!outcome.permanent, "a backup was asked for");
         assert!(outcome.backup_name.is_none());
         for (item, leftover) in outcome.items.iter().zip(&selected) {
             assert_eq!(item.path, leftover.path);
@@ -4744,7 +4826,7 @@ mod tests {
             })
             .collect();
         let mut tried = Vec::new();
-        let err = clear_backups(&all, &unattended(false, false), |b| {
+        let err = clear_backups(&all, &unattended(false, true), |b| {
             tried.push(b.name.clone());
             if b.name == "two" {
                 bail!("in use");

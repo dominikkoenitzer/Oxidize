@@ -102,6 +102,7 @@ Enum values, exactly as printed:
   "already_gone": 0,
   "failed": 0,
   "backup": "2026-01-01 120000 Example Player",
+  "permanent": false,
   "items": [
     { "path": "...", "status": "removed", "error": null }
   ]
@@ -109,7 +110,8 @@ Enum values, exactly as printed:
 ```
 
 - `status` is `"removed"`, `"removed_after_restart"` for a service Windows only marked for deletion, `"gone"`, `"failed"`, or `"would_remove"` in a dry run; `error` is set when it failed. `removed` counts both kinds of removal.
-- `backup` is the backup name for `oxidize restore`, or null with `--no-backup`.
+- `backup` is the backup name for `oxidize restore`, or null without `--backup`.
+- `permanent` is true when no backup was kept, so nothing can be restored.
 - In a dry run, `items` lists every item that would go, `attempted` and `already_gone` both hold their number, `removed` and `failed` are 0 and `backup` is null.
 - Declined, which is every run with `--json` and without `-y`: all counts 0, `backup` null, `items` empty, exit code 5.
 - `null` when nothing reached the confidence level.
@@ -202,11 +204,11 @@ With `--uninstall`: the one-program `uninstall` object. No match is an error wit
 Without `--yes`, or with `--dry-run`:
 
 ```
-{ "analysis": { "findings": [Finding], "elevated": bool, "recycle_bin_days": number, "protected": [string] },
+{ "backup": bool, "analysis": { "findings": [Finding], "elevated": bool, "recycle_bin_days": number, "protected": [string] },
   "chosen": [category], "chosen_folders": [path], "chosen_outright": [path], "chosen_bytes": number }
 ```
 
-`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`, `"build-output"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin", "proven_dead" }`, `"dumps"` for `crash-dumps`: each `{ "path", "bytes", "files", "program" }`, with `program` null where the name does not say it, and `"build_folders"` for `build-output`: each `{ "path", "bytes", "unchanged_days", "checkout" }`, with `checkout` the git checkout it lies in or null. Each of the three is left out when empty. `"skipped": true` marks a category that was not looked into as it was not asked for: `build-output` without `--build-output`; such a finding is empty, and `skipped` is left out otherwise. `proven_dead` is true only with `--delete-dead`. `chosen_outright` holds the chosen folders that go without a backup, filled only with `--delete-dead`. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"repository"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"pinned"`, `"left_out"`, `"uncommitted"`, `"checkout_unknown"`, `"failed"`.
+`category` is one of `"temp"`, `"crash-dumps"`, `"recycle-bin"`, `"browser-cache"`, `"component-store"`, `"delivery-optimization"`, `"windows-old"`, `"orphans"`, `"build-output"`. A Finding is `{ "category", "bytes", "count", "size_known", "kept": [Kept], "notes": [string], "needs_admin", "preselected" }`, plus `"folders"` for `orphans`: each `{ "path", "bytes", "modified", "confidence", "reason", "needs_admin", "proven_dead" }`, `"dumps"` for `crash-dumps`: each `{ "path", "bytes", "files", "program" }`, with `program` null where the name does not say it, and `"build_folders"` for `build-output`: each `{ "path", "bytes", "unchanged_days", "checkout" }`, with `checkout` the git checkout it lies in or null. Each of the three is left out when empty. `"skipped": true` marks a category that was not looked into as it was not asked for: `build-output` without `--build-output`; such a finding is empty, and `skipped` is left out otherwise. `proven_dead` is true only with `--delete-dead`. `chosen_outright` holds the chosen folders that go without a backup, filled only with `--delete-dead`. `backup` is true with `--backup`; when false, every chosen folder of a removed program is deleted for good. `size_known` is false for the component store, whose cleanup only DISM can size. A Kept is `{ "code", "reason", "count", "bytes" }`, with `code` one of `"recent"`, `"recently_deleted"`, `"in_use"`, `"protected"`, `"repository"`, `"access_denied"`, `"unreadable"`, `"needs_admin"`, `"running"`, `"pinned"`, `"left_out"`, `"uncommitted"`, `"checkout_unknown"`, `"failed"`.
 
 With `--yes`:
 
@@ -214,7 +216,7 @@ With `--yes`:
 { "cleaned": [ { "category", "freed", "removed", "kept": [Kept], "backup", "notes" } ], "freed": number }
 ```
 
-`backup` is the backup the folders of removed programs went into, or null. A category with a `failed` entry in `kept` makes the exit code 4.
+`backup` is the backup the folders of removed programs went into, or null; it is always null without `--backup`. A category with a `failed` entry in `kept` makes the exit code 4.
 
 ## restore
 

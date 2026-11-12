@@ -6,8 +6,9 @@
 //! from the files themselves and says for each what would stay and why. The
 //! cleaning then works from that analysis, for the categories the user
 //! chose, and checks every file again right before it goes. Folders the user
-//! protected are never entered. Folders of removed programs go into a backup
-//! like any other leftover, so they can be put back.
+//! protected are never entered. Folders of removed programs are deleted for
+//! good, or with backups on go into a backup like any other leftover, so
+//! they can be put back.
 
 pub mod browsers;
 pub mod build;
@@ -130,16 +131,17 @@ impl Category {
             Category::WindowsOld => {
                 "the Windows from before the last upgrade; once it is gone there is no going back to it"
             }
-            Category::Orphans => "folders no installed program claims, moved into a backup",
+            Category::Orphans => "folders no installed program claims",
             Category::BuildOutput => {
                 "folders build and package tools mark as their cache, unchanged for 30 days and not in use; never in a git checkout with uncommitted work"
             }
         }
     }
 
-    /// Whether what it removes can be put back from a backup.
-    pub fn backed_up(self) -> bool {
-        self == Category::Orphans
+    /// Whether what it removes can be put back from a backup, with backups
+    /// on or off.
+    pub fn backed_up(self, make_backups: bool) -> bool {
+        make_backups && self == Category::Orphans
     }
 }
 
@@ -516,8 +518,8 @@ impl Analysis {
     }
 
     /// Have the chosen orphan folders that the analysis proved dead deleted
-    /// outright, so their space comes back at once. The others still go
-    /// into a backup.
+    /// outright, so their space comes back at once. With backups on, the
+    /// others still go into a backup.
     pub fn delete_dead(&self, choice: &mut Choice) {
         choice.outright = self
             .finding(Category::Orphans)
@@ -1307,7 +1309,7 @@ pub struct CleanOptions<'a> {
     pub protected: &'a Protected,
     pub now: SystemTime,
     pub elevated: bool,
-    /// False with `--no-backup`: removed folders are deleted for good.
+    /// True with `--backup`; otherwise removed folders are deleted for good.
     pub make_backups: bool,
     pub tools: &'a dyn Tools,
     pub system_drive: Option<PathBuf>,
@@ -1480,6 +1482,10 @@ fn clean_folders(f: &Finding, choice: &Choice, c: &mut Cleaned, opts: &CleanOpti
         c.notes.push(
             "moved into the backup; the space comes back once the backup is deleted".to_string(),
         );
+    }
+    if moved > 0 && !opts.make_backups {
+        c.notes
+            .push("deleted for good, backups are off".to_string());
     }
     if revived > 0 && opts.make_backups {
         c.notes.push(format!(

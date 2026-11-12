@@ -16,11 +16,13 @@ AppData and ProgramData, settings in the user's folder, services, scheduled
 tasks, firewall rules, PATH entries that point nowhere. Oxidize closes whatever still runs from the
 program's folders, runs its uninstaller when one is needed, then finds those
 leftovers and removes them. A second scan ends the run with `Nothing left.` or
-a list of what is still there and why. Everything removed is backed up first
-and can be put back with one command.
+a list of what is still there and why. A removal is permanent unless you ask
+for a backup: with `--backup`, or Back up before deleting turned on in the
+window, everything removed is backed up first and can be put back with one
+command.
 
-In the window, select a program and click Remove completely; Undo puts back
-what was removed. From a terminal it is one command:
+In the window, select a program and click Remove completely; with a backup,
+Undo puts back what was removed. From a terminal it is one command:
 
 ```
 oxidize uninstall "Example Player" --yes
@@ -105,14 +107,15 @@ cmdlet; both need administrator rights. A previous Windows installation
 through Disk Cleanup: after that there is no going back to the Windows you
 upgraded from. Folders of removed programs are the folders no installed
 program claims, scored against the programs Oxidize and Windows Installer
-removed: only high-confidence ones are chosen by default, and they go into a
-backup like any other leftover, so `oxidize restore` puts them back. A backup
+removed: only high-confidence ones are chosen by default. With `--backup` they
+go into a backup like any other leftover, so `oxidize restore` puts them back;
+without it they are deleted for good. A backup
 on the same drive frees nothing until it is deleted, so `--delete-dead`
 deletes the chosen folders that are proven dead outright: no file in them
 changed for 30 days or held open, nothing running from them, no git
 repository in or above them and no cloud placeholder in them. Each is
 checked again right before it goes and goes whole or not at all, and one
-that came alive goes into the backup instead. Without `--delete-dead` no
+that came alive goes into the backup instead, when there is one. Without `--delete-dead` no
 folder is proven dead, so none of their files are opened. Stale build output is
 only ever looked for and cleaned when you name it: folders a build or package tool marked
 as its cache with a `CACHEDIR.TAG` file, beside a project file such as
@@ -146,8 +149,8 @@ not wipe free space.
 `oxidize mcp` runs an MCP (Model Context Protocol) server for an assistant on
 your PC. It talks to the assistant over stdin and stdout, nothing else, and
 runs only while the assistant has it open. It takes no `--dry-run`, `--yes` or
-`--no-backup`: the assistant previews with `plan_removal`, and every plan it
-applies is backed up. Add it to the assistant's MCP settings with the full
+`--backup`: the assistant previews with `plan_removal`, and a plan keeps a
+backup only when it is made with one. Add it to the assistant's MCP settings with the full
 path to `oxidize.exe`:
 
 ```json
@@ -165,17 +168,19 @@ path to `oxidize.exe`:
 only read. To remove a program the assistant first calls `plan_removal`, which
 changes nothing either: it returns the uninstaller and whether it runs at all,
 every leftover that would go with its path, size, confidence and reason,
-whether administrator rights are needed, and where the backup goes.
+whether administrator rights are needed, and whether a backup is kept.
 `apply_removal_plan` carries out a plan made in the same session, exactly as
 shown and only once, after closing copies of the program still running from
 its folders. Your assistant asks you before it calls a tool, unless you told it
 to stop asking for this one, so nothing is removed until you agree to that
 step.
 
-Every removed item is backed up the same way as from the command line, and
-there is no way to skip it. The result says what was removed, what was not and
-why, what a fresh scan still finds, and the `oxidize restore` command that puts
-the removed items back. The assistant cannot restore or delete backups, remove
+A plan keeps no backup unless the assistant makes it with `backup` set to
+true; then every removed item is backed up the same way as from the command
+line. Without one the plan says its removal is permanent, so the assistant can
+tell you before you agree. The result says what was removed, what was not and
+why, what a fresh scan still finds, and with a backup the `oxidize restore`
+command that puts the removed items back. The assistant cannot restore or delete backups, remove
 anything that was not in a plan, or start Oxidize as administrator. Items that
 need administrator rights are reported with the command that removes them as
 administrator, for you to run. Every plan also lists the commands that do the
@@ -188,7 +193,7 @@ stdout then holds exactly one JSON document. See [JSON output](#json-output).
 ## Your data, updates and removal
 
 Oxidize stores nothing but its backups and the list of protected folders in
-`%LOCALAPPDATA%\Oxidize\protected.txt`. Each removal gets a folder
+`%LOCALAPPDATA%\Oxidize\protected.txt`. Each removal made with a backup gets a folder
 `%LOCALAPPDATA%\Oxidize\backups\<date and time> <program>\`. Registry keys are
 exported to `.reg` files and validated before anything is deleted. Files and
 folders are moved there, not deleted. Task definitions are copied. A manifest
@@ -285,8 +290,8 @@ anywhere else is touched. A program installed for your user alone,
 with no service, firewall rule or machine-wide file or key, is then removed by
 Oxidize itself, uninstall entry included, without starting its own
 uninstaller. Any other program runs its uninstaller first, silently where it
-supports that. Every high-confidence leftover goes next, with a backup
-(`--medium` adds the plausible ones), and a second scan ends the run with
+supports that. Every high-confidence leftover goes next, backed up first with
+`--backup` (`--medium` adds the plausible ones), and a second scan ends the run with
 `Nothing left.` or a list of what is still there and why. `--use-uninstaller`
 always runs the program's own uninstaller, `--keep` removes no leftovers, and
 `--dry-run` lists every process it would close and every item it would remove.
@@ -295,7 +300,8 @@ always runs the program's own uninstaller, `--keep` removes no leftovers, and
 programs one after another. Every name has to match exactly one program before
 anything runs; otherwise nothing runs and the unclear names are listed with
 their candidates. The plan is shown once, each program then gets its own
-leftover scan, removal and backup, and a summary follows. If any program
+leftover scan and removal, and its own backup with `--backup`, and a summary
+follows. If any program
 failed, the batch exits with the code of the first one that did.
 
 A program Windows no longer lists is scanned by name alone. Its publisher,
@@ -322,7 +328,10 @@ one flag: `--level high`, `--level medium` or `--level low`.
 | `--json` | machine-readable output |
 | `--no-color` | plain output without colour |
 | `--elevate` | relaunch as administrator |
-| `--no-backup` | delete permanently instead of quarantining |
+| `--backup` | keep a backup of what is removed, so `oxidize restore` can put it back |
+
+Without `--backup` a removal is permanent, and a dry run says so.
+`--no-backup` is still accepted and changes nothing.
 
 `--dry-run` lists every item a removal would take. `--elevate` waits for the
 elevated run and exits with its code. It also prints that run's output for
@@ -353,14 +362,16 @@ needs `-y` as well; without it the answer is no.
 `still_installed`, `remaining` (what the second scan still found, with
 reasons), `below_level` and `kept` (the items below the chosen level, with
 reasons), `closed` (the processes it closed), `uninstaller`,
-`uninstaller_step`, `removal` (with the `backup` name) and `seconds`. A dry
+`uninstaller_step`, `removal` (with the `backup` name, and `permanent`, true
+when no backup was kept) and `seconds`. A dry
 run has `would_close` and `would_remove` instead. With several names a batch
 prints `{"programs": [...], "uninstalled", "failed", "cancelled"}`; a single
 name keeps the single-program shape. `oxidize scan <program> --json` prints
 `program_name`, `installed` and `items`. In `oxidize list --json` every entry
 has a `kind`, `program` or `store`.
 
-`oxidize clean --json` prints `analysis` (each category in `findings` with
+`oxidize clean --json` prints `backup` (whether the folders of removed
+programs would go into one), `analysis` (each category in `findings` with
 `bytes`, `count`, `kept`, `notes`, `needs_admin` and `preselected`, and the
 `folders` of removed programs with their confidence), `chosen`,
 `chosen_folders` and `chosen_bytes`. Each `kept` entry has a `code`
@@ -406,8 +417,8 @@ and its data with it; reinstalling means the Store. That removal cannot be
 backed up. What runs from the app's folder is closed first, as for a program,
 and one that stays, a helper without a window too, stops the removal. A data folder left in
 `%LOCALAPPDATA%\Packages` afterwards is a high-confidence leftover, name
-matches elsewhere are medium at most, and both are backed up like any other
-leftover. A protected app is never removed, and Windows may bring back an app
+matches elsewhere are medium at most, and both go like any other leftover,
+into a backup with `--backup`. A protected app is never removed, and Windows may bring back an app
 it installs for every new account.
 
 ## Build from source
