@@ -368,46 +368,40 @@ fn head(
 ) {
     let analysed = state.has_something();
     let (big, small) = headline(state, busy);
+    // The buttons' width on one line, as the last pass laid them out.
+    let id = ui.scope_id().with("head_buttons");
+    let wanted = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let mut room = f32::INFINITY;
+    let mut width = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new(big).size(24.0).color(t.text));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let tall = egui::vec2(0.0, 34.0);
-            if !analysed {
-                if ui
-                    .add_enabled(!busy, primary_button(t, "Analyse this PC").min_size(tall))
-                    .on_hover_text("Count what each category holds. Changes nothing.")
-                    .clicked()
-                {
-                    *action = Some(Action::Analyse);
-                }
-            } else {
-                match state.view {
-                    View::Files => files_button(ui, t, state, busy, dry_run, action),
-                    View::Slate => slate::button(ui, t, &state.slate, busy, dry_run, action),
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Analyse again").min_size(tall))
-                    .on_hover_text("Count again. Changes nothing.")
-                    .clicked()
-                {
-                    *action = Some(Action::Analyse);
-                }
-            }
-            let protected = state.protected.entries().len();
-            let label = format!("Protected folders  {protected}");
-            if ui
-                .add(
-                    egui::Button::new(RichText::new(label).color(t.weak))
-                        .frame(false)
-                        .selected(state.show_protected),
-                )
-                .on_hover_text("Folders and files Clean up never touches")
-                .clicked()
-            {
-                state.show_protected = !state.show_protected;
-            }
-        });
+        room = ui.available_width();
+        if wanted <= room {
+            let row = egui::Layout::right_to_left(egui::Align::Center);
+            width = Some(
+                ui.with_layout(row, |ui| {
+                    buttons(ui, t, state, busy, dry_run, analysed, action)
+                })
+                .inner,
+            );
+        }
     });
+    // Too wide beside the headline: the buttons take their own lines under it.
+    let width = width.unwrap_or_else(|| {
+        let lines = egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true);
+        // One row high to start with, so the first row does not centre on the whole panel.
+        let row = egui::vec2(ui.available_width(), 34.0);
+        ui.allocate_ui_with_layout(row, lines, |ui| {
+            buttons(ui, t, state, busy, dry_run, analysed, action)
+        })
+        .inner
+    });
+    if width != wanted {
+        ui.data_mut(|d| d.insert_temp(id, width));
+        if (width <= room) != (wanted <= room) {
+            ui.ctx().request_discard("the head buttons moved");
+        }
+    }
     ui.add(egui::Label::new(RichText::new(small).color(t.weak)).wrap());
     if analysed {
         ui.add_space(14.0);
@@ -424,6 +418,57 @@ fn head(
     }
     ui.add_space(4.0);
     ui.separator();
+}
+
+/// The head's buttons, right to left, and how wide they are on one line.
+fn buttons(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    busy: bool,
+    dry_run: bool,
+    analysed: bool,
+    action: &mut Option<Action>,
+) -> f32 {
+    let tall = egui::vec2(0.0, 34.0);
+    let mut widths = Vec::new();
+    if !analysed {
+        let analyse = ui
+            .add_enabled(!busy, primary_button(t, "Analyse this PC").min_size(tall))
+            .on_hover_text("Count what each category holds. Changes nothing.");
+        if analyse.clicked() {
+            *action = Some(Action::Analyse);
+        }
+        widths.push(analyse.rect.width());
+    } else {
+        let main = match state.view {
+            View::Files => files_button(ui, t, state, busy, dry_run, action),
+            View::Slate => slate::button(ui, t, &state.slate, busy, dry_run, action),
+        };
+        widths.extend(main.map(|r| r.rect.width()));
+        let again = ui
+            .add_enabled(!busy, egui::Button::new("Analyse again").min_size(tall))
+            .on_hover_text("Count again. Changes nothing.");
+        if again.clicked() {
+            *action = Some(Action::Analyse);
+        }
+        widths.push(again.rect.width());
+    }
+    let protected = state.protected.entries().len();
+    let label = format!("Protected folders  {protected}");
+    let toggle = ui
+        .add(
+            egui::Button::new(RichText::new(label).color(t.weak))
+                .frame(false)
+                .selected(state.show_protected),
+        )
+        .on_hover_text("Folders and files Clean up never touches");
+    if toggle.clicked() {
+        state.show_protected = !state.show_protected;
+    }
+    widths.push(toggle.rect.width());
+    let gaps = widths.len().saturating_sub(1) as f32 * ui.spacing().item_spacing.x;
+    widths.iter().sum::<f32>() + gaps
 }
 
 /// The two lines at the top left: a figure, and what it is.
@@ -478,10 +523,8 @@ fn files_button(
     busy: bool,
     dry_run: bool,
     action: &mut Option<Action>,
-) {
-    let Some((_, analysis)) = &state.analysis else {
-        return;
-    };
+) -> Option<egui::Response> {
+    let (_, analysis) = state.analysis.as_ref()?;
     let choice = state.choice_in(analysis);
     let bytes = util::human_size(analysis.chosen_bytes(&choice));
     let n = choice.categories.len();
@@ -490,15 +533,14 @@ fn files_button(
         (_, true) => format!("Preview cleaning {bytes}"),
         (_, false) => format!("Clean {bytes}"),
     };
-    if ui
-        .add_enabled(
-            !busy && n > 0,
-            primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
-        )
-        .clicked()
-    {
+    let response = ui.add_enabled(
+        !busy && n > 0,
+        primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
+    );
+    if response.clicked() {
         *action = Some(Action::Clean(choice));
     }
+    Some(response)
 }
 
 /// The tab's main area: the open view.

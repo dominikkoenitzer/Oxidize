@@ -90,10 +90,8 @@ pub fn button(
     busy: bool,
     dry_run: bool,
     action: &mut Option<Action>,
-) {
-    let Some(found) = slate.found.as_ref().filter(|_| slate.results.is_none()) else {
-        return;
-    };
+) -> Option<egui::Response> {
+    let found = slate.found.as_ref().filter(|_| slate.results.is_none())?;
     let (count, _) = traces::total(found);
     let any = found.iter().any(TraceFinding::actionable);
     let label = if dry_run {
@@ -101,15 +99,14 @@ pub fn button(
     } else {
         format!("Clear {}", items(count))
     };
-    if ui
-        .add_enabled(
-            !busy && any,
-            primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
-        )
-        .clicked()
-    {
+    let response = ui.add_enabled(
+        !busy && any,
+        primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
+    );
+    if response.clicked() {
         *action = Some(Action::ClearTraces);
     }
+    Some(response)
 }
 
 /// The panel beside the list: what clearing does and does not touch.

@@ -5317,6 +5317,144 @@ mod tests {
         assert!(seen.len() > 5, "{}", seen.len());
     }
 
+    /// The text from the top of the text `first` picks down to the bottom of
+    /// the one `last` picks, in the same panel, each with the smallest widget
+    /// under its centre and the clip.
+    fn texts_between(
+        ctx: &egui::Context,
+        shapes: &[egui::epaint::ClippedShape],
+        first: impl Fn(&egui::epaint::TextShape) -> bool,
+        last: impl Fn(&egui::epaint::TextShape) -> bool,
+    ) -> Vec<(String, egui::Rect, egui::Rect)> {
+        let texts: Vec<(egui::Rect, &egui::epaint::TextShape)> = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(text) => Some((c.clip_rect, text)),
+                _ => None,
+            })
+            .collect();
+        let find = |pick: &dyn Fn(&egui::epaint::TextShape) -> bool| {
+            texts
+                .iter()
+                .find(|(_, text)| pick(text))
+                .map(|(clip, text)| (*clip, text.visual_bounding_rect()))
+                .unwrap_or_else(|| {
+                    let drawn: Vec<&str> = texts.iter().map(|(_, t)| t.galley.text()).collect();
+                    panic!("not among the drawn text: {drawn:?}")
+                })
+        };
+        let (clip, top) = find(&first);
+        let (_, bottom) = find(&last);
+        let widgets: Vec<egui::Rect> = ctx.viewport(|v| {
+            v.prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, w)| w.iter().map(|w| w.rect))
+                .collect()
+        });
+        texts
+            .iter()
+            .filter(|(c, text)| {
+                let y = text.visual_bounding_rect().center().y;
+                *c == clip && (top.top()..=bottom.bottom()).contains(&y)
+            })
+            .map(|(_, text)| {
+                let own = text.visual_bounding_rect();
+                let rect = widgets
+                    .iter()
+                    .filter(|w| w.contains(own.center()))
+                    .min_by(|a, b| a.area().total_cmp(&b.area()))
+                    .copied()
+                    .unwrap_or(own);
+                (text.galley.text().to_string(), rect, clip)
+            })
+            .fold(Vec::new(), |mut line, item| {
+                // A widget may draw its text twice in one place.
+                if !line.contains(&item) {
+                    line.push(item);
+                }
+                line
+            })
+    }
+
+    #[test]
+    fn the_toolbar_and_the_clean_up_head_overlap_at_no_window_width() {
+        use eframe::App as _;
+        let mut faults = Vec::new();
+        for dry_run in [false, true] {
+            for (tab, analysed, view) in [
+                (Tab::Programs, false, cleanup::View::Files),
+                (Tab::Cleanup, false, cleanup::View::Files),
+                (Tab::Cleanup, true, cleanup::View::Files),
+                (Tab::Cleanup, true, cleanup::View::Slate),
+            ] {
+                let ctx = egui::Context::default();
+                apply_style(&ctx);
+                let mut app = app();
+                app.dry_run = dry_run;
+                app.tab = tab;
+                if analysed {
+                    app.cleanup
+                        .take_analysis(clean::Places::default(), cleanup::tests::analysis());
+                    app.cleanup.slate.found = Some(Vec::new());
+                    app.cleanup.view = view;
+                }
+                let mut frame = eframe::Frame::_new_kittest();
+                // One window made narrower and wider again, one frame per size.
+                for size in [
+                    egui::vec2(1180.0, 760.0),
+                    egui::vec2(900.0, 600.0),
+                    egui::vec2(800.0, 600.0),
+                    egui::vec2(720.0, 480.0),
+                    egui::vec2(900.0, 600.0),
+                    egui::vec2(1180.0, 760.0),
+                ] {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    };
+                    let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                    out.textures_delta.clear();
+                    let name = |t: &egui::epaint::TextShape| t.galley.text() == "Oxidize";
+                    let mut lines = vec![texts_between(&ctx, &out.shapes, name, name)];
+                    if tab == Tab::Cleanup {
+                        // The head: the headline, its buttons, the line under
+                        // it and, once analysed, the switch between the views.
+                        lines.push(texts_between(
+                            &ctx,
+                            &out.shapes,
+                            |t| t.galley.job.sections[0].format.font_id.size == 24.0,
+                            |t| {
+                                if analysed {
+                                    t.galley.text() == "Clean slate"
+                                } else {
+                                    t.galley.text().starts_with("Counts what")
+                                }
+                            },
+                        ));
+                    }
+                    let case = format!("{}x{} dry run {dry_run} {tab:?} {view:?}", size.x, size.y);
+                    for line in lines {
+                        for (i, (a, ra, clip)) in line.iter().enumerate() {
+                            if !clip.expand(0.5).contains_rect(*ra) {
+                                faults.push(format!("{case}: {a:?} at {ra:?} leaves {clip:?}"));
+                            }
+                            for (b, rb, _) in &line[i + 1..] {
+                                let both = ra.intersect(*rb);
+                                if both.width() > 0.5 && both.height() > 0.5 {
+                                    faults.push(format!(
+                                        "{case}: {a:?} at {ra:?} and {b:?} at {rb:?}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(faults.is_empty(), "{}", faults.join("\n"));
+    }
+
     #[test]
     fn a_focused_row_that_leaves_the_list_leaves_no_ring_behind() {
         use eframe::App as _;
