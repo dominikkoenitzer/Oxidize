@@ -4915,6 +4915,40 @@ mod tests {
     }
 
     #[test]
+    fn a_program_installed_alone_keeps_its_key_with_part_of_its_name() {
+        let t = name_target("Lumen Studio", Some("Brightway LLC"));
+        assert!(key_names_product("Lumen", &t).is_some());
+    }
+
+    #[test]
+    fn a_vendor_key_holding_only_the_programs_shorter_key_goes_whole() {
+        let root = TestKey(format!(
+            r"Software\OxidizeShortVendor{}",
+            std::process::id()
+        ));
+        let vendor = format!(r"{}\Brightway", root.0);
+        set_test_value(&format!(r"{vendor}\Lumen"), "Theme", "dark");
+        let t = name_target("Lumen Studio", Some("Brightway LLC"));
+        let mut out = Vec::new();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        let got: Vec<(String, Confidence)> = out
+            .iter()
+            .map(|l| (l.subpath.clone().unwrap_or_default(), l.confidence))
+            .collect();
+        assert_eq!(got, vec![(vendor.clone(), Confidence::High)]);
+    }
+
+    #[test]
+    fn a_top_level_key_with_part_of_the_programs_name_is_listed() {
+        let root = TestKey(format!(r"Software\OxidizeShortTop{}", std::process::id()));
+        set_test_value(&format!(r"{}\Lumen", root.0), "Theme", "dark");
+        let t = name_target("Lumen Studio", Some("Brightway LLC"));
+        let mut out = Vec::new();
+        scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+        assert_eq!(subpaths(&out), vec![format!(r"{}\Lumen", root.0)]);
+    }
+
+    #[test]
     fn the_user_folder_counts_the_exact_name_and_nothing_else() {
         let t = name_target("Quillmark", None);
         let home = crate::backup::TestDir::new("oxidize_user_folder_test");
