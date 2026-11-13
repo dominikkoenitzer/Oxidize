@@ -849,14 +849,22 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
 // Processes
 // ---------
 
-/// Executable paths of all running processes.
-pub fn running_exes() -> Vec<PathBuf> {
-    let mut sys = System::new();
+/// Running processes with their image paths, or `None` when no list can be read.
+pub(crate) fn process_table() -> Option<System> {
+    let mut sys = System::new().ok()?;
     sys.refresh_processes_specifics(
         ProcessesToUpdate::All,
         true,
         ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
     );
+    Some(sys)
+}
+
+/// Executable paths of all running processes.
+pub fn running_exes() -> Vec<PathBuf> {
+    let Some(sys) = process_table() else {
+        return Vec::new();
+    };
     let mut out: Vec<PathBuf> = sys
         .processes()
         .values()
@@ -871,12 +879,9 @@ pub fn running_exes() -> Vec<PathBuf> {
 /// This process and the ones that started it are never listed: ending the
 /// terminal or the run that waits for an elevated one would lose the result.
 pub fn running_processes() -> Vec<crate::complete::Running> {
-    let mut sys = System::new();
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
-    );
+    let Some(sys) = process_table() else {
+        return Vec::new();
+    };
     let parents: std::collections::HashMap<u32, u32> = sys
         .processes()
         .iter()
@@ -1703,6 +1708,42 @@ mod tests {
             Path::new(r"C:\Apps\Example\player.exe"),
             Path::new(r"c:\apps\EXAMPLE\Player.exe")
         ));
+    }
+
+    #[test]
+    fn running_processes_are_listed_with_their_image() {
+        let me = std::env::current_exe().unwrap();
+        assert!(
+            running_exes().iter().any(|exe| same_image(exe, &me)),
+            "{} is not listed",
+            me.display()
+        );
+        assert!(running_processes()
+            .iter()
+            .all(|p| p.pid != std::process::id()));
+    }
+
+    /// Runs on CI only, since it starts a process.
+    #[cfg(windows)]
+    #[test]
+    fn a_started_process_is_listed_with_its_pid_and_image() {
+        use std::os::windows::process::CommandExt;
+        if std::env::var_os("CI").is_none() {
+            return;
+        }
+        let exe = PathBuf::from(system32("PING.EXE"));
+        let mut child = std::process::Command::new(&exe)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let listed = running_processes();
+        let _ = child.kill();
+        let _ = child.wait();
+        let found = listed.iter().find(|p| p.pid == pid);
+        assert!(found.is_some_and(|p| same_image(&p.exe, &exe)), "{found:?}");
     }
 
     #[test]
