@@ -7,8 +7,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
-
 use crate::model::Program;
 use crate::util::{self, normalize, significant_tokens};
 
@@ -72,13 +70,9 @@ fn find_process_exes(query: &str) -> Vec<PathBuf> {
         format!("{q}.exe")
     };
 
-    let mut sys = System::new();
-    // Refresh only the executable paths (the only thing we need).
-    sys.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::nothing().with_exe(UpdateKind::Always),
-    );
+    let Some(sys) = crate::system::process_table() else {
+        return Vec::new();
+    };
 
     let mut out = Vec::new();
     for process in sys.processes().values() {
@@ -362,6 +356,22 @@ mod tests {
         let matches = hunt(r"C:\PROGRAM FILES\Example Vendor\Launcher.exe", &programs);
         assert_eq!(matches[0].program.display_name, "Example Vendor App");
         assert!(matches[0].reason.contains("DisplayIcon"));
+    }
+
+    #[test]
+    fn a_running_process_is_found_by_its_name() {
+        let me = std::env::current_exe().unwrap();
+        let stem = me.file_stem().unwrap().to_string_lossy().into_owned();
+        for query in [stem.clone(), format!("{stem}.exe"), stem.to_uppercase()] {
+            let found = find_process_exes(&query);
+            assert!(
+                found
+                    .iter()
+                    .any(|exe| exe.as_os_str().eq_ignore_ascii_case(me.as_os_str())),
+                "{query}: {found:?}"
+            );
+        }
+        assert!(find_process_exes("no-such-process-at-all").is_empty());
     }
 
     #[test]
