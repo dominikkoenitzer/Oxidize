@@ -379,6 +379,7 @@ fn build_target_from(
     target.exe_names = own_exe_names(program, install_location.as_deref(), other_installs);
     target.install_location = install_location;
     target.vendor_is_shared = vendor_is_shared(&target, snap);
+    target.shorter_namesakes = shorter_namesakes(&target, snap.programs());
 
     let roots = install_roots();
     target.brand = derive_brand(program, target.install_location.as_deref(), &roots);
@@ -751,6 +752,41 @@ fn name_in_use(target: &ScanTarget, programs: &[Program]) -> bool {
         })
 }
 
+/// The names of the other registered programs whose words, their vendor's
+/// left out, are some but not all of the program's: "Lumen" beside "Lumen
+/// Beta". Each comes sorted and without repeats.
+fn shorter_namesakes(target: &ScanTarget, programs: &[Program]) -> Vec<Vec<String>> {
+    let own = sorted_words(&target.name_tokens);
+    let mut found: Vec<Vec<String>> = programs
+        .iter()
+        .filter(|p| {
+            target
+                .registry
+                .as_ref()
+                .is_none_or(|(key, source)| !(p.registry_key == *key && p.source == *source))
+        })
+        .map(|p| {
+            let vendor = p
+                .publisher
+                .as_deref()
+                .map(significant_tokens)
+                .unwrap_or_default();
+            sorted_words(&product_tokens(&p.display_name, &vendor))
+        })
+        .filter(|w| !w.is_empty() && w.len() < own.len() && w.iter().all(|t| own.contains(t)))
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+fn sorted_words(words: &[String]) -> Vec<String> {
+    let mut w = words.to_vec();
+    w.sort();
+    w.dedup();
+    w
+}
+
 /// Is the recorded install folder shared rather than the program's own?
 /// Intel's Bluetooth driver records `Program Files (x86)\Intel`, which holds
 /// the Driver & Support Assistant and its two services. A folder is shared
@@ -963,17 +999,21 @@ pub fn name_only_target_with(name: &str, publisher: Option<&str>, snap: &Snapsho
     if publisher.is_some() {
         let mut target = name_target(name, publisher);
         target.vendor_is_shared = vendor_is_shared(&target, snap);
+        target.shorter_namesakes = shorter_namesakes(&target, snap.programs());
         return target;
     }
     let tokens = significant_tokens(name);
-    if tokens.len() >= 2 {
+    let mut target = if tokens.len() >= 2 {
         let vendor = name
             .split(|c: char| !c.is_alphanumeric())
             .find(|w| w.to_lowercase() == tokens[0])
             .unwrap_or(&tokens[0]);
-        return name_target(name, Some(vendor));
-    }
-    name_target(name, None)
+        name_target(name, Some(vendor))
+    } else {
+        name_target(name, None)
+    };
+    target.shorter_namesakes = shorter_namesakes(&target, snap.programs());
+    target
 }
 
 /// Identity from a display name and publisher.
@@ -996,6 +1036,7 @@ pub fn name_target(name: &str, publisher: Option<&str>) -> ScanTarget {
         brand_alone: false,
         install_vouched: false,
         vendor_dir: None,
+        shorter_namesakes: Vec::new(),
     };
     // "Python Launcher" by the Python Software Foundation boils down to
     // "python", the vendor's word, which every product of theirs carries; the
@@ -2295,25 +2336,21 @@ fn scan_software_root(
 /// and nothing else, give or take the noise, or a name the folders of its
 /// install path carry. A longer name made of it and other words, such as a
 /// test build's, is another product's. So is a shorter name made of some of
-/// its words: a Beta's scan leaves the stable build's "Lumen" alone.
+/// its words while another installed program carries exactly those words: a
+/// Beta's scan leaves the stable build's "Lumen" alone.
 fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
     let hit = score_product(name, target)?;
     if is_exact_product(name, target) {
         return Some(hit);
     }
-    let words: Vec<String> = significant_tokens(name)
-        .into_iter()
-        .filter(|w| !target.publisher_tokens.contains(w))
-        .collect();
-    let mut product = target.name_tokens.clone();
-    product.sort();
-    product.dedup();
-    if product.len() >= 2
-        && !words.is_empty()
-        && words.len() < product.len()
-        && words.iter().all(|w| product.contains(w))
-    {
-        return None;
+    if !target.shorter_namesakes.is_empty() {
+        let words: Vec<String> = significant_tokens(name)
+            .into_iter()
+            .filter(|w| !target.publisher_tokens.contains(w))
+            .collect();
+        if target.shorter_namesakes.contains(&sorted_words(&words)) {
+            return None;
+        }
     }
     let own = own_name_words(target);
     significant_tokens(name)
@@ -4899,6 +4936,13 @@ mod tests {
         let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
         t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
         let stable = program_files().join(r"Brightway\Lumen\Application");
+        let programs = [
+            listed("Lumen Beta", "lumen-beta", Some("Brightway LLC")),
+            listed("Lumen", "lumen", Some("Brightway LLC")),
+            listed("Quillmark", "quillmark", None),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+        assert_eq!(t.shorter_namesakes, vec![vec!["lumen".to_string()]]);
 
         let mut out = Vec::new();
         scan_dir_children(&root, &t, &[stable], false, &fs_roots(), &mut out);
@@ -4912,6 +4956,24 @@ mod tests {
         assert!(key_names_product("Lumen", &t).is_none());
         assert!(key_names_product("Brightway Lumen", &t).is_none());
         assert!(key_names_product("Lumen Beta", &t).is_some());
+    }
+
+    #[test]
+    fn a_target_learns_the_installed_programs_named_with_part_of_its_name() {
+        let beta = listed("Lumen Beta", "lumen-beta", Some("Brightway LLC"));
+        let snap = Snapshot::with_programs(vec![
+            beta.clone(),
+            listed("Lumen", "lumen", Some("Brightway LLC")),
+            listed("Lumen Beta", "lumen-beta-user", Some("Brightway LLC")),
+        ]);
+        let lumen = vec![vec!["lumen".to_string()]];
+        assert_eq!(build_target_with(&beta, &snap).shorter_namesakes, lumen);
+        let by_name = name_only_target_with("Lumen Beta", Some("Brightway LLC"), &snap);
+        assert_eq!(by_name.shorter_namesakes, lumen);
+        let alone = Snapshot::with_programs(vec![beta.clone()]);
+        assert!(build_target_with(&beta, &alone)
+            .shorter_namesakes
+            .is_empty());
     }
 
     #[test]
