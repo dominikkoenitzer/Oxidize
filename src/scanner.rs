@@ -4869,6 +4869,37 @@ mod tests {
     }
 
     #[test]
+    fn a_channel_build_leaves_the_stable_builds_folder_in_the_vendor_folder() {
+        // The Beta is scanned. The stable build is installed elsewhere, so
+        // its profile here holds no install, and its name is only part of
+        // the Beta's.
+        let root = crate::backup::TestDir::new("oxidize_mirror_folder_test");
+        for dir in [
+            r"Brightway\Lumen\User Data",
+            r"Brightway\Brightway Lumen\User Data",
+            r"Brightway\Lumen Beta\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        let stable = program_files().join(r"Brightway\Lumen\Application");
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[stable], false, &fs_roots(), &mut out);
+        let found: Vec<&str> = out.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            found,
+            [root.join(r"Brightway\Lumen Beta").display().to_string()]
+        );
+
+        // The vendor key's children are judged by the same rule.
+        assert!(key_names_product("Lumen", &t).is_none());
+        assert!(key_names_product("Brightway Lumen", &t).is_none());
+        assert!(key_names_product("Lumen Beta", &t).is_some());
+    }
+
+    #[test]
     fn the_user_folder_counts_the_exact_name_and_nothing_else() {
         let t = name_target("Quillmark", None);
         let home = crate::backup::TestDir::new("oxidize_user_folder_test");
