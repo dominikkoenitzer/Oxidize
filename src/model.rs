@@ -525,6 +525,10 @@ pub struct ScanTarget {
     /// The vendor's folder the install folder sits in, when nothing else
     /// installed is in it and nothing else of the vendor's is installed.
     pub vendor_dir: Option<PathBuf>,
+    /// The names of other installed programs made of only some of this
+    /// program's words, sorted: the stable build's when this is its Beta. A
+    /// folder or key named exactly so is theirs.
+    pub shorter_namesakes: Vec<Vec<String>>,
 }
 
 #[cfg(test)]
