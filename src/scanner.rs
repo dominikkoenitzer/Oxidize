@@ -1425,11 +1425,11 @@ const SHARED_TOPS: &[&str] = &["Temp", "Packages", "Common Files", "WindowsApps"
 
 /// Is `p` in another program's folder? It is when its folder right below an
 /// install root is there and is neither the program's nor its vendor's, and
-/// no folder on the way down has the program's exact name, as a game's folder
-/// in a store's library has. What is in there is that program's, whatever
-/// the file is called, there or gone. `p` itself counts only once it is gone,
-/// as a folder of that name in Windows' records is: a file or folder there
-/// that is named like the program is still theirs.
+/// no gone folder on the way down, `p` included, has the program's exact
+/// name, as a game's gone folder in a store's library has. What was in there
+/// was that program's, whatever the file is called. A folder or file of that
+/// name that is there can be another program's own, so it and what is in it
+/// stay theirs; the install record finds the program's own folder.
 fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
     if owned_folders(target)
         .into_iter()
@@ -1445,11 +1445,16 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
         .iter()
         .take_while(|s| SHARED_TOPS.iter().any(|t| t.eq_ignore_ascii_case(s)))
         .count();
-    let Some((leaf, folders)) = segments[shared..].split_last() else {
+    let Some((_, folders)) = segments[shared..].split_last() else {
         return false;
     };
     let Some(top) = folders.first() else {
         return false;
+    };
+    let down_to = |n: usize| {
+        segments[..n]
+            .iter()
+            .fold(root.clone(), |dir, s| dir.join(s))
     };
     let ours = score_product(top, target).is_some()
         || matches_publisher(top, target)
@@ -1458,13 +1463,12 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
             .brand
             .as_deref()
             .is_some_and(|b| carries_brand(top, b))
-        || folders.iter().any(|f| is_exact_product(f, target))
-        || (is_exact_product(leaf, target) && !p.exists());
-    !ours
-        && segments[..=shared]
+        || segments
             .iter()
-            .fold(root, |dir, s| dir.join(s))
-            .is_dir()
+            .enumerate()
+            .skip(shared)
+            .any(|(i, s)| is_exact_product(s, target) && !down_to(i + 1).exists());
+    !ours && down_to(shared + 1).is_dir()
 }
 
 fn path_names_brand(p: &Path, target: &ScanTarget) -> bool {
@@ -4799,8 +4803,17 @@ mod tests {
         fs::write(&script, "x").unwrap();
         let js = name_target("Lumen.js", Some("Brightway LLC"));
         assert!(!path_names_product(&script, &js));
-        // Once a folder of that name is gone, it is the program's.
-        assert!(path_names_product(&tools.join(r"old\Lumen"), &t));
+        // What is in that folder is theirs too, there or gone.
+        let plugin = folder.join("plugin.dll");
+        fs::write(&plugin, "MZ").unwrap();
+        for p in [plugin, folder.join(r"old\plugin.dll")] {
+            assert!(!path_names_product(&p, &t), "{}", p.display());
+        }
+        // Once a folder of that name is gone, it and what was in it are the
+        // program's, as a game's gone folder in a store's library is.
+        for gone in [r"old\Lumen", r"old\Lumen\plugin.dll"] {
+            assert!(path_names_product(&tools.join(gone), &t), "{gone}");
+        }
     }
 
     #[test]
@@ -4808,13 +4821,16 @@ mod tests {
         let tools = LocalDir::new("OxidizeNamedLikeKeyTest");
         let folder = tools.join("Lumen");
         let script = tools.join(r"lib\lumen.js");
+        let plugin = folder.join("plugin.dll");
         fs::create_dir_all(&folder).unwrap();
+        fs::write(&plugin, "MZ").unwrap();
         fs::create_dir_all(script.parent().unwrap()).unwrap();
         fs::write(&script, "x").unwrap();
 
         let id = std::process::id();
         for (program, value, there) in [
             ("Lumen", "DataDir", &folder),
+            ("Lumen", "Plugin", &plugin),
             ("Lumen.js", "Script", &script),
         ] {
             let root = TestKey(format!(r"Software\OxidizeNamedLikeKeyTest{value}{id}"));
