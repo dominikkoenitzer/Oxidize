@@ -2294,11 +2294,26 @@ fn scan_software_root(
 /// Why a key named `name` is the program's: it carries the program's name
 /// and nothing else, give or take the noise, or a name the folders of its
 /// install path carry. A longer name made of it and other words, such as a
-/// test build's, is another product's.
+/// test build's, is another product's. So is a shorter name made of some of
+/// its words: a Beta's scan leaves the stable build's "Lumen" alone.
 fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
     let hit = score_product(name, target)?;
     if is_exact_product(name, target) {
         return Some(hit);
+    }
+    let words: Vec<String> = significant_tokens(name)
+        .into_iter()
+        .filter(|w| !target.publisher_tokens.contains(w))
+        .collect();
+    let mut product = target.name_tokens.clone();
+    product.sort();
+    product.dedup();
+    if product.len() >= 2
+        && !words.is_empty()
+        && words.len() < product.len()
+        && words.iter().all(|w| product.contains(w))
+    {
+        return None;
     }
     let own = own_name_words(target);
     significant_tokens(name)
