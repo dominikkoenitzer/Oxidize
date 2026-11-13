@@ -51,6 +51,30 @@ jobs:
       - name: Test
         run: cargo test --locked --workspace
 
+      # On the runner TEMP is a short 8.3 path. On most machines it is the long path below
+      # %LOCALAPPDATA%, and some move it to a folder of its own on the drive, so the tests run
+      # with both of those as well. Not into the profile: the temp clean refuses a folder there.
+      - name: Test with TEMP below LOCALAPPDATA
+        shell: pwsh
+        run: |
+          $temp = Join-Path $env:LOCALAPPDATA "Temp"
+          $env:TEMP = $temp
+          $env:TMP = $temp
+          cargo test --locked --lib
+          exit $LASTEXITCODE
+
+      - name: Test with TEMP on the drive
+        shell: pwsh
+        run: |
+          $temp = Join-Path $env:SystemDrive "oxidize-temp"
+          New-Item -ItemType Directory -Force $temp | Out-Null
+          $env:TEMP = $temp
+          $env:TMP = $temp
+          cargo test --locked --lib
+          $code = $LASTEXITCODE
+          Remove-Item -Recurse -Force $temp
+          exit $code
+
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 

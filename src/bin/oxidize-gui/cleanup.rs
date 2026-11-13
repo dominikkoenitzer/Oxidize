@@ -546,7 +546,8 @@ pub fn view(
 
 /// The panel beside the list: the category in focus, what Clean slate
 /// clears, or the protected folders when asked for or before an analysis.
-pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
+/// `make_backups` is the window's backup setting.
+pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, make_backups: bool) {
     let analysed = state.has_something();
     if state.show_protected || !analysed {
         protected_panel(ui, t, state);
@@ -569,7 +570,7 @@ pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup) {
                 .focus
                 .and_then(|c| analysis.findings.iter().find(|f| f.category == c));
             match found {
-                Some(f) => category_detail(ui, t, state, f, analysis.elevated),
+                Some(f) => category_detail(ui, t, state, f, analysis.elevated, make_backups),
                 None => {
                     ui.label(RichText::new("Pick a category to see what it holds.").color(t.weak));
                 }
@@ -751,7 +752,14 @@ fn category_row(
 
 /// The panel for one category: what it is, what it would free, what stays
 /// and why, and for the folders of removed programs each folder.
-fn category_detail(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding, elevated: bool) {
+fn category_detail(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    f: &Finding,
+    elevated: bool,
+    make_backups: bool,
+) {
     ui.spacing_mut().item_spacing.y = 6.0;
     ui.label(RichText::new(f.category.title()).size(18.0).color(t.text));
     ui.add(egui::Label::new(RichText::new(f.category.about()).color(t.weak)).wrap());
@@ -782,12 +790,13 @@ fn category_detail(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding
         Category::ComponentStore | Category::DeliveryOptimization | Category::WindowsOld => {
             "Windows' own tools"
         }
-        Category::Orphans => "Oxidize, into a backup first",
+        Category::Orphans if make_backups => "Oxidize, into a backup first",
+        Category::Orphans => "Oxidize, each folder checked again right before it goes",
         Category::BuildOutput => "Oxidize, each folder checked again right before it goes",
         _ => "Oxidize, each file checked again right before it goes",
     };
     fact(ui, t, "Cleaned by", cleaned_by);
-    let undo = if f.category.backed_up() {
+    let undo = if f.category.backed_up(make_backups) {
         "Yes, from the backup"
     } else {
         "No, it is deleted for good"

@@ -1425,9 +1425,11 @@ const SHARED_TOPS: &[&str] = &["Temp", "Packages", "Common Files", "WindowsApps"
 
 /// Is `p` in another program's folder? It is when its folder right below an
 /// install root is there and is neither the program's nor its vendor's, and
-/// no folder on the way down has the program's exact name, as a game's
-/// folder in a store's library has. What is in there is that program's,
-/// whatever the file is called, there or gone.
+/// no folder on the way down has the program's exact name, as a game's folder
+/// in a store's library has. What is in there is that program's, whatever
+/// the file is called, there or gone. `p` itself counts only once it is gone,
+/// as a folder of that name in Windows' records is: a file or folder there
+/// that is named like the program is still theirs.
 fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
     if owned_folders(target)
         .into_iter()
@@ -1443,7 +1445,7 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
         .iter()
         .take_while(|s| SHARED_TOPS.iter().any(|t| t.eq_ignore_ascii_case(s)))
         .count();
-    let Some((_, folders)) = segments[shared..].split_last() else {
+    let Some((leaf, folders)) = segments[shared..].split_last() else {
         return false;
     };
     let Some(top) = folders.first() else {
@@ -1456,7 +1458,8 @@ fn in_others_folder(p: &Path, target: &ScanTarget) -> bool {
             .brand
             .as_deref()
             .is_some_and(|b| carries_brand(top, b))
-        || folders.iter().any(|f| is_exact_product(f, target));
+        || folders.iter().any(|f| is_exact_product(f, target))
+        || (is_exact_product(leaf, target) && !p.exists());
     !ours
         && segments[..=shared]
             .iter()
@@ -4764,6 +4767,9 @@ mod tests {
         // game's folder in a store's library is the game's.
         let own = tools.join(r"library\common\Lumen\lumen.exe");
         assert!(path_names_product(&own, &t));
+        // So is that folder once it is gone, even with nothing below it.
+        let own_folder = tools.join(r"library\common\Lumen");
+        assert!(path_names_product(&own_folder, &t));
         assert!(matches!(
             match_exe_item("lumen.exe", Some(&own), &t),
             Some((Confidence::High, _))
@@ -4772,6 +4778,55 @@ mod tests {
         let t = name_target("Lumen", Some("Brightway LLC"));
         let vendors = program_files().join(r"Brightway\Lumen\lumen.exe");
         assert!(path_names_product(&vendors, &t));
+    }
+
+    #[test]
+    fn a_file_or_folder_there_named_like_the_program_in_anothers_folder_is_theirs() {
+        // Another tool's own file and folder that carry the program's name.
+        let tools = LocalDir::new("OxidizeNamedLikeTest");
+        let file = tools.join(r"data\Lumen");
+        let folder = tools.join("Lumen");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "x").unwrap();
+        fs::create_dir_all(&folder).unwrap();
+        let t = name_target("Lumen", Some("Brightway LLC"));
+        for p in [&file, &folder] {
+            assert!(!path_names_product(p, &t), "{}", p.display());
+        }
+        // A program named like a file, extension and all: that file is theirs.
+        let script = tools.join(r"lib\lumen.js");
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "x").unwrap();
+        let js = name_target("Lumen.js", Some("Brightway LLC"));
+        assert!(!path_names_product(&script, &js));
+        // Once a folder of that name is gone, it is the program's.
+        assert!(path_names_product(&tools.join(r"old\Lumen"), &t));
+    }
+
+    #[test]
+    fn a_vendor_key_naming_such_a_file_or_folder_of_anothers_stays() {
+        let tools = LocalDir::new("OxidizeNamedLikeKeyTest");
+        let folder = tools.join("Lumen");
+        let script = tools.join(r"lib\lumen.js");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir_all(script.parent().unwrap()).unwrap();
+        fs::write(&script, "x").unwrap();
+
+        let id = std::process::id();
+        for (program, value, there) in [
+            ("Lumen", "DataDir", &folder),
+            ("Lumen.js", "Script", &script),
+        ] {
+            let root = TestKey(format!(r"Software\OxidizeNamedLikeKeyTest{value}{id}"));
+            let vendor = format!(r"{}\Brightway", root.0);
+            set_test_value(&vendor, value, &format!("\"{}\"", there.display()));
+            set_test_value(&format!(r"{vendor}\{program}"), "Theme", "dark");
+
+            let t = name_target(program, Some("Brightway Corporation"));
+            let mut out = Vec::new();
+            scan_software_root(Hive::CurrentUser, &root.0, &t, true, &mut out);
+            assert_eq!(subpaths(&out), vec![format!(r"{vendor}\{program}")]);
+        }
     }
 
     #[test]

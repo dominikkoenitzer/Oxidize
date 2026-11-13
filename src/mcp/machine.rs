@@ -111,10 +111,15 @@ impl Remove for Remover {
         system::close_processes(procs, complete::CLOSE_GRACE)
     }
 
-    fn remove_items(&self, items: &[Leftover], label: &str) -> Result<DeletionOutcome> {
+    fn remove_items(
+        &self,
+        items: &[Leftover],
+        label: &str,
+        backup: bool,
+    ) -> Result<DeletionOutcome> {
         let ctx = SafetyContext {
             dry_run: false,
-            make_backups: true,
+            make_backups: backup,
             keep_emptied_parents: false,
         };
         safety::remove_leftovers(items, label, &ctx)
