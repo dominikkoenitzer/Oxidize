@@ -35,5 +35,25 @@ It names no author and does not link to this repository.
 
   CI and the release check that the zip holds exactly the folder, byte for byte, and fail when it does not.
 
+- `diag/` is the diagnostics page at /diag. Nothing links to it and search engines are told to leave it
+  out. It measures the visitor's browser for ten seconds and shows the result; nothing is sent.
+  `diag/vendor/` is the shared diagnostic panel, copied in by `test/sync-diag.mjs` and never edited
+  here. CI fails when a copied file no longer matches its record in `test/diag-upstream.json`.
+- `test/` checks the page in Chromium, Firefox and WebKit at 360, 390, 768, 1440 and 2560 px, light and
+  dark: no console errors, no failed requests, no sideways scrolling, no serious accessibility faults,
+  screenshots against the baselines in `test/snapshots/`, every link answering, and the download
+  button sending each system to a release file whose name stays the same from release to release.
+  `test/serve.mjs` serves this folder with the addresses from `vercel.json`, the way the host does.
+
+  ```
+  cd test
+  npm ci
+  npx playwright install chromium firefox webkit
+  npx playwright test
+  ```
+
+  The baselines are taken in CI's container (`.github/workflows/site.yml`), so the fonts match from run
+  to run. A new screenshot fails CI once; its picture is in the run's snapshots artifact.
+
 Vercel deploys this folder whenever a push to main changes it. `.vercelignore` keeps this README,
-`build.py` and `page.json` off the site.
+`build.py`, `page.json` and `test/` off the site.

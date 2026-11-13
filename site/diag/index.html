@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="color-scheme" content="light dark">
+<meta name="diag-app" content="oxidize">
+<title>Oxidize diagnostics</title>
+<link rel="icon" href="data:,">
+<style>
+@font-face {
+  font-family: "Jakarta";
+  src: url("/jakarta.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+body { margin: 0; font-family: "Jakarta", system-ui, sans-serif; background: Canvas; color: CanvasText; }
+main { max-width: 40rem; margin: 0 auto; padding: 4rem 1.5rem; }
+h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 1.5rem; }
+button { font: inherit; font-weight: 600; padding: 0.6rem 1.1rem; border: 1px solid currentColor; border-radius: 8px; background: none; color: inherit; cursor: pointer; }
+button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+</style>
+<script type="module" src="/diag/mount.js"></script>
+</head>
+<body>
+<main>
+<h1>Oxidize diagnostics</h1>
+<button type="button" id="reopen" hidden>Open the panel again</button>
+</main>
+</body>
+</html>
