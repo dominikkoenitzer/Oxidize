@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.22, 2026-11-13
+
+- A folder named like the program inside another program's folder, such as
+  a plugin folder, stays that program's while it is there, and so do the
+  files in it and the registry values that point at them.
+- A scan of a second build of a program, such as its beta, no longer lists
+  the main build's folder or registry key inside the vendor's folder, as
+  long as the main build is installed too.
+
 ## 0.2.21, 2026-11-12
 
 - Removals keep no backup unless you ask for one. Turn on Back up before
