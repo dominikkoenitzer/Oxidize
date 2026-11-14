@@ -115,8 +115,7 @@ fn window_panic_hook(
     })
 }
 
-/// A message box with one sentence. It runs on a thread of its own, so its
-/// message loop never calls back into the window that panicked.
+/// A one-sentence box on its own thread, so its loop never calls back into the window.
 #[cfg(windows)]
 fn show_message(text: &str) {
     use windows::core::{w, HSTRING};
