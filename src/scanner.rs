@@ -5040,7 +5040,14 @@ mod tests {
         let stable = program_files().join(r"Brightway\Lumen\Application");
         let report = crate::commands::store_app_leftovers(&app, None, |t| {
             let mut out = Vec::new();
-            scan_dir_children(&root, t, &[stable.clone()], false, &fs_roots(), &mut out);
+            scan_dir_children(
+                &root,
+                t,
+                std::slice::from_ref(&stable),
+                false,
+                &fs_roots(),
+                &mut out,
+            );
             out
         });
         let found: Vec<&str> = report.items.iter().map(|l| l.path.as_str()).collect();
