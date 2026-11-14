@@ -4975,6 +4975,82 @@ mod tests {
     }
 
     #[test]
+    fn a_stable_build_named_with_its_vendor_keeps_its_folder_and_key() {
+        // The stable build has no publisher and carries the vendor's word in its name.
+        let root = crate::backup::TestDir::new("oxidize_vendor_namesake_test");
+        for dir in [
+            r"Brightway\Brightway Lumen\User Data",
+            r"Brightway\Lumen Beta\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        let stable = program_files().join(r"Brightway\Lumen\Application");
+        let programs = [
+            listed("Lumen Beta", "lumen-beta", Some("Brightway LLC")),
+            listed("Brightway Lumen", "lumen", None),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[stable], false, &fs_roots(), &mut out);
+        let found: Vec<&str> = out.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            found,
+            [root.join(r"Brightway\Lumen Beta").display().to_string()]
+        );
+        assert_eq!(t.shorter_namesakes, vec![vec!["lumen".to_string()]]);
+        assert!(key_names_product("Brightway Lumen", &t).is_none());
+        assert!(key_names_product("Lumen", &t).is_none());
+        assert!(key_names_product("Lumen Beta", &t).is_some());
+        assert!(key_names_product("Brightway Lumen Beta", &t).is_some());
+    }
+
+    #[test]
+    fn programs_named_with_the_vendor_that_are_no_shorter_namesake_leave_the_key() {
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        let programs = [
+            listed("Brightway Lumen Beta", "lumen-beta-user", None),
+            listed("Brightway Lumen Studio", "lumen-studio", None),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+        assert!(t.shorter_namesakes.is_empty());
+        for name in ["Lumen", "Lumen Beta", "Brightway Lumen Beta"] {
+            assert!(key_names_product(name, &t).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_store_channel_build_leaves_the_stable_builds_folder_in_the_vendor_folder() {
+        let root = crate::backup::TestDir::new("oxidize_store_namesake_test");
+        for dir in [
+            r"Brightway\Lumen\User Data",
+            r"Brightway\Lumen Beta\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut app = crate::packages::fake::package("Brightway.LumenBeta", "Lumen Beta");
+        app.publisher = Some("Brightway LLC".to_string());
+        let stable = program_files().join(r"Brightway\Lumen\Application");
+        let report = crate::commands::store_app_leftovers(&app, None, |t| {
+            let mut out = Vec::new();
+            scan_dir_children(&root, t, &[stable.clone()], false, &fs_roots(), &mut out);
+            out
+        });
+        let found: Vec<&str> = report.items.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            found,
+            [root.join(r"Brightway\Lumen Beta").display().to_string()]
+        );
+
+        let t = crate::packages::scan_target(&app);
+        for name in ["Lumen", "Brightway Lumen"] {
+            assert!(key_names_product(name, &t).is_none(), "{name}");
+        }
+    }
+
+    #[test]
     fn a_target_learns_the_installed_programs_named_with_part_of_its_name() {
         let beta = listed("Lumen Beta", "lumen-beta", Some("Brightway LLC"));
         let snap = Snapshot::with_programs(vec![
