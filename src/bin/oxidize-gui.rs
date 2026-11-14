@@ -105,7 +105,7 @@ fn window_panic_hook(
 ) -> PanicHook {
     let shown = std::sync::atomic::AtomicBool::new(false);
     Box::new(move |info| {
-        // Once only: a second panic while unwinding gets no second box.
+        // Once only: a second panic on that thread gets no second box.
         if std::thread::current().id() == window
             && !shown.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
@@ -3700,7 +3700,8 @@ mod tests {
         let (go, wait) = channel::<()>();
         let window = std::thread::spawn(move || {
             wait.recv().unwrap();
-            panic!("window");
+            let _ = std::panic::catch_unwind(|| panic!("window"));
+            panic!("window again");
         });
         let previous: Arc<PanicHook> = Arc::new(std::panic::take_hook());
         let (seen, earlier, passed) = (shown.clone(), previous.clone(), passed_on.clone());
@@ -3714,13 +3715,14 @@ mod tests {
                 (*earlier)(info)
             }),
         ));
-        go.send(()).unwrap();
-        let window_ended = window.join();
         let worker_ended = std::thread::spawn(|| panic!("worker")).join();
         let ctx = egui::Context::default();
         let mut app = app();
         app.spawn(&ctx, || panic!("engine"));
         let msg = app.rx.recv_timeout(std::time::Duration::from_secs(10));
+        let shown_before = shown.lock().unwrap().clone();
+        go.send(()).unwrap();
+        let window_ended = window.join();
         std::panic::set_hook(Box::new(move |info| (*previous)(info)));
 
         assert!(window_ended.is_err() && worker_ended.is_err());
@@ -3728,9 +3730,10 @@ mod tests {
             matches!(&msg, Ok(Msg::Error(e)) if e == "the operation stopped unexpectedly"),
             "the worker sent no error"
         );
+        assert!(shown_before.is_empty(), "{shown_before:?}");
         assert_eq!(*shown.lock().unwrap(), [STOPPED]);
         let passed_on = passed_on.lock().unwrap();
-        for p in ["window", "worker", "engine"] {
+        for p in ["worker", "engine", "window", "window again"] {
             assert!(passed_on.contains(&p), "{p} missed the previous hook");
         }
     }
