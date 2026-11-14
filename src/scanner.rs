@@ -2353,10 +2353,7 @@ fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, Str
         .then_some(hit)
 }
 
-/// `score_product`, except for a shorter name made of some of the program's
-/// words while another installed program carries exactly those words, its
-/// vendor's left out: a Beta's scan leaves the stable build's "Lumen" alone.
-/// The program's exact name is still its own.
+/// `score_product`, refusing a shorter installed namesake's name unless it is the program's exact name.
 fn score_unclaimed(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
     let hit = score_product(name, target)?;
     if target.shorter_namesakes.is_empty() || is_exact_product(name, target) {
