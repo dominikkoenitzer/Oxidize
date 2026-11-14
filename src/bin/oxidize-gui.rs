@@ -66,6 +66,28 @@ fn main() -> eframe::Result {
     )
 }
 
+/// What the box says when the window cannot start.
+const START_FAILED: &str = "Oxidize could not open its window.";
+/// What the box says when the window's thread panics.
+const STOPPED: &str = "Oxidize stopped unexpectedly.";
+
+/// The panic hook's own type, as `std::panic::take_hook` gives it.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>;
+
+/// Show `START_FAILED` when the window could not start.
+fn report_start(result: eframe::Result, _show: impl FnOnce(&str)) -> eframe::Result {
+    result
+}
+
+/// A hook that shows `STOPPED` for a panic on the `window` thread, then runs `previous`.
+fn window_panic_hook(
+    _window: std::thread::ThreadId,
+    _show: impl Fn(&str) + Send + Sync + 'static,
+    previous: PanicHook,
+) -> PanicHook {
+    previous
+}
+
 /// Messages sent from background worker threads back to the UI thread.
 enum Msg {
     Programs(Vec<Program>),
@@ -3601,6 +3623,66 @@ mod tests {
 
     fn stand_in_list() -> std::path::PathBuf {
         std::env::temp_dir().join("oxidize-gui-test-protected.txt")
+    }
+
+    #[test]
+    fn a_window_that_cannot_start_shows_one_box() {
+        let mut shown = Vec::new();
+        let result = report_start(Err(eframe::Error::AppCreation("no context".into())), |t| {
+            shown.push(t.to_string())
+        });
+        assert!(result.is_err());
+        assert_eq!(shown, [START_FAILED]);
+    }
+
+    #[test]
+    fn a_window_that_starts_shows_no_box() {
+        let mut shown = 0;
+        assert!(report_start(Ok(()), |_| shown += 1).is_ok());
+        assert_eq!(shown, 0);
+    }
+
+    #[test]
+    fn only_a_panic_on_the_window_thread_shows_a_box() {
+        use std::sync::{Arc, Mutex};
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let passed_on = Arc::new(Mutex::new(Vec::<&str>::new()));
+        let (go, wait) = channel::<()>();
+        let window = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            panic!("window");
+        });
+        let previous: Arc<PanicHook> = Arc::new(std::panic::take_hook());
+        let (seen, earlier, passed) = (shown.clone(), previous.clone(), passed_on.clone());
+        std::panic::set_hook(window_panic_hook(
+            window.thread().id(),
+            move |t| seen.lock().unwrap().push(t.to_string()),
+            Box::new(move |info| {
+                if let Some(&p) = info.payload().downcast_ref::<&str>() {
+                    passed.lock().unwrap().push(p);
+                }
+                (*earlier)(info)
+            }),
+        ));
+        go.send(()).unwrap();
+        let window_ended = window.join();
+        let worker_ended = std::thread::spawn(|| panic!("worker")).join();
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.spawn(&ctx, || panic!("engine"));
+        let msg = app.rx.recv_timeout(std::time::Duration::from_secs(10));
+        std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+
+        assert!(window_ended.is_err() && worker_ended.is_err());
+        assert!(
+            matches!(&msg, Ok(Msg::Error(e)) if e == "the operation stopped unexpectedly"),
+            "the worker sent no error"
+        );
+        assert_eq!(*shown.lock().unwrap(), [STOPPED]);
+        let passed_on = passed_on.lock().unwrap();
+        for p in ["window", "worker", "engine"] {
+            assert!(passed_on.contains(&p), "{p} missed the previous hook");
+        }
     }
 
     #[test]
