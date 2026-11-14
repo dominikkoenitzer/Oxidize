@@ -49,6 +49,16 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // A release build has no console, so its failures are told in a box.
+    let boxed = cfg!(not(debug_assertions));
+    if boxed {
+        let window = std::thread::current().id();
+        std::panic::set_hook(window_panic_hook(
+            window,
+            show_message,
+            std::panic::take_hook(),
+        ));
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
@@ -59,11 +69,16 @@ fn main() -> eframe::Result {
             .with_icon(window_icon()),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Oxidize",
         options,
         Box::new(|cc| Ok(Box::new(OxidizeApp::new(cc)))),
-    )
+    );
+    if boxed {
+        report_start(result, show_message)
+    } else {
+        result
+    }
 }
 
 /// What the box says when the window cannot start.
@@ -75,18 +90,53 @@ const STOPPED: &str = "Oxidize stopped unexpectedly.";
 type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>;
 
 /// Show `START_FAILED` when the window could not start.
-fn report_start(result: eframe::Result, _show: impl FnOnce(&str)) -> eframe::Result {
+fn report_start(result: eframe::Result, show: impl FnOnce(&str)) -> eframe::Result {
+    if result.is_err() {
+        show(START_FAILED);
+    }
     result
 }
 
 /// A hook that shows `STOPPED` for a panic on the `window` thread, then runs `previous`.
 fn window_panic_hook(
-    _window: std::thread::ThreadId,
-    _show: impl Fn(&str) + Send + Sync + 'static,
+    window: std::thread::ThreadId,
+    show: impl Fn(&str) + Send + Sync + 'static,
     previous: PanicHook,
 ) -> PanicHook {
-    previous
+    let shown = std::sync::atomic::AtomicBool::new(false);
+    Box::new(move |info| {
+        // Once only: a second panic while unwinding gets no second box.
+        if std::thread::current().id() == window
+            && !shown.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            show(STOPPED);
+        }
+        previous(info)
+    })
 }
+
+/// A message box with one sentence. It runs on a thread of its own, so its
+/// message loop never calls back into the window that panicked.
+#[cfg(windows)]
+fn show_message(text: &str) {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let text = text.to_string();
+    let shown = std::thread::Builder::new().spawn(move || unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            w!("Oxidize"),
+            MB_OK | MB_ICONERROR,
+        );
+    });
+    if let Ok(thread) = shown {
+        let _ = thread.join();
+    }
+}
+
+#[cfg(not(windows))]
+fn show_message(_text: &str) {}
 
 /// Messages sent from background worker threads back to the UI thread.
 enum Msg {
