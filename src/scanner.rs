@@ -4975,6 +4975,62 @@ mod tests {
         assert!(key_names_product("Lumen Beta", &t).is_some());
     }
 
+    fn lumen_root(name: &str) -> crate::backup::TestDir {
+        let root = crate::backup::TestDir::new(name);
+        for dir in ["Lumen", "Brightway Lumen", "Lumen Beta"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(root.join("Lumen.lnk"), b"").unwrap();
+        root
+    }
+
+    fn found_names(out: &[Leftover]) -> Vec<String> {
+        let mut names: Vec<String> = out
+            .iter()
+            .map(|l| {
+                Path::new(&l.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_channel_build_leaves_the_stable_builds_folders_and_shortcut_in_a_root() {
+        let root = lumen_root("oxidize_root_namesake_test");
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        let programs = [
+            listed("Lumen Beta", "lumen-beta", Some("Brightway LLC")),
+            listed("Lumen", "lumen", Some("Brightway LLC")),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+        assert_eq!(t.shorter_namesakes, vec![vec!["lumen".to_string()]]);
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(found_names(&out), ["Lumen Beta"]);
+    }
+
+    #[test]
+    fn a_program_installed_alone_keeps_its_shorter_folders_and_shortcut_in_a_root() {
+        let root = lumen_root("oxidize_root_alone_test");
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        assert!(t.shorter_namesakes.is_empty());
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(
+            found_names(&out),
+            ["Brightway Lumen", "Lumen", "Lumen Beta", "Lumen.lnk"]
+        );
+    }
+
     #[test]
     fn a_target_learns_the_installed_programs_named_with_part_of_its_name() {
         let beta = listed("Lumen Beta", "lumen-beta", Some("Brightway LLC"));
