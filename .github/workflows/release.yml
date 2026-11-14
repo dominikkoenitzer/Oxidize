@@ -74,4 +74,5 @@ jobs:
             dist/oxidize-windows-x64.zip
             dist/oxidize-windows-x64.zip.sha256
           fail_on_unmatched_files: true
-          generate_release_notes: true
+          body: "Download and install Oxidize from https://oxidize.punds.ch."
+          generate_release_notes: false
