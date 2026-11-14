@@ -1995,7 +1995,7 @@ fn scan_dir_children(
                 // recorded install folder, is listed on its own. A family
                 // folder is shared the same way.
                 continue;
-            } else if let Some((conf, reason)) = score_product(&name, target) {
+            } else if let Some((conf, reason)) = score_unclaimed(&name, target) {
                 if !family(&path) {
                     push_dir_leftover(out, path, conf, reason, roots);
                 }
@@ -2006,7 +2006,7 @@ fn scan_dir_children(
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or(name.clone());
-            if let Some((conf, reason)) = score_product(&stem, target) {
+            if let Some((conf, reason)) = score_unclaimed(&stem, target) {
                 let size = entry.metadata().map(|m| m.len()).ok();
                 out.push(Leftover::fs(
                     LeftoverKind::File,
@@ -2339,28 +2339,34 @@ fn scan_software_root(
 /// Why a key named `name` is the program's: it carries the program's name
 /// and nothing else, give or take the noise, or a name the folders of its
 /// install path carry. A longer name made of it and other words, such as a
-/// test build's, is another product's. So is a shorter name made of some of
-/// its words while another installed program carries exactly those words: a
-/// Beta's scan leaves the stable build's "Lumen" alone.
+/// test build's, is another product's. So is a name a shorter installed
+/// namesake carries (see `score_unclaimed`).
 fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
-    let hit = score_product(name, target)?;
+    let hit = score_unclaimed(name, target)?;
     if is_exact_product(name, target) {
         return Some(hit);
-    }
-    if !target.shorter_namesakes.is_empty() {
-        let words: Vec<String> = significant_tokens(name)
-            .into_iter()
-            .filter(|w| !target.publisher_tokens.contains(w))
-            .collect();
-        if target.shorter_namesakes.contains(&sorted_words(&words)) {
-            return None;
-        }
     }
     let own = own_name_words(target);
     significant_tokens(name)
         .iter()
         .all(|w| own.contains(w))
         .then_some(hit)
+}
+
+/// `score_product`, except for a shorter name made of some of the program's
+/// words while another installed program carries exactly those words, its
+/// vendor's left out: a Beta's scan leaves the stable build's "Lumen" alone.
+/// The program's exact name is still its own.
+fn score_unclaimed(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
+    let hit = score_product(name, target)?;
+    if target.shorter_namesakes.is_empty() || is_exact_product(name, target) {
+        return Some(hit);
+    }
+    let words: Vec<String> = significant_tokens(name)
+        .into_iter()
+        .filter(|w| !target.publisher_tokens.contains(w))
+        .collect();
+    (!target.shorter_namesakes.contains(&sorted_words(&words))).then_some(hit)
 }
 
 /// The words of the program's own names: its name, its vendor's, and those
