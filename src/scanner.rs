@@ -753,8 +753,9 @@ fn name_in_use(target: &ScanTarget, programs: &[Program]) -> bool {
 }
 
 /// The names of the other registered programs whose words, their vendor's
-/// left out, are some but not all of the program's: "Lumen" beside "Lumen
-/// Beta". Each comes sorted and without repeats.
+/// and the program's vendor's left out as `key_names_product` leaves them
+/// out, are some but not all of the program's: "Lumen" or "Brightway Lumen"
+/// beside Brightway's "Lumen Beta". Each comes sorted and without repeats.
 fn shorter_namesakes(target: &ScanTarget, programs: &[Program]) -> Vec<Vec<String>> {
     let own = sorted_words(&target.name_tokens);
     let mut found: Vec<Vec<String>> = programs
@@ -771,7 +772,11 @@ fn shorter_namesakes(target: &ScanTarget, programs: &[Program]) -> Vec<Vec<Strin
                 .as_deref()
                 .map(significant_tokens)
                 .unwrap_or_default();
-            sorted_words(&product_tokens(&p.display_name, &vendor))
+            let words: Vec<String> = product_tokens(&p.display_name, &vendor)
+                .into_iter()
+                .filter(|w| !target.publisher_tokens.contains(w))
+                .collect();
+            sorted_words(&words)
         })
         .filter(|w| !w.is_empty() && w.len() < own.len() && w.iter().all(|t| own.contains(t)))
         .collect();
