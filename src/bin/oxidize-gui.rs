@@ -3988,6 +3988,13 @@ mod tests {
         assert_eq!(app.scan_for.as_deref(), Some(program.id()));
         assert!(!report.installed);
         assert_eq!(app.selected.as_deref(), Some(program.id()));
+
+        // A later reload, such as Refresh, keeps the leftovers on screen.
+        assert_eq!(app.jobs, 0);
+        app.tx.send(Msg::Programs(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.scan.is_some(), "the leftovers on screen were dropped");
+        assert_eq!(app.jobs, 0, "a second scan started");
     }
 
     #[test]
