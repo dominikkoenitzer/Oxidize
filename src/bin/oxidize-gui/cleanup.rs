@@ -66,7 +66,7 @@ impl Cleanup {
     }
 
     /// What stands where the analysis was, while there is none.
-    fn without_analysis(&self) -> (String, String) {
+    fn without_analysis(&self, busy: bool) -> (String, String) {
         if self.cleaning {
             ("Cleaning...".into(), "Removing what was ticked.".into())
         } else if let Some(results) = &self.results {
@@ -76,9 +76,25 @@ impl Cleanup {
                 "Analyse again to see what is left.".into(),
             )
         } else {
+            self.first_view(busy)
+        }
+    }
+
+    /// The two lines before anything is analysed, or while it is.
+    fn first_view(&self, busy: bool) -> (String, String) {
+        if let Some(why) = self.refusal(&Action::Analyse) {
+            ("Clean up this PC".into(), why)
+        } else if busy {
             (
                 "Analysing...".into(),
                 "Counting what each category holds.".into(),
+            )
+        } else {
+            (
+                "Clean up this PC".into(),
+                "Counts what temporary files, caches and Windows' own stores hold. \
+                 Nothing is deleted until you choose."
+                    .into(),
             )
         }
     }
@@ -428,25 +444,11 @@ fn head(
 /// The two lines at the top left: a figure, and what it is.
 fn headline(state: &Cleanup, busy: bool) -> (String, String) {
     match (state.view, &state.analysis) {
-        _ if !state.has_something() => {
-            if let Some(why) = state.refusal(&Action::Analyse) {
-                ("Clean up this PC".into(), why)
-            } else if busy {
-                (
-                    "Analysing...".into(),
-                    "Counting what each category holds.".into(),
-                )
-            } else {
-                (
-                    "Clean up this PC".into(),
-                    "Counts what temporary files, caches and Windows' own stores hold. \
-                     Nothing is deleted until you choose."
-                        .into(),
-                )
-            }
-        }
+        _ if !state.has_something() => state.first_view(busy),
+        // The traces went with a change to the protected list or a failed read.
+        (View::Slate, _) if state.slate.is_empty() && !busy => state.first_view(false),
         (View::Slate, _) => slate::headline(&state.slate),
-        (View::Files, None) => state.without_analysis(),
+        (View::Files, None) => state.without_analysis(busy),
         (View::Files, Some((_, a))) => {
             let choice = state.choice_in(a);
             let n = choice.categories.len();
@@ -561,7 +563,7 @@ pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, make_backups: bool
                 return;
             }
             let Some((places, analysis)) = state.analysis.take() else {
-                let (_, line) = state.without_analysis();
+                let (_, line) = state.without_analysis(state.busy);
                 ui.label(RichText::new(line).color(t.weak));
                 return;
             };
@@ -1314,7 +1316,7 @@ pub(crate) mod tests {
         assert_eq!(headline(&c, false).0, "Nothing selected");
         // The traces are still being read.
         c.view = View::Slate;
-        assert_eq!(headline(&c, false).0, "Analysing...");
+        assert_eq!(headline(&c, true).0, "Analysing...");
     }
 
     #[test]
@@ -1340,6 +1342,54 @@ pub(crate) mod tests {
         // Changing the protected list afterwards keeps the result in view.
         c.slate = Slate::default();
         assert!(c.has_something());
+    }
+
+    /// Every text the side panel draws for `state` in one frame.
+    fn side_text(state: &mut Cleanup) -> String {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let t = Tint::for_ui(ui);
+            side(ui, &t, state, false);
+        });
+        out.textures_delta.clear();
+        let mut text = String::new();
+        let mut shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+        while let Some(shape) = shapes.pop() {
+            match shape {
+                egui::Shape::Vec(inner) => shapes.extend(inner),
+                egui::Shape::Text(t) => {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+                _ => {}
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn the_head_claims_an_analysis_only_while_one_runs() {
+        let first = headline(&tab(), false);
+        // Traces cleared, then the protected list changed: the analysis went.
+        let mut cleared = tab();
+        cleared.slate.results = Some(Vec::new());
+        // A cleaning that stopped on an error, with the traces found.
+        let mut stopped = tab();
+        stopped.slate.found = Some(Vec::new());
+        for c in [&mut cleared, &mut stopped] {
+            assert!(c.has_something());
+            assert_eq!(headline(c, false), first);
+            assert!(!side_text(c).contains("Counting"));
+            assert_eq!(headline(c, true).0, "Analysing...");
+            c.busy = true;
+            assert!(side_text(c).contains("Counting what each category holds."));
+        }
+        // Files cleaned, then the protected list changed: the traces went.
+        let mut cleaned = tab();
+        cleaned.results = Some(Vec::new());
+        cleaned.view = View::Slate;
+        assert_eq!(headline(&cleaned, false), first);
+        assert_eq!(headline(&cleaned, true).0, "Analysing...");
     }
 
     #[test]
