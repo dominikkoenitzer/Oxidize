@@ -394,8 +394,15 @@ fn thumbnail_files(dir: &Path) -> Vec<(PathBuf, u64)> {
     files_in(dir, |n| n.starts_with("thumbcache_") && n.ends_with(".db"))
 }
 
+/// Whether Windows may clear the recent items and jump lists itself. It
+/// clears every one of them and knows nothing of the protected list.
+fn windows_may_clear(places: &TracePlaces, protected: &Protected) -> bool {
+    places.recent.as_ref().is_none_or(|r| !protected.touches(r))
+}
+
 /// The jump lists, and the files that may go: those without pinned items.
 fn jump_lists(places: &TracePlaces, protected: &Protected) -> (TraceFinding, Vec<PathBuf>) {
+    let windows_clears = windows_may_clear(places, protected);
     let mut f = TraceFinding::new(Trace::JumpLists);
     let mut doomed = Vec::new();
     let mut items = 0u64;
@@ -415,8 +422,10 @@ fn jump_lists(places: &TracePlaces, protected: &Protected) -> (TraceFinding, Vec
                 }
                 Ok(d) => {
                     // Windows' own clearing takes the other items; the list
-                    // stays for what is pinned.
-                    items += u64::from(d.recent());
+                    // stays for what is pinned. Without it the list stays whole.
+                    if windows_clears {
+                        items += u64::from(d.recent());
+                    }
                     pinned_lists += 1;
                     f.keep(KeptReason::Pinned, 1, bytes);
                 }
@@ -439,7 +448,7 @@ fn jump_lists(places: &TracePlaces, protected: &Protected) -> (TraceFinding, Vec
         let what = if items == 1 { "item" } else { "items" };
         f.notes.push(format!("{items} recent {what}"));
     }
-    if pinned_lists > 0 && places.own_profile {
+    if pinned_lists > 0 && places.own_profile && windows_clears {
         f.notes
             .push("lists with pinned items keep only those".to_string());
     }
@@ -598,8 +607,10 @@ pub fn clear(places: &TracePlaces, protected: &Protected, shell: &dyn Shell) -> 
     // Windows first: it clears what it can of the recent items and the jump
     // lists and tells Explorer, so the lists vanish from the taskbar at
     // once. What is left goes file by file.
-    if let Err(e) = shell.clear_recent() {
-        note(Trace::JumpLists, KeptReason::Failed(format!("{e:#}")), 0, 0);
+    if windows_may_clear(places, protected) {
+        if let Err(e) = shell.clear_recent() {
+            note(Trace::JumpLists, KeptReason::Failed(format!("{e:#}")), 0, 0);
+        }
     }
     if let Some(dir) = &places.recent {
         for (path, bytes) in recent_files(dir) {
