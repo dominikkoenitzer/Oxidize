@@ -1,6 +1,17 @@
 //! Command handlers: wire the engine together and print results. All
 //! user-facing text lives here so the lower layers stay quiet.
 
+/// `println!` through [`crate::out`]: once the reader of stdout has gone the
+/// rest is left out and the command goes on, where `std`'s would panic.
+macro_rules! println {
+    () => {
+        $crate::out::write(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::out::write(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
 use std::path::PathBuf;
 use std::time::Duration;
 
