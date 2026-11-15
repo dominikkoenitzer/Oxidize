@@ -340,6 +340,83 @@ mod tests {
     }
 
     #[test]
+    fn every_shared_key_is_refused_in_both_views() {
+        // Written out here, so a key dropped from the list fails.
+        for (native, wow) in [
+            (r"SOFTWARE\Classes", Some(r"SOFTWARE\WOW6432Node\Classes")),
+            (r"SOFTWARE\Clients", Some(r"SOFTWARE\WOW6432Node\Clients")),
+            (
+                r"SOFTWARE\Microsoft",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft"),
+            ),
+            (r"SOFTWARE\Policies", Some(r"SOFTWARE\WOW6432Node\Policies")),
+            (
+                r"SOFTWARE\RegisteredApplications",
+                Some(r"SOFTWARE\WOW6432Node\RegisteredApplications"),
+            ),
+            (r"SOFTWARE\WOW6432Node", None),
+            (
+                r"SOFTWARE\Microsoft\Windows",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft\Windows"),
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion"),
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"),
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce"),
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            ),
+            (
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+                Some(r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths"),
+            ),
+            (
+                r"SOFTWARE\Classes\CLSID",
+                Some(r"SOFTWARE\Classes\WOW6432Node\CLSID"),
+            ),
+            (
+                r"SOFTWARE\Classes\Applications",
+                Some(r"SOFTWARE\Classes\WOW6432Node\Applications"),
+            ),
+            (r"SYSTEM\CurrentControlSet", None),
+            (r"SYSTEM\CurrentControlSet\Services", None),
+            (r"SYSTEM\ControlSet001", None),
+            (r"SYSTEM\ControlSet001\Services", None),
+        ] {
+            assert!(is_shared_root_key(native), "{native:?}");
+            if let Some(wow) = wow {
+                assert!(is_shared_root_key(wow), "{wow:?}");
+            }
+        }
+        for key in [
+            r"SOFTWARE\Policies\Example Vendor",
+            r"SOFTWARE\Microsoft\Windows\Example",
+            r"SOFTWARE\Classes\Applications\example.exe",
+            r"SYSTEM\CurrentControlSet\Example",
+            r"SYSTEM\ControlSet001\Example",
+            r"SYSTEM\ControlSet001\Services\ExampleService",
+        ] {
+            assert!(!is_shared_root_key(key), "{key:?}");
+        }
+    }
+
+    #[test]
+    fn a_part_made_only_of_spaces_counts_as_empty() {
+        for key in [r"SOFTWARE\ \Vendor", r"SOFTWARE\Vendor\  "] {
+            assert!(is_shared_root_key(key), "{key:?}");
+        }
+    }
+
+    #[test]
     fn the_32_bit_view_of_a_shared_key_is_shared_too() {
         for key in [
             r"SOFTWARE\WOW6432Node\Microsoft",
