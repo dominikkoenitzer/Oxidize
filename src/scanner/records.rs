@@ -685,6 +685,50 @@ mod tests {
     }
 
     #[test]
+    fn a_scan_by_name_alone_counts_missing_files_of_the_product_as_gone() {
+        let gone = |target: &ScanTarget, path: &str| {
+            Gone {
+                dirs: &[],
+                files: &[],
+                others: &[],
+                target,
+            }
+            .covers(path)
+        };
+        let target = super::super::name_only_target("Quillmark", None);
+        assert!(target.publisher.is_none());
+        for path in [
+            format!(r"C:\Program Files\Quillmark\{}.exe", unique("quill")),
+            format!(
+                r"C:\Program Files\Quill Labs\Quillmark\bin\{}.exe",
+                unique("quill")
+            ),
+            format!(r"{{{LOCAL}}}\Quillmark\{}.exe", unique("quill")),
+        ] {
+            assert!(gone(&target, &path), "{path}");
+        }
+        // A file that is missing but names nothing of the product stays.
+        assert!(!gone(&target, &format!(r"C:\{}\quill.exe", unique("Apps"))));
+
+        let target = super::super::name_only_target("Inkwell Notes", None);
+        for path in [
+            format!(r"C:\Program Files\Inkwell Notes\{}.exe", unique("notes")),
+            format!(r"C:\Program Files\Inkwell\Notes\{}.exe", unique("notes")),
+        ] {
+            assert!(gone(&target, &path), "{path}");
+        }
+
+        // A file of the product that is still there is not gone.
+        let dir = std::env::temp_dir().join("oxidize_records_Quillmark");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("quill.exe");
+        std::fs::write(&file, b"x").unwrap();
+        let target = super::super::name_only_target("Quillmark", None);
+        assert!(!gone(&target, &file.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_sound_device_choice_names_its_file() {
         let v = r"{2}.\\?\usb#vid_05ac&pid_110a&mi_00#{6994ad04-93ef-11d0-a3cc-00a0c9223196}\msft_topo/00010000|\Device\HarddiskVolume3\Users\jdoe\AppData\Local\Quillmark\app.exe%b{00000000-0000-0000-0000-000000000000}";
         assert_eq!(
