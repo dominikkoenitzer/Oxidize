@@ -194,6 +194,13 @@ impl Snapshot {
         self
     }
 
+    /// Start from the services already read.
+    #[cfg(test)]
+    fn with_services(self, services: Vec<system::ServiceInfo>) -> Self {
+        let _ = self.services.set(services);
+        self
+    }
+
     /// Start from the scheduled tasks already read.
     #[cfg(test)]
     fn with_tasks(self, tasks: Vec<system::TaskInfo>) -> Self {
@@ -995,13 +1002,7 @@ pub fn publisher_hint(name: &str) -> Option<(String, PublisherSource)> {
 /// `name_only_target` for a program that is gone, with the publisher from
 /// `publisher_hint` when none is given.
 pub fn removed_program_target(name: &str, publisher: Option<&str>) -> ScanTarget {
-    match publisher {
-        Some(p) => name_only_target(name, Some(p)),
-        None => match publisher_hint(name) {
-            Some((p, _)) => name_only_target(name, Some(&p)),
-            None => name_only_target(name, None),
-        },
-    }
+    removed_program_target_with(name, publisher, &Snapshot::new())
 }
 
 /// `name_only_target` reading the installed programs through `snap`.
@@ -1024,6 +1025,21 @@ pub fn name_only_target_with(name: &str, publisher: Option<&str>, snap: &Snapsho
     };
     target.shorter_namesakes = shorter_namesakes(&target, snap.programs());
     target
+}
+
+/// `removed_program_target` reading the installed programs through `snap`.
+pub fn removed_program_target_with(
+    name: &str,
+    publisher: Option<&str>,
+    snap: &Snapshot,
+) -> ScanTarget {
+    match publisher {
+        Some(p) => name_only_target_with(name, Some(p), snap),
+        None => match publisher_hint(name) {
+            Some((p, _)) => name_only_target_with(name, Some(&p), snap),
+            None => name_only_target_with(name, None, snap),
+        },
+    }
 }
 
 /// Identity from a display name and publisher.
@@ -3662,16 +3678,48 @@ mod tests {
         assert!(!holds_namesake_child(&root.join("Knot"), &knot));
     }
 
+    /// The machine-wide roots of a standard Windows install, not those of
+    /// the machine running the tests.
+    fn standard_roots() -> Vec<PathBuf> {
+        [
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+            r"C:\ProgramData",
+        ]
+        .map(PathBuf::from)
+        .to_vec()
+    }
+
+    /// What a target reads from the system, with `programs` installed and
+    /// no Store app, service or scheduled task.
+    fn installed(programs: Vec<Program>) -> Snapshot {
+        Snapshot::with_programs(programs)
+            .with_store_apps(Vec::new())
+            .with_services(Vec::new())
+            .with_tasks(Vec::new())
+            .with_roots(standard_roots())
+    }
+
+    /// A target by name, with no program installed.
+    fn named(name: &str, publisher: Option<&str>) -> ScanTarget {
+        name_only_target_with(name, publisher, &installed(Vec::new()))
+    }
+
+    /// The target of `program`, the one program installed.
+    fn built(program: &Program) -> ScanTarget {
+        build_target_with(program, &installed(vec![program.clone()]))
+    }
+
     #[test]
     fn name_only_target_guesses_the_vendor() {
-        let t = name_only_target("Corvane Glide", None);
+        let t = named("Corvane Glide", None);
         assert_eq!(t.name_tokens, vec!["glide".to_string()]);
         assert!(matches_publisher("Corvane", &t));
         assert!(matches!(
             score_product("Glide", &t),
             Some((Confidence::High, _))
         ));
-        let t = name_only_target("Ludra", None);
+        let t = named("Ludra", None);
         assert_eq!(t.name_tokens, vec!["ludra".to_string()]);
         assert!(t.publisher.is_none());
     }
@@ -3702,10 +3750,11 @@ mod tests {
             crate::backup::recorded_publisher("Penwright").as_deref(),
             Some("Inkhorn Software")
         );
-        let t = removed_program_target("Penwright", None);
+        let none = installed(Vec::new());
+        let t = removed_program_target_with("Penwright", None, &none);
         assert_eq!(t.publisher.as_deref(), Some("Inkhorn Software"));
         // A publisher the user names comes first.
-        let t = removed_program_target("Penwright", Some("Someone Else"));
+        let t = removed_program_target_with("Penwright", Some("Someone Else"), &none);
         assert_eq!(t.publisher.as_deref(), Some("Someone Else"));
 
         let base = crate::backup::backups_base().unwrap();
@@ -3897,10 +3946,10 @@ mod tests {
             is_system_component: false,
         };
         // A general folder recorded as the install location stays Medium.
-        let t = build_target(&program(r"D:\Games"));
+        let t = built(&program(r"D:\Games"));
         assert_eq!(install_folder_score("Games", &t).0, Confidence::Medium);
         // A folder that names the product is still the product's.
-        let t = build_target(&program(r"D:\Apps\Foo Editor"));
+        let t = built(&program(r"D:\Apps\Foo Editor"));
         assert_eq!(install_folder_score("Foo Editor", &t).0, Confidence::High);
     }
 
@@ -3941,7 +3990,7 @@ mod tests {
             Some(&format!("\"{ludra}\" ludra://uninstall/431960")),
         );
         // Not this machine's programs: a real install of the game records the same folder.
-        let game = build_target_with(&game, &Snapshot::with_programs(vec![game.clone()]));
+        let game = built(&game);
         assert!(game.exe_names.is_empty(), "{:?}", game.exe_names);
         assert!(match_run_value("Ludra", &format!("\"{ludra}\" -silent"), &game).is_none());
         for rule in ["Ludra", "Ludra Web Helper"] {
@@ -3965,11 +4014,11 @@ mod tests {
             r#""C:\Windows\System32\cmd.exe" /c "C:\Program Files\Foo Editor\remove.cmd""#,
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\ProgramData\Foo\remove.ps1""#,
         ] {
-            let t = build_target(&registered("Foo Editor", None, None, Some(uninstall)));
+            let t = built(&registered("Foo Editor", None, None, Some(uninstall)));
             assert!(t.exe_names.is_empty(), "{uninstall}: {:?}", t.exe_names);
         }
         // With one, nothing outside it.
-        let t = build_target(&registered(
+        let t = built(&registered(
             "Foo Editor",
             Some(r"C:\Program Files\Foo Editor"),
             Some(r"C:\Program Files\Foo Editor\foo.exe,0"),
@@ -3985,7 +4034,7 @@ mod tests {
         let icon = Some(r"C:\Program Files\Foo Editor\foo.exe,0");
         let uninstall = Some(r#""C:\Program Files\Foo Editor\uninst.exe" /S"#);
         // In the recorded install folder.
-        let t = build_target(&registered(
+        let t = built(&registered(
             "Foo Editor",
             Some(r"C:\Program Files\Foo Editor"),
             icon,
@@ -3993,10 +4042,10 @@ mod tests {
         ));
         assert_eq!(t.exe_names, ["foo.exe", "uninst.exe"]);
         // Without one, next to the program's own uninstaller.
-        let t = build_target(&registered("Foo Editor", None, icon, uninstall));
+        let t = built(&registered("Foo Editor", None, icon, uninstall));
         assert_eq!(t.exe_names, ["foo.exe", "uninst.exe"]);
         // An MSI product uninstalls through msiexec; its icon still counts.
-        let t = build_target(&registered(
+        let t = built(&registered(
             "Foo Editor",
             None,
             icon,
@@ -4035,7 +4084,7 @@ mod tests {
                 dsa.join("XSAUpdateService.exe"),
             ),
         ];
-        let snap = Snapshot::new();
+        let snap = installed(vec![radio.clone()]);
         let t = build_target_from(&radio, Some(intel.clone()), &[], &runs, &snap);
         assert!(t.install_location.is_none(), "{:?}", t.install_location);
         for (names, exe) in &runs {
@@ -4077,7 +4126,8 @@ mod tests {
             ),
             (vec!["FooSvc".to_string()], dir.join("foosvc.exe")),
         ];
-        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs, &Snapshot::new());
+        let snap = installed(vec![foo.clone()]);
+        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs, &snap);
         assert_eq!(t.install_location.as_deref(), Some(dir.as_path()));
         assert_eq!(t.exe_names, ["foo.exe"]);
         for (names, exe) in &runs {
@@ -4164,7 +4214,7 @@ mod tests {
 
     #[test]
     fn a_bare_program_name_is_never_a_missing_file() {
-        let pwsh = build_target(&registered(
+        let pwsh = built(&registered(
             "PowerShell 7-x64",
             Some(r"C:\Program Files\PowerShell\7"),
             Some(r"C:\Program Files\PowerShell\7\pwsh.exe"),
@@ -4231,7 +4281,7 @@ mod tests {
             None,
         );
         velapp.publisher = Some("Velloran Corporation".to_string());
-        let velapp = build_target_with(&velapp, &Snapshot::with_programs(vec![velapp.clone()]));
+        let velapp = built(&velapp);
         assert!(velapp.name_tokens.len() > 1, "{:?}", velapp.name_tokens);
         assert!(score_product("Velloran App SelfUpdate_", &velapp).is_some());
 
@@ -5420,7 +5470,7 @@ mod tests {
         );
 
         // The same for a scan by the word alone.
-        let word = name_only_target("brightway", None);
+        let word = named("brightway", None);
         let mut out = Vec::new();
         scan_dir_children(&root, &word, &[], false, &fs_roots(), &mut out);
         assert!(out
@@ -5595,7 +5645,7 @@ mod tests {
 
         // A folder with a longer namesake stays when another program carries
         // the name.
-        let word = name_only_target("brightway", None);
+        let word = named("brightway", None);
         assert!(name_in_use(&word, &[studio]));
     }
 
@@ -5612,7 +5662,7 @@ mod tests {
         ] {
             let mut p = player();
             p.install_location = Some(recorded.to_string());
-            let t = build_target_with(&p, &Snapshot::with_programs(vec![p.clone()]));
+            let t = built(&p);
             assert!(
                 t.install_location.is_none(),
                 "{recorded}: {:?}",
@@ -5621,7 +5671,7 @@ mod tests {
         }
         let mut p = player();
         p.install_location = Some(r#""D:\Games\Example Player\""#.to_string());
-        let t = build_target_with(&p, &Snapshot::with_programs(vec![p.clone()]));
+        let t = built(&p);
         assert_eq!(
             t.install_location.as_deref(),
             Some(Path::new(r"D:\Games\Example Player"))
