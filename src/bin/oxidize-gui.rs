@@ -289,6 +289,10 @@ struct OxidizeApp {
 
     /// What Undo runs on its worker thread; a test puts a stand-in here.
     restore_backup: fn(&str, bool) -> Result<Vec<RestoreItem>, String>,
+    /// What a scan runs on its worker thread; a test puts a stand-in here.
+    scan_program: fn(&Program) -> ScanReport,
+    /// What a list reload runs on its worker thread; a test puts a stand-in here.
+    read_programs: fn(bool) -> Vec<Program>,
 }
 
 /// Finds the backup by name and puts it back, or only checks it in a dry run.
@@ -296,6 +300,14 @@ fn restore_backup(name: &str, dry_run: bool) -> Result<Vec<RestoreItem>, String>
     backup::find_backup(name)
         .and_then(|info| restore::restore(&info, dry_run))
         .map_err(|e| format!("{e:#}"))
+}
+
+/// Scans the machine for `program`, with one reading of it for both steps.
+fn scan_program(program: &Program) -> ScanReport {
+    let snap = scanner::Snapshot::new();
+    let target = scanner::build_target_with(program, &snap);
+    let installed = uninstall::still_installed(program);
+    scanner::scan_with(&target, installed, &snap)
 }
 
 impl OxidizeApp {
@@ -338,6 +350,8 @@ impl OxidizeApp {
             tx,
             rx,
             restore_backup,
+            scan_program,
+            read_programs: registry::enumerate_installed_programs,
         }
     }
 
@@ -351,8 +365,9 @@ impl OxidizeApp {
         let tx = app.tx.clone();
         let ctx = cc.egui_ctx.clone();
         let include_system = app.include_system;
+        let read_programs = app.read_programs;
         std::thread::spawn(move || {
-            let programs = registry::enumerate_installed_programs(include_system);
+            let programs = read_programs(include_system);
             let _ = tx.send(Msg::Programs(programs));
             ctx.request_repaint();
         });
@@ -419,9 +434,8 @@ impl OxidizeApp {
     /// result in the status line.
     fn reload_programs(&mut self, ctx: &egui::Context) {
         let include_system = self.include_system;
-        self.spawn(ctx, move || {
-            Msg::Programs(registry::enumerate_installed_programs(include_system))
-        });
+        let read_programs = self.read_programs;
+        self.spawn(ctx, move || Msg::Programs(read_programs(include_system)));
     }
 
     /// Extract icons (on a background thread) for any programs we don't have a
@@ -455,16 +469,10 @@ impl OxidizeApp {
         // A newer scan says what it finds, whatever an earlier removal held.
         self.keep_status_for = None;
         self.status = scanning_status(&program.display_name);
-        self.spawn(ctx, move || {
-            // One reading of the machine serves both steps.
-            let snap = scanner::Snapshot::new();
-            let target = scanner::build_target_with(&program, &snap);
-            let installed = uninstall::still_installed(&program);
-            let report = scanner::scan_with(&target, installed, &snap);
-            Msg::Scan {
-                id: program.id().to_string(),
-                report,
-            }
+        let scan_program = self.scan_program;
+        self.spawn(ctx, move || Msg::Scan {
+            id: program.id().to_string(),
+            report: scan_program(&program),
         });
     }
 
@@ -3795,11 +3803,31 @@ mod tests {
     use super::*;
     use oxidize::model::{Hive, RegistrySource, RegistryView};
 
-    /// The window with a stand-in protected list, so no test reads the
-    /// user's own.
+    /// The window with a stand-in protected list, scan and list reload, so
+    /// no test reads the user's list or this machine.
     fn app() -> OxidizeApp {
-        OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())))
+        let mut app = OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())));
+        app.scan_program = stand_in_scan;
+        app.read_programs = stand_in_programs;
+        app
     }
+
+    /// A scan that finds nothing of a program that is gone.
+    fn stand_in_scan(program: &Program) -> ScanReport {
+        ScanReport {
+            program_name: program.display_name.clone(),
+            installed: false,
+            items: Vec::new(),
+        }
+    }
+
+    /// A list reload that finds no program.
+    fn stand_in_programs(_include_system: bool) -> Vec<Program> {
+        Vec::new()
+    }
+
+    /// How long the stand-ins' answers may take to come back.
+    const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn stand_in_list() -> std::path::PathBuf {
         std::env::temp_dir().join("oxidize-gui-test-protected.txt")
@@ -4124,7 +4152,7 @@ mod tests {
         // And it is scanned again, now as a program that is gone, so its
         // leftovers can be ticked and removed.
         let start = std::time::Instant::now();
-        while app.scan.is_none() && start.elapsed() < std::time::Duration::from_secs(300) {
+        while app.scan.is_none() && start.elapsed() < ANSWER_WAIT {
             std::thread::sleep(std::time::Duration::from_millis(50));
             app.drain_messages(&ctx);
         }
@@ -4300,7 +4328,7 @@ mod tests {
         let mut answers = 0;
         let mut scan = None;
         let start = std::time::Instant::now();
-        while answers < 2 && start.elapsed() < std::time::Duration::from_secs(300) {
+        while answers < 2 && start.elapsed() < ANSWER_WAIT {
             match app.rx.try_recv() {
                 Ok(msg) => {
                     answers += 1;
@@ -4394,7 +4422,7 @@ mod tests {
     fn wait_for_answers(app: &mut OxidizeApp, n: usize) -> Vec<Msg> {
         let mut answers = Vec::new();
         let start = std::time::Instant::now();
-        while answers.len() < n && start.elapsed() < std::time::Duration::from_secs(300) {
+        while answers.len() < n && start.elapsed() < ANSWER_WAIT {
             match app.rx.try_recv() {
                 Ok(msg) => answers.push(msg),
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
