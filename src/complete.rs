@@ -36,7 +36,7 @@ pub struct Running {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloseHow {
-    /// It closed its windows and exited by itself.
+    /// It exited by itself: once asked to close, or before it could be.
     Closed,
     /// It was still running after the grace period, or had no window to be
     /// asked through. It is left running and the flow stops.
