@@ -1547,7 +1547,9 @@ mod tests {
     }
 
     fn target() -> ScanTarget {
-        let mut t = scanner::name_only_target("Example Player", Some("Example Studio"));
+        // Not this machine's programs.
+        let none = scanner::Snapshot::with_programs(Vec::new());
+        let mut t = scanner::name_only_target_with("Example Player", Some("Example Studio"), &none);
         t.install_location = Some(PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer"));
         t.registry = Some((
             "example-player".to_string(),

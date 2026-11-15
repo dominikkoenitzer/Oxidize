@@ -1314,7 +1314,10 @@ mod tests {
     /// A program installed in the stand-in's folder.
     #[cfg(windows)]
     fn installed_at(helper: &crate::complete::Running) -> crate::model::ScanTarget {
-        let mut target = crate::scanner::name_only_target("Example Player", Some("Example Studio"));
+        // Not this machine's programs.
+        let none = crate::scanner::Snapshot::with_programs(Vec::new());
+        let mut target =
+            crate::scanner::name_only_target_with("Example Player", Some("Example Studio"), &none);
         target.install_location = helper.exe.parent().map(Path::to_path_buf);
         target.install_vouched = true;
         target

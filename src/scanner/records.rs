@@ -723,7 +723,15 @@ mod tests {
             }
             .covers(path)
         };
-        let target = super::super::name_only_target("Quillmark", None);
+        // Not this machine's programs.
+        let named = |name: &str| {
+            super::super::name_only_target_with(
+                name,
+                None,
+                &super::super::Snapshot::with_programs(Vec::new()),
+            )
+        };
+        let target = named("Quillmark");
         assert!(target.publisher.is_none());
         for path in [
             format!(r"C:\Program Files\Quillmark\{}.exe", unique("quill")),
@@ -738,7 +746,7 @@ mod tests {
         // A file that is missing but names nothing of the product stays.
         assert!(!gone(&target, &format!(r"C:\{}\quill.exe", unique("Apps"))));
 
-        let target = super::super::name_only_target("Inkwell Notes", None);
+        let target = named("Inkwell Notes");
         for path in [
             format!(r"C:\Program Files\Inkwell Notes\{}.exe", unique("notes")),
             format!(r"C:\Program Files\Inkwell\Notes\{}.exe", unique("notes")),
@@ -751,7 +759,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("quill.exe");
         std::fs::write(&file, b"x").unwrap();
-        let target = super::super::name_only_target("Quillmark", None);
+        let target = named("Quillmark");
         assert!(!gone(&target, &file.to_string_lossy()));
         let _ = std::fs::remove_dir_all(&dir);
     }

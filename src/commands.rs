@@ -3375,26 +3375,32 @@ mod tests {
     use crate::safety::ItemOutcome;
     use clap::Parser;
 
+    /// A target by name, not looked up among this machine's programs.
+    fn named(name: &str, publisher: Option<&str>) -> ScanTarget {
+        let none = scanner::Snapshot::with_programs(Vec::new());
+        scanner::name_only_target_with(name, publisher, &none)
+    }
+
     #[test]
     fn a_name_too_short_gives_nothing_to_search_by() {
         for name in ["R", "Go", "7z", "C++"] {
-            let error = refuse_wordless(name, &scanner::name_only_target(name, None)).unwrap_err();
+            let error = refuse_wordless(name, &named(name, None)).unwrap_err();
             assert_eq!(
                 error.to_string(),
                 format!("\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher")
             );
         }
         for name in ["7-Zip", "Git"] {
-            assert!(refuse_wordless(name, &scanner::name_only_target(name, None)).is_ok());
+            assert!(refuse_wordless(name, &named(name, None)).is_ok());
         }
-        let with_publisher = scanner::name_only_target("Go", Some("Example Studio"));
+        let with_publisher = named("Go", Some("Example Studio"));
         assert!(refuse_wordless("Go", &with_publisher).is_ok());
     }
 
     #[test]
     fn a_name_of_only_common_words_still_scans_by_the_whole_name() {
         for name in ["Setup", "2024", "Media Player"] {
-            assert!(refuse_wordless(name, &scanner::name_only_target(name, None)).is_ok());
+            assert!(refuse_wordless(name, &named(name, None)).is_ok());
         }
     }
 
@@ -4164,7 +4170,7 @@ mod tests {
         );
         assert!(ends_in_plan(&[]).is_empty());
 
-        let mut target = scanner::name_only_target("Example Player", Some("Example Studio"));
+        let mut target = named("Example Player", Some("Example Studio"));
         target.install_location = Some(PathBuf::from(r"D:\Apps\Example Player"));
         target.install_vouched = true;
         let running = [helper];
