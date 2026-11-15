@@ -2010,7 +2010,7 @@ fn scan_dir_children(
                 // recorded install folder, is listed on its own. A family
                 // folder is shared the same way.
                 continue;
-            } else if let Some((conf, reason)) = score_product(&name, target) {
+            } else if let Some((conf, reason)) = score_unclaimed(&name, target) {
                 if !family(&path) {
                     push_dir_leftover(out, path, conf, reason, roots);
                 }
@@ -2021,7 +2021,7 @@ fn scan_dir_children(
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or(name.clone());
-            if let Some((conf, reason)) = score_product(&stem, target) {
+            if let Some((conf, reason)) = score_unclaimed(&stem, target) {
                 let size = entry.metadata().map(|m| m.len()).ok();
                 out.push(Leftover::fs(
                     LeftoverKind::File,
@@ -2354,28 +2354,31 @@ fn scan_software_root(
 /// Why a key named `name` is the program's: it carries the program's name
 /// and nothing else, give or take the noise, or a name the folders of its
 /// install path carry. A longer name made of it and other words, such as a
-/// test build's, is another product's. So is a shorter name made of some of
-/// its words while another installed program carries exactly those words: a
-/// Beta's scan leaves the stable build's "Lumen" alone.
+/// test build's, is another product's. So is a name a shorter installed
+/// namesake carries (see `score_unclaimed`).
 fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
-    let hit = score_product(name, target)?;
+    let hit = score_unclaimed(name, target)?;
     if is_exact_product(name, target) {
         return Some(hit);
-    }
-    if !target.shorter_namesakes.is_empty() {
-        let words: Vec<String> = significant_tokens(name)
-            .into_iter()
-            .filter(|w| !target.publisher_tokens.contains(w))
-            .collect();
-        if target.shorter_namesakes.contains(&sorted_words(&words)) {
-            return None;
-        }
     }
     let own = own_name_words(target);
     significant_tokens(name)
         .iter()
         .all(|w| own.contains(w))
         .then_some(hit)
+}
+
+/// `score_product`, refusing a shorter installed namesake's name unless it is the program's exact name.
+fn score_unclaimed(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
+    let hit = score_product(name, target)?;
+    if target.shorter_namesakes.is_empty() || is_exact_product(name, target) {
+        return Some(hit);
+    }
+    let words: Vec<String> = significant_tokens(name)
+        .into_iter()
+        .filter(|w| !target.publisher_tokens.contains(w))
+        .collect();
+    (!target.shorter_namesakes.contains(&sorted_words(&words))).then_some(hit)
 }
 
 /// The words of the program's own names: its name, its vendor's, and those
@@ -5060,6 +5063,62 @@ mod tests {
         assert!(key_names_product("Lumen", &t).is_none());
         assert!(key_names_product("Brightway Lumen", &t).is_none());
         assert!(key_names_product("Lumen Beta", &t).is_some());
+    }
+
+    fn lumen_root(name: &str) -> crate::backup::TestDir {
+        let root = crate::backup::TestDir::new(name);
+        for dir in ["Lumen", "Brightway Lumen", "Lumen Beta"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(root.join("Lumen.lnk"), b"").unwrap();
+        root
+    }
+
+    fn found_names(out: &[Leftover]) -> Vec<String> {
+        let mut names: Vec<String> = out
+            .iter()
+            .map(|l| {
+                Path::new(&l.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_channel_build_leaves_the_stable_builds_folders_and_shortcut_in_a_root() {
+        let root = lumen_root("oxidize_root_namesake_test");
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        let programs = [
+            listed("Lumen Beta", "lumen-beta", Some("Brightway LLC")),
+            listed("Lumen", "lumen", Some("Brightway LLC")),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+        assert_eq!(t.shorter_namesakes, vec![vec!["lumen".to_string()]]);
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(found_names(&out), ["Lumen Beta"]);
+    }
+
+    #[test]
+    fn a_program_installed_alone_keeps_its_shorter_folders_and_shortcut_in_a_root() {
+        let root = lumen_root("oxidize_root_alone_test");
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        assert!(t.shorter_namesakes.is_empty());
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(
+            found_names(&out),
+            ["Brightway Lumen", "Lumen", "Lumen Beta", "Lumen.lnk"]
+        );
     }
 
     #[test]
