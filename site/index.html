@@ -483,8 +483,8 @@ footer p { margin: 0.3rem 0; }
 </div>
 <div class="card">
 <div class="num">Your data</div>
-<h3>Only the backups</h3>
-<p>Each removal made with a backup gets one backup folder under <code>%LOCALAPPDATA%\Oxidize\backups</code>, with the exported registry keys, the moved files and a list of every step. Oxidize keeps no other data.</p>
+<h3>Backups and protected folders</h3>
+<p>Each removal made with a backup gets one backup folder under <code>%LOCALAPPDATA%\Oxidize\backups</code>, with the exported registry keys, the moved files and a list of every step. Besides them, Oxidize stores only the list of protected folders in <code>%LOCALAPPDATA%\Oxidize\protected.txt</code>.</p>
 </div>
 </div>
 </section>
@@ -516,7 +516,7 @@ footer p { margin: 0.3rem 0; }
 <div class="card">
 <div class="num">03</div>
 <h3>Removing it</h3>
-<p>Delete oxidize-gui.exe, and <code>%LOCALAPPDATA%\Oxidize</code> once you no longer need the backups in it.</p>
+<p>Delete oxidize-gui.exe and oxidize.exe, then <code>%LOCALAPPDATA%\Oxidize</code> once you no longer need the backups in it. If you added a folder to your PATH for oxidize.exe, remove that entry too.</p>
 </div>
 </div>
 </section>
