@@ -832,10 +832,7 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
     out
 }
 
-/// How a rule reads after its name: `in` or `out`, the protocol when it is
-/// TCP or UDP, and the network profiles it is limited to, so rules of one
-/// name for different networks read apart. A rule for every profile names
-/// none.
+/// How a rule reads after its name: its direction, TCP or UDP, and the profiles it names.
 fn rule_kind(data: &str) -> String {
     let mut dir = String::new();
     let mut proto = "";
