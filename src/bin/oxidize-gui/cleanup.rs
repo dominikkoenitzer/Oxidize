@@ -185,7 +185,6 @@ impl Cleanup {
 
     /// What the ticks amount to: only categories that can be cleaned, and
     /// the folders only while their category is ticked.
-    #[cfg(test)]
     pub fn choice(&self) -> Choice {
         match &self.analysis {
             Some((_, a)) => self.choice_in(a),
