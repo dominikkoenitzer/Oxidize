@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::model::{
     Confidence, Hive, Leftover, LeftoverKind, Package, Program, ScanReport, ScanTarget,
 };
-use crate::safety::{DeletionOutcome, SafetyContext};
+use crate::safety::{BackupRefused, DeletionOutcome, SafetyContext};
 use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
 
@@ -392,6 +392,8 @@ pub struct Outcome {
     pub verdict: Verdict,
     /// Why the flow stopped early, when it did.
     pub error: Option<String>,
+    /// The backup refusal that stopped the removal, for the window to word.
+    pub refused: Option<BackupRefused>,
     pub seconds: f64,
 }
 
@@ -451,6 +453,7 @@ pub fn remove_completely(
             ..Verdict::default()
         },
         error: None,
+        refused: None,
         seconds: 0.0,
     };
 
@@ -542,7 +545,7 @@ pub fn remove_completely(
     if !out.selected.is_empty() {
         match pc.remove(&out.selected, &program.display_name) {
             Ok(o) => out.removal = Some(o),
-            Err(e) => out.error = Some(format!("{e:#}")),
+            Err(e) => stopped(&mut out, &e),
         }
     }
     if installed {
@@ -558,7 +561,7 @@ pub fn remove_completely(
         if let Some(first) = out.removal.as_mut().filter(|_| !late.is_empty()) {
             match pc.remove_more(&late, &program.display_name, first) {
                 Ok(o) => first.absorb(o),
-                Err(e) => out.error = Some(format!("{e:#}")),
+                Err(e) => stopped(&mut out, &e),
             }
             out.report.items.extend(late.iter().cloned());
             out.selected.extend(late);
@@ -568,6 +571,12 @@ pub fn remove_completely(
     out.verdict = verdict(installed, &rescan, opts.level);
     out.seconds = start.elapsed().as_secs_f64();
     out
+}
+
+/// Keep why the removal stopped, and its kind when it was a backup refusal.
+fn stopped(out: &mut Outcome, e: &anyhow::Error) {
+    out.refused = BackupRefused::of(e).cloned();
+    out.error = Some(format!("{e:#}"));
 }
 
 /// The High items of `rescan` that the scan the removal worked from did not
@@ -756,6 +765,8 @@ mod tests {
         outlives_end: bool,
         /// Items a scan finds only once the item at the path is gone.
         shows_once_gone: RefCell<Vec<(String, Leftover)>>,
+        /// The backup folder cannot be made.
+        no_backup: bool,
         /// Backups made so far.
         backups: RefCell<usize>,
         calls: RefCell<Vec<String>>,
@@ -775,6 +786,7 @@ mod tests {
                 may_end: Vec::new(),
                 outlives_end: false,
                 shows_once_gone: RefCell::new(Vec::new()),
+                no_backup: false,
                 backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
             }
@@ -925,6 +937,11 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("remove {}", items.len()));
+            if self.no_backup {
+                return Err(anyhow::Error::new(BackupRefused {
+                    reason: "Access is denied. (os error 5)".to_string(),
+                }));
+            }
             let n = self.backups.replace_with(|n| *n + 1) + 1;
             Ok(DeletionOutcome {
                 backup_name: Some(format!("backup {n}")),
@@ -1155,6 +1172,34 @@ mod tests {
         assert!(!calls
             .iter()
             .any(|c| c.starts_with("close") || c.starts_with("end")));
+    }
+
+    #[test]
+    fn a_backup_folder_that_cannot_be_made_stops_the_removal_as_a_refusal() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.no_backup = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(
+            pc.calls().contains(&"remove 2".to_string()),
+            "{:?}",
+            pc.calls()
+        );
+        assert_eq!(pc.items.borrow().len(), 3);
+        assert!(out.removal.is_none(), "{out:?}");
+        assert!(!out.complete(), "{out:?}");
+        assert_eq!(
+            out.refused,
+            Some(BackupRefused {
+                reason: "Access is denied. (os error 5)".to_string()
+            })
+        );
+        // The command line keeps its flag.
+        let said = out.error.unwrap_or_default();
+        assert!(
+            said.ends_with("Leave out --backup to delete anyway."),
+            "{said}"
+        );
     }
 
     #[test]

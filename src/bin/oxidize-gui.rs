@@ -411,7 +411,10 @@ impl OxidizeApp {
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
                 Ok(outcome) => Msg::Removed(outcome),
-                Err(e) => Msg::Error(format!("Removal failed: {e:#}")),
+                Err(e) => Msg::Error(match safety::BackupRefused::of(&e) {
+                    Some(refused) => format!("Nothing was removed. {}", refused.window_text()),
+                    None => format!("Removal failed: {e:#}"),
+                }),
             }
         });
     }
@@ -1178,11 +1181,19 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
             lines.push(format!("Backup kept: {backup}"));
         }
     }
-    if let Some(e) = &out.error {
-        lines.push(format!("ERROR: {}", window_error(e)));
+    if let Some(e) = complete_error(out) {
+        lines.push(format!("ERROR: {e}"));
     }
     lines.push(complete_status(name, out, false));
     lines
+}
+
+/// Why a complete removal stopped, as the window words it.
+fn complete_error(out: &Outcome) -> Option<String> {
+    match &out.refused {
+        Some(refused) => Some(refused.window_text()),
+        None => out.error.as_deref().map(window_error),
+    }
 }
 
 /// An error as the window shows it: the window has a button where the
@@ -1216,6 +1227,8 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         stop
     } else if never_started(out) {
         format!("{name}: the uninstaller did not start. Nothing was removed.")
+    } else if let Some(refused) = &out.refused {
+        format!("{name}: {}", refused.window_text())
     } else if let Some(e) = &out.error {
         e.clone()
     } else if out.verdict.still_installed {
@@ -2239,8 +2252,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             .color(t.weak),
         );
     }
-    if let Some(e) = &out.error {
-        ui.add(egui::Label::new(RichText::new(window_error(e)).color(t.red)).wrap());
+    if let Some(e) = complete_error(out) {
+        ui.add(egui::Label::new(RichText::new(e).color(t.red)).wrap());
     }
     if undo {
         ui.add_space(6.0);
@@ -3975,6 +3988,7 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            refused: None,
             seconds: 4.2,
         }
     }
@@ -5182,9 +5196,36 @@ mod tests {
         out.verdict.nothing_left = false;
         out.verdict.still_installed = true;
         out.error = Some(uninstall::NEEDS_ADMIN.to_string());
+        let shown = complete_shown(out);
+        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("cancelled"), "{shown}");
+    }
+
+    #[test]
+    fn a_complete_removal_without_a_backup_folder_points_to_the_setting() {
+        let refused = safety::BackupRefused {
+            reason: r"creating C:\Users\me\backups: Access is denied. (os error 5)".to_string(),
+        };
+        let mut out = finished(None);
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.error = Some(refused.to_string());
+        out.refused = Some(refused);
+        let status = complete_status("Example Player", &out, false);
+        let log = complete_log("Example Player", &out, false).join("\n");
+        let shown = complete_shown(out);
+        for words in [status, log, shown] {
+            assert!(words.contains("Back up before deleting"), "{words}");
+            assert!(!words.contains("--no-backup"), "{words}");
+            assert!(!words.contains("os error"), "{words}");
+        }
+    }
+
+    /// The text the details of a finished complete removal show.
+    fn complete_shown(outcome: Outcome) -> String {
         let done = Completed {
             program: example_program(),
-            outcome: out,
+            outcome,
             dry_run: false,
         };
         let ctx = egui::Context::default();
@@ -5201,8 +5242,7 @@ mod tests {
                 shown.push('\n');
             }
         }
-        assert!(shown.contains("Restart as administrator"), "{shown}");
-        assert!(!shown.contains("cancelled"), "{shown}");
+        shown
     }
 
     /// True when `shapes` hold a copper outline drawn on `rect`.

@@ -88,6 +88,42 @@ impl DeletionOutcome {
     }
 }
 
+/// A removal refused because backups are on and the backup folder could not
+/// be made. Its text is the command line's; the window words it its own way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupRefused {
+    /// Why the folder could not be made.
+    pub reason: String,
+}
+
+impl BackupRefused {
+    /// The refusal that stopped a removal, if that is what `e` is.
+    pub fn of(e: &anyhow::Error) -> Option<&BackupRefused> {
+        e.downcast_ref()
+    }
+
+    /// The refusal for someone in the window, who has no flag to pass but
+    /// has the setting.
+    pub fn window_text(&self) -> String {
+        "The backup folder could not be made. To delete without a backup, turn off \
+         \"Back up before deleting\"."
+            .to_string()
+    }
+}
+
+impl std::fmt::Display for BackupRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "could not create the backup folder ({}); refusing to delete without a backup. \
+             Leave out --backup to delete anyway.",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for BackupRefused {}
+
 // Elevation
 // ---------
 
@@ -414,10 +450,9 @@ pub fn remove_leftovers_into(
         };
         match session {
             Ok(session) => Some(session),
-            Err(e) => bail!(
-                "could not create the backup folder ({e:#}); refusing to delete without a backup. \
-                 Leave out --backup to delete anyway."
-            ),
+            Err(e) => bail!(BackupRefused {
+                reason: format!("{e:#}")
+            }),
         }
     } else {
         None
@@ -939,6 +974,41 @@ mod tests {
         for file in [&a, &b] {
             let _ = std::fs::remove_file(file);
             let _ = std::fs::remove_file(error_file(file));
+        }
+    }
+
+    #[test]
+    fn a_backup_folder_that_cannot_be_made_is_a_refusal_each_front_end_words() {
+        // A file stands where this test's backups folder belongs.
+        let backups = crate::backup::backups_base().unwrap();
+        let run = backups.parent().unwrap().to_path_buf();
+        let _cleanup = crate::backup::TestCleanup(vec![run.clone()]);
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(&backups, "x").unwrap();
+        let product = crate::backup::TestDir::new("oxidize_backup_refused_test");
+        std::fs::create_dir_all(&*product).unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            product.to_path_buf(),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let ctx = SafetyContext {
+            dry_run: false,
+            make_backups: true,
+            keep_emptied_parents: true,
+        };
+
+        let e = remove_leftovers(&[item], "Example Product", &ctx).unwrap_err();
+        assert!(product.exists());
+        let refused = BackupRefused::of(&e).expect("a backup refusal");
+        assert!(format!("{e:#}").ends_with("Leave out --backup to delete anyway."));
+        let words = refused.window_text();
+        assert!(words.contains("\"Back up before deleting\""), "{words}");
+        for term in ["--", "os error", "("] {
+            assert!(!words.contains(term), "{term} in {words}");
         }
     }
 }
