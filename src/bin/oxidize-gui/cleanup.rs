@@ -702,7 +702,12 @@ fn category_row(
     if !(f.actionable() || (f.skipped && !busy)) {
         cell.disable();
     }
-    if cell.add(egui::Checkbox::without_text(&mut on)).changed() {
+    // The title is painted, so the box carries it for a screen reader.
+    if cell
+        .add(egui::Checkbox::without_text(&mut on))
+        .accessible_name(f.category.title())
+        .changed()
+    {
         state.set(f, on);
         if on && f.skipped {
             *action = Some(Action::FindBuildOutput);
@@ -858,7 +863,11 @@ fn folder_list(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
             for o in &f.folders {
                 ui.horizontal_top(|ui| {
                     let mut on = state.folders.contains(&o.path);
-                    if ui.add(egui::Checkbox::without_text(&mut on)).changed() {
+                    if ui
+                        .add(egui::Checkbox::without_text(&mut on))
+                        .accessible_name(o.path.display().to_string())
+                        .changed()
+                    {
                         state.set_folder(&o.path, on);
                         if on && !state.ticked.contains(&Category::Orphans) {
                             state.ticked.push(Category::Orphans);

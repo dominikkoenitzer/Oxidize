@@ -2363,7 +2363,9 @@ fn render_sections(
 fn leftover_row(ui: &mut egui::Ui, t: &Tint, item: &Leftover, checked: Option<&mut bool>) {
     ui.horizontal_top(|ui| {
         if let Some(checked) = checked {
-            ui.add(egui::Checkbox::without_text(checked));
+            // The path beside the box names it for a screen reader.
+            ui.add(egui::Checkbox::without_text(checked))
+                .accessible_name(item.path.clone());
         }
         let (tag, _) = ui.allocate_exact_size(egui::vec2(46.0, 18.0), egui::Sense::hover());
         ui.painter().text(
@@ -5848,6 +5850,88 @@ mod tests {
             assert!(has_ring(&shapes, rect, copper), "no focus ring at {rect:?}");
         }
         assert!(seen.len() > 5, "{}", seen.len());
+    }
+
+    #[test]
+    fn every_checkbox_has_a_name_for_a_screen_reader() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        apply_style(&ctx);
+        let program = example_program();
+        let path = r"D:\Games\Example Player";
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            std::path::PathBuf::from(path),
+            Confidence::High,
+            "found",
+            None,
+            false,
+        );
+        let mut app = app();
+        app.programs = vec![program.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        app.tx
+            .send(Msg::Scan {
+                id: program.id().to_string(),
+                report: ScanReport {
+                    program_name: "Example Player".to_string(),
+                    installed: false,
+                    items: vec![item],
+                },
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.checked.len(), 1);
+        app.cleanup
+            .take_analysis(clean::Places::default(), cleanup::tests::analysis());
+        app.cleanup.focus = Some(clean::Category::Orphans);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut names = Vec::new();
+        for tab in [Tab::Programs, Tab::Cleanup] {
+            app.tab = tab;
+            let mut out = None;
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut full = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                full.textures_delta.clear();
+                out = Some(full);
+            }
+            let update = out
+                .unwrap()
+                .platform_output
+                .accesskit_update
+                .expect("AccessKit is on");
+            let boxes: Vec<String> = update
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == egui::accesskit::Role::CheckBox)
+                .map(|(_, node)| node.label().unwrap_or_default().to_string())
+                .collect();
+            assert!(!boxes.is_empty(), "{tab:?} shows no checkbox");
+            assert!(
+                boxes.iter().all(|name| !name.trim().is_empty()),
+                "{tab:?}: a checkbox has no name: {boxes:?}"
+            );
+            names.extend(boxes);
+        }
+        let folder = cleanup::tests::analysis()
+            .finding(clean::Category::Orphans)
+            .unwrap()
+            .folders[0]
+            .path
+            .display()
+            .to_string();
+        for name in [path, clean::Category::Orphans.title(), folder.as_str()] {
+            assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+        }
     }
 
     #[test]
