@@ -206,6 +206,9 @@ struct OxidizeApp {
     /// work is done.
     close_when_done: bool,
     status: String,
+    /// The program whose next scan leaves the status as it is: the re-scan
+    /// after a removal that partly failed, so the failed count stays shown.
+    keep_status_for: Option<String>,
     log: Vec<String>,
     confirm: Option<Confirm>,
 
@@ -258,6 +261,7 @@ impl OxidizeApp {
             jobs: 0,
             close_when_done: false,
             status: String::new(),
+            keep_status_for: None,
             log: Vec::new(),
             confirm: None,
             tx,
@@ -377,6 +381,8 @@ impl OxidizeApp {
     }
 
     fn start_scan(&mut self, ctx: &egui::Context, program: Program) {
+        // A newer scan says what it finds, whatever an earlier removal held.
+        self.keep_status_for = None;
         self.status = format!("Scanning for leftovers of {}...", program.display_name);
         self.spawn(ctx, move || {
             // One reading of the machine serves both steps.
@@ -766,19 +772,21 @@ impl OxidizeApp {
                         .all()
                         .map(|l| !report.installed && l.confidence == Confidence::High)
                         .collect();
-                    self.status = if report.installed {
-                        format!(
-                            "{} up {}. It is still installed.",
-                            count(report.total(), "item makes", "items make"),
-                            report.program_name
-                        )
-                    } else {
-                        format!(
-                            "{} of {}.",
-                            count(report.total(), "leftover", "leftovers"),
-                            report.program_name
-                        )
-                    };
+                    if self.keep_status_for.take().as_deref() != Some(id.as_str()) {
+                        self.status = if report.installed {
+                            format!(
+                                "{} up {}. It is still installed.",
+                                count(report.total(), "item makes", "items make"),
+                                report.program_name
+                            )
+                        } else {
+                            format!(
+                                "{} of {}.",
+                                count(report.total(), "leftover", "leftovers"),
+                                report.program_name
+                            )
+                        };
+                    }
                     self.scan_for = Some(id);
                     self.scan = Some(report);
                     self.job_done();
@@ -818,7 +826,7 @@ impl OxidizeApp {
                                 .to_string(),
                         );
                     }
-                    self.status = line;
+                    self.status = line.clone();
                     self.job_done();
                     if !dry_run {
                         // Re-scan to show what remains, and refresh the list.
@@ -826,6 +834,11 @@ impl OxidizeApp {
                         if let Some(program) = self.selected_program() {
                             let program = program.clone();
                             self.start_scan(ctx, program);
+                            if outcome.failed > 0 {
+                                // What failed stays in view through the re-scan.
+                                self.status = line;
+                                self.keep_status_for = self.selected.clone();
+                            }
                         }
                         self.reload_programs(ctx);
                     }
@@ -4063,6 +4076,133 @@ mod tests {
         assert!(app.status.starts_with("dry run"), "{}", app.status);
         // A preview changes nothing, so nothing is read again.
         assert!(!app.busy());
+    }
+
+    #[test]
+    fn a_removal_that_failed_keeps_its_count_through_the_re_scan() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let mut app = app();
+        app.programs = vec![program.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let outcome = DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        };
+        app.tx.send(Msg::Removed(outcome)).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // The re-scan and the list reload it started both answer. Only the
+        // scan goes through, so the program stays selected.
+        let mut answers = 0;
+        let mut scan = None;
+        let start = std::time::Instant::now();
+        while answers < 2 && start.elapsed() < std::time::Duration::from_secs(300) {
+            match app.rx.try_recv() {
+                Ok(msg) => {
+                    answers += 1;
+                    if matches!(msg, Msg::Scan { .. }) {
+                        scan = Some(msg);
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        app.job_done();
+        app.tx
+            .send(scan.expect("the program is scanned again"))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.scan.is_some());
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // A later scan of it says what it found, as before.
+        app.jobs = 1;
+        let report = ScanReport {
+            program_name: "Example Player".to_string(),
+            installed: false,
+            items: Vec::new(),
+        };
+        app.tx
+            .send(Msg::Scan {
+                id: program.id().to_string(),
+                report,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "0 leftovers of Example Player.");
+    }
+
+    #[test]
+    fn a_scan_after_another_program_was_picked_during_the_re_scan_says_what_it_found() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let other = Program {
+            registry_key: "other-app".to_string(),
+            display_name: "Other App".to_string(),
+            ..example_program()
+        };
+        let mut app = app();
+        app.programs = vec![program.clone(), other.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let outcome = DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        };
+        app.tx.send(Msg::Removed(outcome)).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // Another program is picked while the re-scan runs, so its answer is
+        // dropped. The list reload is left out to keep that selection.
+        app.select(other.id());
+        let answers = wait_for_answers(&mut app, 2);
+        app.job_done();
+        for msg in answers {
+            if matches!(msg, Msg::Scan { .. }) {
+                app.tx.send(msg).unwrap();
+            }
+        }
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+
+        // Back to the first program and a scan of it.
+        app.select(program.id());
+        app.act(&ctx, Action::Scan(program.clone()));
+        assert_eq!(app.status, "Scanning for leftovers of Example Player...");
+        for msg in wait_for_answers(&mut app, 1) {
+            app.tx.send(msg).unwrap();
+        }
+        app.drain_messages(&ctx);
+        let found = app.scan.as_ref().expect("the scan is shown").total();
+        assert_eq!(
+            app.status,
+            format!(
+                "{} of Example Player.",
+                count(found, "leftover", "leftovers")
+            )
+        );
+    }
+
+    /// Takes `n` answers of the background work off the channel.
+    fn wait_for_answers(app: &mut OxidizeApp, n: usize) -> Vec<Msg> {
+        let mut answers = Vec::new();
+        let start = std::time::Instant::now();
+        while answers.len() < n && start.elapsed() < std::time::Duration::from_secs(300) {
+            match app.rx.try_recv() {
+                Ok(msg) => answers.push(msg),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        assert_eq!(answers.len(), n, "the background work answers");
+        answers
     }
 
     #[test]
