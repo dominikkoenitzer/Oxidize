@@ -2965,11 +2965,17 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
 /// Drop repeats. Paths compare normalised, so an install folder recorded with
 /// a trailing separator is the entry the walk already found, and of two
 /// findings for one path the more confident one stays whichever came first.
+/// A firewall rule is its own value, so rules that read alike all stay.
 fn dedupe_by_path(items: &mut Vec<Leftover>) {
     let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut drop = vec![false; items.len()];
     for i in 0..items.len() {
-        let key = norm_path_str(&items[i].path);
+        let key = match (&items[i].kind, &items[i].value_name) {
+            (LeftoverKind::FirewallRule, Some(id)) => {
+                format!("firewall rule {}", id.to_lowercase())
+            }
+            _ => norm_path_str(&items[i].path),
+        };
         match best.get(&key) {
             Some(&j) if items[j].confidence <= items[i].confidence => drop[i] = true,
             Some(&j) => {
@@ -3137,6 +3143,48 @@ mod tests {
             Some(PathBuf::from(r"C:\Users\me"))
         );
         assert_eq!(env_dir("OXIDIZE_ENV_DIR_UNSET"), None);
+    }
+
+    #[test]
+    fn firewall_rules_that_read_alike_stay_apart() {
+        let rule = |id: &str| {
+            Leftover::firewall_rule(
+                id,
+                "Quillmark",
+                "in tcp",
+                r"C:\Program Files\Quillmark\quill.exe",
+                Confidence::High,
+                "program",
+            )
+        };
+        let mut items = vec![rule("{A}"), rule("{B}"), rule("{A}")];
+        dedupe_by_path(&mut items);
+        let ids: Vec<_> = items
+            .iter()
+            .filter_map(|l| l.value_name.as_deref())
+            .collect();
+        assert_eq!(ids, ["{A}", "{B}"]);
+    }
+
+    #[test]
+    fn a_folder_found_twice_is_one_item_the_more_confident_one() {
+        let dir = |path: &str, confidence| {
+            Leftover::fs(
+                LeftoverKind::Directory,
+                PathBuf::from(path),
+                confidence,
+                "folder",
+                None,
+                false,
+            )
+        };
+        let mut items = vec![
+            dir(r"C:\Program Files\Quillmark\", Confidence::Medium),
+            dir(r"C:\Program Files\Quillmark", Confidence::High),
+        ];
+        dedupe_by_path(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].confidence, Confidence::High);
     }
 
     fn target() -> ScanTarget {

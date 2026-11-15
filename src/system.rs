@@ -786,7 +786,7 @@ pub struct FirewallRule {
     pub name: String,
     /// The program the rule applies to.
     pub app: PathBuf,
-    /// `in` or `out`, plus the protocol when it is TCP or UDP.
+    /// What [`rule_kind`] reads from the rule.
     pub kind: String,
 }
 
@@ -797,28 +797,14 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
     for (id, data) in registry::enum_string_values(Hive::LocalMachine, FIREWALL_RULES_KEY) {
         let mut app = None;
         let mut name = None;
-        let mut dir = String::new();
-        let mut proto = String::new();
         for part in data.split('|') {
             if let Some(v) = part.strip_prefix("App=") {
                 app = Some(v.to_string());
             } else if let Some(v) = part.strip_prefix("Name=") {
                 name = Some(v.to_string());
-            } else if let Some(v) = part.strip_prefix("Dir=") {
-                dir = v.to_lowercase();
-            } else if let Some(v) = part.strip_prefix("Protocol=") {
-                proto = match v {
-                    "6" => "tcp".to_string(),
-                    "17" => "udp".to_string(),
-                    _ => String::new(),
-                };
             }
         }
-        let kind = [dir, proto]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let kind = rule_kind(&data);
         let Some(app) = app else { continue };
         if app.eq_ignore_ascii_case("System") || !app.contains('\\') {
             continue;
@@ -844,6 +830,31 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
         });
     }
     out
+}
+
+/// How a rule reads after its name: its direction, TCP or UDP, and the profiles it names.
+fn rule_kind(data: &str) -> String {
+    let mut dir = String::new();
+    let mut proto = "";
+    let mut profiles = Vec::new();
+    for part in data.split('|') {
+        if let Some(v) = part.strip_prefix("Dir=") {
+            dir = v.to_lowercase();
+        } else if let Some(v) = part.strip_prefix("Protocol=") {
+            proto = match v {
+                "6" => "tcp",
+                "17" => "udp",
+                _ => "",
+            };
+        } else if let Some(v) = part.strip_prefix("Profile=") {
+            profiles.push(v.to_lowercase());
+        }
+    }
+    [dir, proto.to_string(), profiles.join("/")]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // Processes
@@ -1204,6 +1215,27 @@ pub fn end_processes(_procs: &[crate::complete::Running]) -> Vec<crate::complete
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rule_names_the_networks_it_is_limited_to() {
+        let rule = |profiles: &str| {
+            rule_kind(&format!(
+                r"v2.33|Action=Allow|Active=TRUE|Dir=In|Protocol=6|{profiles}App=C:\Quillmark\quill.exe|Name=Quillmark|"
+            ))
+        };
+        assert_eq!(rule("Profile=Private|"), "in tcp private");
+        assert_eq!(rule("Profile=Public|"), "in tcp public");
+        assert_eq!(
+            rule("Profile=Domain|Profile=Private|"),
+            "in tcp domain/private"
+        );
+        assert_eq!(rule(""), "in tcp");
+        assert_eq!(
+            rule_kind("v2.33|Action=Block|Dir=Out|Protocol=17|"),
+            "out udp"
+        );
+        assert_eq!(rule_kind("v2.33|Action=Allow|Dir=In|Protocol=1|"), "in");
+    }
 
     #[test]
     fn the_windows_folder_is_where_windows_says_it_is() {
