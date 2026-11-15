@@ -766,6 +766,39 @@ mod tests {
     }
 
     #[test]
+    fn a_vendor_key_that_still_holds_something_is_kept() {
+        // The test's vendor key goes when the test ends, also when it fails.
+        struct Vendor(String);
+        impl Drop for Vendor {
+            fn drop(&mut self) {
+                let _ = registry::delete_key_tree(Hive::CurrentUser, &self.0);
+            }
+        }
+        let vendor = Vendor(format!(
+            r"Software\OxidizeVendorKeyTest{}",
+            std::process::id()
+        ));
+        let product = format!(r"{}\Removed", vendor.0);
+        let other = format!(r"{}\Other", vendor.0);
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        assert_eq!(vendor_key_above(&product), Some(vendor.0.as_str()));
+
+        hkcu.create_subkey(&other).unwrap();
+        assert_eq!(empty_vendor_key(Hive::CurrentUser, &product), None);
+
+        hkcu.delete_subkey(&other).unwrap();
+        let (key, _) = hkcu.create_subkey(&vendor.0).unwrap();
+        key.set_value("kept", &"yes").unwrap();
+        assert_eq!(empty_vendor_key(Hive::CurrentUser, &product), None);
+
+        key.delete_value("kept").unwrap();
+        assert_eq!(
+            empty_vendor_key(Hive::CurrentUser, &product),
+            Some(vendor.0.clone())
+        );
+    }
+
+    #[test]
     fn only_a_vendor_folder_left_empty_goes_with_the_product() {
         let base = crate::backup::TestDir::new("oxidize_emptied_parent_test");
         let vendor = base.join("Example Vendor");
