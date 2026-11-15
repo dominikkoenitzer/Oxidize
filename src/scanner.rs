@@ -3121,6 +3121,48 @@ mod tests {
         assert_eq!(env_dir("OXIDIZE_ENV_DIR_UNSET"), None);
     }
 
+    #[test]
+    fn firewall_rules_that_read_alike_stay_apart() {
+        let rule = |id: &str| {
+            Leftover::firewall_rule(
+                id,
+                "Quillmark",
+                "in tcp",
+                r"C:\Program Files\Quillmark\quill.exe",
+                Confidence::High,
+                "program",
+            )
+        };
+        let mut items = vec![rule("{A}"), rule("{B}"), rule("{A}")];
+        dedupe_by_path(&mut items);
+        let ids: Vec<_> = items
+            .iter()
+            .filter_map(|l| l.value_name.as_deref())
+            .collect();
+        assert_eq!(ids, ["{A}", "{B}"]);
+    }
+
+    #[test]
+    fn a_folder_found_twice_is_one_item_the_more_confident_one() {
+        let dir = |path: &str, confidence| {
+            Leftover::fs(
+                LeftoverKind::Directory,
+                PathBuf::from(path),
+                confidence,
+                "folder",
+                None,
+                false,
+            )
+        };
+        let mut items = vec![
+            dir(r"C:\Program Files\Quillmark\", Confidence::Medium),
+            dir(r"C:\Program Files\Quillmark", Confidence::High),
+        ];
+        dedupe_by_path(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].confidence, Confidence::High);
+    }
+
     fn target() -> ScanTarget {
         let mut t = name_target("Corvane Glide", Some("Corvane LLC"));
         t.exe_names = vec!["glide.exe".to_string()];
