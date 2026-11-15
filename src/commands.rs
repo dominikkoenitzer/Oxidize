@@ -384,6 +384,12 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
                 Some(_) => None,
                 None => scanner::publisher_hint(&args.target),
             };
+            let publisher = args
+                .publisher
+                .clone()
+                .or_else(|| hint.as_ref().map(|(p, _)| p.clone()));
+            let target = scanner::name_only_target(&args.target, publisher.as_deref());
+            refuse_wordless(&args.target, &target)?;
             if !g.json {
                 println!(
                     "{}",
@@ -403,11 +409,7 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
                     );
                 }
             }
-            let publisher = args.publisher.clone().or_else(|| hint.map(|(p, _)| p));
-            (
-                scanner::name_only_target(&args.target, publisher.as_deref()),
-                args.target.clone(),
-            )
+            (target, args.target.clone())
         }
     };
     let installed = installed.is_some();
@@ -478,6 +480,19 @@ pub(crate) fn scan_subject<'a>(
             Ok(None)
         }
     }
+}
+
+/// Refuses a scan by name that nothing can match: no name word, no publisher word, and a whole name under the scanner's 3-character floor.
+pub(crate) fn refuse_wordless(name: &str, target: &ScanTarget) -> Result<()> {
+    if target.name_tokens.is_empty()
+        && target.publisher_tokens.is_empty()
+        && util::normalize(&target.display_name).len() < 3
+    {
+        bail!(
+            "\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher"
+        );
+    }
+    Ok(())
 }
 
 fn print_remove_hint(high: usize, command: &str) {
@@ -3359,6 +3374,29 @@ mod tests {
     use crate::packages::fake::{package, FakePackageStore};
     use crate::safety::ItemOutcome;
     use clap::Parser;
+
+    #[test]
+    fn a_name_too_short_gives_nothing_to_search_by() {
+        for name in ["R", "Go", "7z", "C++"] {
+            let error = refuse_wordless(name, &scanner::name_only_target(name, None)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher")
+            );
+        }
+        for name in ["7-Zip", "Git"] {
+            assert!(refuse_wordless(name, &scanner::name_only_target(name, None)).is_ok());
+        }
+        let with_publisher = scanner::name_only_target("Go", Some("Example Studio"));
+        assert!(refuse_wordless("Go", &with_publisher).is_ok());
+    }
+
+    #[test]
+    fn a_name_of_only_common_words_still_scans_by_the_whole_name() {
+        for name in ["Setup", "2024", "Media Player"] {
+            assert!(refuse_wordless(name, &scanner::name_only_target(name, None)).is_ok());
+        }
+    }
 
     #[test]
     fn the_dead_folder_hint_promises_no_backup_when_backups_are_off() {
