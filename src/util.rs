@@ -372,6 +372,59 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Why an operation failed, in the words of the first system error in its chain, for a user to read.
+pub fn plain_reason(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut cause = e;
+    while !cause.is::<std::io::Error>() {
+        match cause.source() {
+            Some(next) => cause = next,
+            None => break,
+        }
+    }
+    let text = cause.to_string();
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(" (") {
+        plain.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        match error_code_len(tail) {
+            Some(len) => rest = &tail[len..],
+            None => {
+                plain.push_str(" (");
+                rest = tail;
+            }
+        }
+    }
+    plain.push_str(rest);
+    let plain = plain.trim();
+    plain
+        .strip_suffix('.')
+        .unwrap_or(plain)
+        .trim_end()
+        .to_string()
+}
+
+/// The length of "os error 5)" or "0x80070005)" at the start of `s`, the codes Rust and Windows append.
+fn error_code_len(s: &str) -> Option<usize> {
+    let (body, hex) = match (s.strip_prefix("os error "), s.strip_prefix("0x")) {
+        (Some(body), _) => (body, false),
+        (_, Some(body)) => (body, true),
+        _ => return None,
+    };
+    let len = body
+        .bytes()
+        .take_while(|b| {
+            if hex {
+                b.is_ascii_hexdigit()
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+        .count();
+    let fits = if hex { len == 8 } else { len > 0 };
+    (fits && body[len..].starts_with(')')).then(|| s.len() - body.len() + len + 1)
+}
+
 /// Parse a raw `InstallDate` value into `YYYY-MM-DD`. Installers write the
 /// documented `YYYYMMDD`, but also ISO dates, `MM/DD/YYYY` and free text.
 /// Anything that is not a plausible date yields `None`.
@@ -422,6 +475,36 @@ pub fn file_basename_lower(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_reads_as_the_words_of_the_system_error_in_it() {
+        let missing = std::io::Error::from_raw_os_error(2);
+        let words = missing.to_string();
+        let words = words.split(" (os error").next().unwrap();
+        let words = words.strip_suffix('.').unwrap_or(words);
+        assert_eq!(plain_reason(&missing), words);
+        let chained = anyhow::Error::from(std::io::Error::from_raw_os_error(2))
+            .context("starting dism.exe")
+            .context("reading the component store");
+        assert_eq!(plain_reason(chained.as_ref()), words);
+        // A message that quotes system errors keeps their words and loses each number.
+        let quoted = std::io::Error::other(
+            "part is gone: Not here. (os error 145); stopped: Busy. (os error 32)",
+        );
+        assert_eq!(
+            plain_reason(&quoted),
+            "part is gone: Not here.; stopped: Busy"
+        );
+        let coded = std::io::Error::other("Catastrophic failure (0x8000FFFF)");
+        assert_eq!(plain_reason(&coded), "Catastrophic failure");
+        // Without an io error the root cause speaks, and other parentheses stay.
+        let root =
+            anyhow::anyhow!("dism.exe ended with exit code 5 (os error x)").context("cleaning");
+        assert_eq!(
+            plain_reason(root.as_ref()),
+            "dism.exe ended with exit code 5 (os error x)"
+        );
+    }
 
     #[test]
     fn splits_quoted_exe_with_args() {

@@ -22,6 +22,7 @@ use super::jumplist;
 use super::protect::Protected;
 use super::{Kept, KeptReason};
 use crate::scanner;
+use crate::util::plain_reason;
 
 /// Explorer's key under `HKEY_CURRENT_USER`, where its lists are.
 pub const EXPLORER_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer";
@@ -593,7 +594,7 @@ fn reason_of(e: &io::Error) -> KeptReason {
         Some(32) | Some(33) => KeptReason::InUse,
         Some(5) => KeptReason::AccessDenied,
         _ if e.kind() == io::ErrorKind::PermissionDenied => KeptReason::AccessDenied,
-        _ => KeptReason::Failed(e.to_string()),
+        _ => KeptReason::Failed(plain_reason(e)),
     }
 }
 
@@ -609,7 +610,12 @@ pub fn clear(places: &TracePlaces, protected: &Protected, shell: &dyn Shell) -> 
     // once. What is left goes file by file.
     if windows_may_clear(places, protected) {
         if let Err(e) = shell.clear_recent() {
-            note(Trace::JumpLists, KeptReason::Failed(format!("{e:#}")), 0, 0);
+            note(
+                Trace::JumpLists,
+                KeptReason::Failed(plain_reason(e.as_ref())),
+                0,
+                0,
+            );
         }
     }
     if let Some(dir) = &places.recent {
@@ -657,7 +663,7 @@ pub fn clear(places: &TracePlaces, protected: &Protected, shell: &dyn Shell) -> 
             if let Err(e) = shell.purge_thumbnails(dir) {
                 note(
                     Trace::Thumbnails,
-                    KeptReason::Failed(format!("{e:#}")),
+                    KeptReason::Failed(plain_reason(e.as_ref())),
                     0,
                     0,
                 );
@@ -668,7 +674,12 @@ pub fn clear(places: &TracePlaces, protected: &Protected, shell: &dyn Shell) -> 
     let clip = before.iter().find(|f| f.trace == Trace::Clipboard);
     if clip.is_some_and(TraceFinding::actionable) {
         if let Err(e) = shell.clear_clipboard() {
-            note(Trace::Clipboard, KeptReason::Failed(format!("{e:#}")), 0, 0);
+            note(
+                Trace::Clipboard,
+                KeptReason::Failed(plain_reason(e.as_ref())),
+                0,
+                0,
+            );
         }
     }
 

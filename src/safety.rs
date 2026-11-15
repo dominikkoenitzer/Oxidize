@@ -455,7 +455,7 @@ pub fn remove_leftovers_into(
             }
             Err(e) => {
                 outcome.failed += 1;
-                ItemStatus::Failed(format!("{e:#}"))
+                ItemStatus::Failed(crate::util::plain_reason(e.as_ref()))
             }
         };
         outcome.items.push(ItemOutcome {
@@ -692,6 +692,42 @@ mod tests {
         assert!(vendor_key_above(r"SOFTWARE\NVIDIA Corporation\Global").is_none());
         // A key that does not exist is not empty, so nothing is proposed.
         assert!(empty_vendor_key(Hive::CurrentUser, r"SOFTWARE\NoSuchVendor\NoSuchApp").is_none());
+    }
+
+    #[test]
+    fn a_removal_that_fails_reads_as_the_words_of_windows() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = crate::backup::TestDir::new("oxidize_failed_words_test");
+        let file = base.join("held.txt");
+        std::fs::create_dir_all(&*base).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&file)
+            .unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::File,
+            file,
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let ctx = SafetyContext {
+            dry_run: false,
+            make_backups: false,
+            keep_emptied_parents: true,
+        };
+        let outcome = remove_leftovers(&[item], "Example", &ctx).unwrap();
+        drop(held);
+        let ItemStatus::Failed(text) = &outcome.items[0].status else {
+            panic!("{:?}", outcome.items[0].status);
+        };
+        let words = std::io::Error::from_raw_os_error(32).to_string();
+        assert!(!text.contains("os error"), "{text}");
+        assert!(!text.ends_with('.'), "{text}");
+        assert!(words.starts_with(text.as_str()), "{text}");
     }
 
     #[test]
