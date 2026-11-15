@@ -48,6 +48,8 @@ pub struct Cleanup {
     /// The ticked categories are being cleaned; the analysis went with
     /// the work.
     pub cleaning: bool,
+    /// Analysis parts still running: the file count and the trace search.
+    pub analysis_jobs: u8,
 }
 
 /// The two views of the tab, each with its own one action.
@@ -131,7 +133,13 @@ impl Cleanup {
             focus: None,
             busy: false,
             cleaning: false,
+            analysis_jobs: 0,
         }
+    }
+
+    /// An analysis runs, and not only some other work.
+    fn analysing(&self) -> bool {
+        self.analysis_jobs > 0
     }
 
     /// Why `action` cannot run: it needs the protected list, and the list
@@ -382,7 +390,7 @@ fn head(
     action: &mut Option<Action>,
 ) {
     let analysed = state.has_something();
-    let (big, small) = headline(state, busy);
+    let (big, small) = headline(state, state.analysing());
     ui.horizontal(|ui| {
         ui.label(RichText::new(big).size(24.0).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -442,13 +450,13 @@ fn head(
 }
 
 /// The two lines at the top left: a figure, and what it is.
-fn headline(state: &Cleanup, busy: bool) -> (String, String) {
+fn headline(state: &Cleanup, analysing: bool) -> (String, String) {
     match (state.view, &state.analysis) {
-        _ if !state.has_something() => state.first_view(busy),
+        _ if !state.has_something() => state.first_view(analysing),
         // The traces went with a change to the protected list or a failed read.
-        (View::Slate, _) if state.slate.is_empty() && !busy => state.first_view(false),
+        (View::Slate, _) if state.slate.is_empty() && !analysing => state.first_view(false),
         (View::Slate, _) => slate::headline(&state.slate),
-        (View::Files, None) => state.without_analysis(busy),
+        (View::Files, None) => state.without_analysis(analysing),
         (View::Files, Some((_, a))) => {
             let choice = state.choice_in(a);
             let n = choice.categories.len();
@@ -515,7 +523,7 @@ pub fn view(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !state.has_something() {
-                if !busy {
+                if !state.analysing() {
                     what_it_counts(ui, t);
                 }
                 return;
@@ -563,7 +571,7 @@ pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, make_backups: bool
                 return;
             }
             let Some((places, analysis)) = state.analysis.take() else {
-                let (_, line) = state.without_analysis(state.busy);
+                let (_, line) = state.without_analysis(state.analysing());
                 ui.label(RichText::new(line).color(t.weak));
                 return;
             };
@@ -1114,6 +1122,7 @@ pub(crate) mod tests {
             focus: None,
             busy: false,
             cleaning: false,
+            analysis_jobs: 0,
         }
     }
 
@@ -1319,6 +1328,59 @@ pub(crate) mod tests {
         assert_eq!(headline(&c, true).0, "Analysing...");
     }
 
+    /// Every text the head and the main area of the tab draw in one frame.
+    fn tab_text(state: &mut Cleanup, busy: bool) -> String {
+        let ctx = egui::Context::default();
+        let t = Tint::of(false);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            strip(ui, &t, state, busy, false, &mut None);
+            view(ui, &t, state, busy, &mut None);
+        });
+        out.textures_delta.clear();
+        let mut shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+        let mut text = String::new();
+        while let Some(shape) = shapes.pop() {
+            match shape {
+                egui::Shape::Vec(inner) => shapes.extend(inner),
+                egui::Shape::Text(t) => {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+                _ => {}
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn other_work_does_not_make_the_tab_say_it_analyses() {
+        // The program list loading at launch, or a removal from the programs.
+        let mut c = tab();
+        c.busy = true;
+        let text = tab_text(&mut c, true);
+        assert!(!text.contains("Analysing..."), "{text}");
+        assert!(text.contains("Clean up this PC"), "{text}");
+        assert!(
+            text.contains("Nothing is deleted until you choose."),
+            "{text}"
+        );
+        assert!(text.contains("What it looks at"), "{text}");
+    }
+
+    #[test]
+    fn an_analysis_under_way_says_so() {
+        let mut c = tab();
+        c.busy = true;
+        c.analysis_jobs = 2;
+        let text = tab_text(&mut c, true);
+        assert!(text.contains("Analysing..."), "{text}");
+        assert!(
+            text.contains("Counting what each category holds."),
+            "{text}"
+        );
+        assert!(!text.contains("What it looks at"), "{text}");
+    }
+
     #[test]
     fn the_head_says_cleaning_while_it_cleans_and_what_it_freed_after() {
         let mut c = tab();
@@ -1382,6 +1444,8 @@ pub(crate) mod tests {
             assert!(!side_text(c).contains("Counting"));
             assert_eq!(headline(c, true).0, "Analysing...");
             c.busy = true;
+            assert!(!side_text(c).contains("Counting"));
+            c.analysis_jobs = 1;
             assert!(side_text(c).contains("Counting what each category holds."));
         }
         // Files cleaned, then the protected list changed: the traces went.

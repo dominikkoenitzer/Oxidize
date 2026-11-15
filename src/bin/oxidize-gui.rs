@@ -294,6 +294,11 @@ impl OxidizeApp {
         self.jobs = self.jobs.saturating_sub(1);
     }
 
+    /// One part of an analysis sent its answer.
+    fn analysis_part_done(&mut self) {
+        self.cleanup.analysis_jobs = self.cleanup.analysis_jobs.saturating_sub(1);
+    }
+
     /// What closing the window does. While work runs it waits: a removal
     /// or a cleaning cut off halfway leaves the program or the folder half
     /// done. The window closes by itself once the work is.
@@ -489,6 +494,7 @@ impl OxidizeApp {
 
     fn start_analyse(&mut self, ctx: &egui::Context) {
         self.status = "Analysing what can be cleaned...".to_string();
+        self.cleanup.analysis_jobs = 2;
         let protected = self.cleanup.protected.clone();
         self.spawn(ctx, move || {
             let (places, analysis) =
@@ -853,6 +859,7 @@ impl OxidizeApp {
                     let (places, analysis) = *found;
                     self.status = analysed_status(&analysis, &analysis.default_choice());
                     self.cleanup.take_analysis(places, analysis);
+                    self.analysis_part_done();
                     self.job_done();
                 }
                 Msg::BuildFound(found) => {
@@ -866,6 +873,7 @@ impl OxidizeApp {
                 Msg::Cleaned(results) => self.on_cleaned(results),
                 Msg::TracesFound(found) => {
                     self.cleanup.slate.take_found(found);
+                    self.analysis_part_done();
                     self.job_done();
                 }
                 Msg::TracesCleared(results) => self.on_traces_cleared(results),
@@ -873,6 +881,8 @@ impl OxidizeApp {
                     // A cleaning that stopped is no longer under way.
                     self.cleanup.cleaning = false;
                     self.cleanup.drop_look_tick();
+                    // One kind of work runs at a time: during an analysis this was a part of it.
+                    self.analysis_part_done();
                     self.log.extend(system::take_tool_log());
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
@@ -3991,6 +4001,32 @@ mod tests {
         // And a stray extra answer never takes the count below zero.
         app.job_done();
         assert_eq!(app.jobs, 0);
+    }
+
+    #[test]
+    fn the_tab_counts_only_the_parts_of_an_analysis() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        // The list loading at launch is work, but no analysis.
+        app.jobs = 1;
+        app.tx
+            .send(Msg::Error("the list stopped".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.cleanup.analysis_jobs, 0);
+
+        // An analysis whose file count stopped: the trace search still ends it.
+        app.jobs = 2;
+        app.cleanup.analysis_jobs = 2;
+        app.tx.send(Msg::TracesFound(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.cleanup.analysis_jobs, 1);
+        app.tx
+            .send(Msg::Error("the count stopped".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.cleanup.analysis_jobs, 0);
+        assert!(!app.busy());
     }
 
     #[test]
