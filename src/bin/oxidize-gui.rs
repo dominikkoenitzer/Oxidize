@@ -1267,7 +1267,7 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         format!("{name}: {}", refused.window_text())
     } else if let Some(e) = &out.error {
         e.clone()
-    } else if out.verdict.still_installed {
+    } else if out.uninstaller_left_it_registered() {
         format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running."
         )
@@ -2271,7 +2271,7 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             ))
             .color(t.weak),
         );
-    } else if v.still_installed && out.error.is_none() {
+    } else if out.uninstaller_left_it_registered() {
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
@@ -5728,6 +5728,59 @@ mod tests {
         }
         assert!(shown.contains("player.exe is still running"), "{shown}");
         assert!(!shown.contains("cancelled"), "{shown}");
+    }
+
+    #[test]
+    fn a_skipped_uninstaller_is_not_called_cancelled_when_the_entry_stays() {
+        // Oxidize removed the program itself; its uninstall entry would not go.
+        let mut out = finished(None);
+        out.removal = Some(DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        });
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        let shown = |out: &Outcome| {
+            let done = Completed {
+                program: example_program(),
+                outcome: out.clone(),
+                dry_run: false,
+            };
+            let ctx = egui::Context::default();
+            apply_style(&ctx);
+            let t = Tint::of(ctx.global_style().visuals.dark_mode);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show_complete(ui, &t, &done, false, true);
+            });
+            output.textures_delta.clear();
+            let mut text = String::new();
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(t) = &clipped.shape {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+            }
+            text
+        };
+        assert_eq!(
+            complete_status("Example Player", &out, false),
+            "Example Player: some items could not be removed."
+        );
+        let view = shown(&out);
+        assert!(!view.contains("cancelled"), "{view}");
+
+        // The line stays for an uninstaller that ran and left it registered.
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.uninstaller = Some("finished".to_string());
+        let status = complete_status("Example Player", &out, false);
+        assert!(status.contains("may have been cancelled"), "{status}");
+        let view = shown(&out);
+        assert!(view.contains("may have been cancelled"), "{view}");
     }
 
     /// True when `shapes` hold a copper outline drawn on `rect`.

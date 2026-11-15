@@ -404,6 +404,11 @@ impl Outcome {
             && self.verdict.nothing_left
             && self.removal.as_ref().is_none_or(|o| o.failed == 0)
     }
+
+    /// The vendor's uninstaller ran without error and the program is still registered.
+    pub fn uninstaller_left_it_registered(&self) -> bool {
+        self.vendor.runs() && self.verdict.still_installed && self.error.is_none()
+    }
 }
 
 /// Remove `program` completely: scan its footprint, close its processes,
@@ -1200,6 +1205,33 @@ mod tests {
             said.ends_with("Leave out --backup to delete anyway."),
             "{said}"
         );
+    }
+
+    #[test]
+    fn a_registration_left_after_a_skipped_uninstaller_is_not_put_on_it() {
+        // The uninstall entry could not be deleted: still registered, no error.
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.stuck = vec![entry().path];
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(!out.vendor.runs(), "{out:?}");
+        assert!(out.verdict.still_installed, "{out:?}");
+        assert!(out.error.is_none(), "{out:?}");
+        assert!(!out.uninstaller_left_it_registered(), "{out:?}");
+
+        // An uninstaller that ran and has not finished: it may still be running.
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.never_ends = true;
+        let p = program(Hive::LocalMachine);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(out.vendor.runs(), "{out:?}");
+        assert!(out.uninstaller_left_it_registered(), "{out:?}");
+
+        // One that never started is not said to be running.
+        let mut out = out;
+        out.uninstaller = None;
+        out.error = Some("The uninstaller did not start.".to_string());
+        assert!(!out.uninstaller_left_it_registered(), "{out:?}");
     }
 
     #[test]

@@ -1290,7 +1290,7 @@ fn print_complete(name: &str, out: &complete::Outcome, dry_run: bool) {
             term::green("Nothing left."),
             term::dim(&format!("{:.1} s", out.seconds))
         );
-    } else if v.still_installed && out.error.is_none() {
+    } else if out.uninstaller_left_it_registered() {
         term::warn(&format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running."
         ));
