@@ -2947,11 +2947,17 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
 /// Drop repeats. Paths compare normalised, so an install folder recorded with
 /// a trailing separator is the entry the walk already found, and of two
 /// findings for one path the more confident one stays whichever came first.
+/// A firewall rule is its own value, so rules that read alike all stay.
 fn dedupe_by_path(items: &mut Vec<Leftover>) {
     let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut drop = vec![false; items.len()];
     for i in 0..items.len() {
-        let key = norm_path_str(&items[i].path);
+        let key = match (&items[i].kind, &items[i].value_name) {
+            (LeftoverKind::FirewallRule, Some(id)) => {
+                format!("firewall rule {}", id.to_lowercase())
+            }
+            _ => norm_path_str(&items[i].path),
+        };
         match best.get(&key) {
             Some(&j) if items[j].confidence <= items[i].confidence => drop[i] = true,
             Some(&j) => {
