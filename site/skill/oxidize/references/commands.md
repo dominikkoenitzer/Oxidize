@@ -62,7 +62,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 
 ## scan
 
-`oxidize scan PROGRAM [--publisher TEXT] [--remove] [--medium | --all | --level LEVEL]`
+`oxidize scan PROGRAM [--publisher TEXT] [--remove [--medium | --all | --level LEVEL]]`
 
 Finds a program's leftovers. Reads only unless `--remove` is given.
 
@@ -81,7 +81,7 @@ Lists folders no installed program claims, and PATH entries, autostart values, s
 
 ## trace
 
-`oxidize trace EXE_OR_PROCESS [--uninstall] [--silent] [--keep] [--medium | --all | --level LEVEL]`
+`oxidize trace EXE_OR_PROCESS [--uninstall [--silent] [--keep] [--medium | --all | --level LEVEL]]`
 
 Finds the program behind a running process or an executable.
 
@@ -113,7 +113,7 @@ Puts back everything a backup holds, in reverse order of removal, after the ques
 
 ## clean
 
-`oxidize clean [--temp] [--crash-dumps [--dump PATH]... [--skip-dumps-of PROGRAM]...] [--recycle-bin] [--browser-cache] [--component-store] [--delivery-optimization] [--windows-old] [--orphans [--delete-dead]] [--build-output] [--recycle-bin-days DAYS] [--medium | --all | --level LEVEL]`
+`oxidize clean [--temp] [--crash-dumps [--dump PATH]... [--skip-dumps-of PROGRAM]...] [--recycle-bin] [--browser-cache] [--component-store] [--delivery-optimization] [--windows-old] [--orphans [--delete-dead] [--medium | --all | --level LEVEL]] [--build-output] [--recycle-bin-days DAYS]`
 
 Counts what each category holds, from the files themselves, and what stays and why. Reads only unless `--yes` is given; then it cleans and reports per category what was freed and what stayed. It never asks a question, so `--elevate` always brings the elevated run's output back.
 

@@ -143,6 +143,8 @@ pub struct UninstallArgs {
 }
 
 #[derive(Args, Debug)]
+// The levels choose what --remove takes, so without it they would do nothing.
+#[command(mut_group("LevelOpts", |g| g.requires("remove")))]
 pub struct ScanArgs {
     /// Program name, a unique part of it, or its registry id. A program that
     /// is no longer installed is scanned by name.
@@ -170,6 +172,8 @@ pub struct OrphansArgs {
 }
 
 #[derive(Args, Debug)]
+// The levels choose what --uninstall removes, so without it they would do nothing.
+#[command(mut_group("LevelOpts", |g| g.requires("uninstall")))]
 pub struct TraceArgs {
     /// Path to an .exe or folder, or the name of a running process.
     #[arg(value_name = "EXE_OR_PROCESS", value_parser = named)]
@@ -180,11 +184,11 @@ pub struct TraceArgs {
     pub uninstall: bool,
 
     /// With --uninstall: use unattended switches where available.
-    #[arg(long)]
+    #[arg(long, requires = "uninstall")]
     pub silent: bool,
 
     /// With --uninstall: show leftovers but do not remove them.
-    #[arg(long)]
+    #[arg(long, requires = "uninstall")]
     pub keep: bool,
 
     #[command(flatten)]
@@ -223,6 +227,8 @@ fn named(s: &str) -> Result<String, String> {
 /// dumps, browser caches, and folders of removed programs at high
 /// confidence.
 #[derive(Args, Debug)]
+// The levels choose which --orphans folders go; every other category has none.
+#[command(mut_group("LevelOpts", |g| g.requires("orphans")))]
 pub struct CleanArgs {
     /// Temporary files not changed for 7 days, yours and Windows' own.
     #[arg(long)]
@@ -703,6 +709,38 @@ mod tests {
         assert!(a.delete_dead);
         assert!(Cli::try_parse_from(["oxidize", "clean", "--delete-dead"]).is_err());
         assert!(Cli::try_parse_from(["oxidize", "clean", "--temp", "--delete-dead"]).is_err());
+    }
+
+    #[test]
+    fn a_flag_that_acts_only_with_another_is_refused_without_it() {
+        for (args, missing) in [
+            ("clean --all", "--orphans"),
+            ("clean --medium", "--orphans"),
+            ("clean --level low", "--orphans"),
+            ("clean --temp --medium", "--orphans"),
+            ("trace thing.exe --keep", "--uninstall"),
+            ("trace thing.exe --silent", "--uninstall"),
+            ("trace thing.exe --medium", "--uninstall"),
+            ("trace thing.exe --level all", "--uninstall"),
+            ("scan Thing --all", "--remove"),
+            ("scan Thing --level medium", "--remove"),
+        ] {
+            let parsed = Cli::try_parse_from(std::iter::once("oxidize").chain(args.split(' ')));
+            let err = parsed.err().unwrap_or_else(|| panic!("{args} was taken"));
+            assert!(err.to_string().contains(missing), "{args}: {err}");
+        }
+        for args in [
+            "clean --orphans --all",
+            "clean --temp --orphans --medium",
+            "clean --orphans --level low",
+            "trace thing.exe --uninstall --keep --medium",
+            "trace thing.exe --uninstall --silent",
+            "scan Thing --remove --medium",
+            "uninstall Thing --all",
+            "uninstall Thing --keep --silent --level medium",
+        ] {
+            parse(args);
+        }
     }
 
     #[test]
