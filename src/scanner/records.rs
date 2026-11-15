@@ -9,7 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use super::{exe_missing, path_names_product, same_vendor, score_product};
+use super::{
+    exe_missing, is_exact_product, own_name_words, path_names_product, same_vendor, score_product,
+};
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, ScanTarget};
 use crate::{registry, system};
 
@@ -385,10 +387,19 @@ fn app_id_records(hive: Hive, places: &AppIdPlaces, target: &ScanTarget) -> Vec<
 }
 
 /// An app id such as `com.brightway.lumen.windows`: dotted words, one of
-/// them the product and another the vendor. Paths and packaged app ids
-/// (`Vendor.App_hash!App`) are not this kind of name.
+/// them the product and another the vendor, and every other word noise, one
+/// of the program's own or its whole name written as one word. A longer id
+/// such as `com.brightway.lumen.studio` is another product's. Paths and
+/// packaged app ids (`Vendor.App_hash!App`) are not this kind of name.
 fn app_id_is_programs(id: &str, target: &ScanTarget) -> bool {
     if id.is_empty() || !id.contains('.') || id.contains(['\\', '/', '!', ' ']) {
+        return false;
+    }
+    let own = own_name_words(target);
+    if !crate::util::significant_tokens(id)
+        .iter()
+        .all(|w| own.contains(w) || is_exact_product(w, target))
+    {
         return false;
     }
     let words: Vec<String> = id.split('.').map(str::to_lowercase).collect();
@@ -960,10 +971,29 @@ mod tests {
         assert!(!app_id_is_programs("com.brightway.other", &target));
         assert!(!app_id_is_programs("lumen.app", &target));
         assert!(!app_id_is_programs("com.brightway", &target));
+        // A longer name made from it is another product or channel of the vendor's.
+        assert!(!app_id_is_programs("com.brightway.lumen.studio", &target));
+        assert!(!app_id_is_programs("com.brightway.lumen-beta", &target));
+        assert!(!app_id_is_programs("Brightway.Lumen.Canary", &target));
         // A packaged app, a path or a name without dots is another kind.
         assert!(!app_id_is_programs("Brightway.Lumen_x1y2z3!App", &target));
         assert!(!app_id_is_programs(r"C:\Apps\brightway.lumen.exe", &target));
         assert!(!app_id_is_programs("BrightwayLumen", &target));
+    }
+
+    #[test]
+    fn an_app_id_may_write_the_whole_name_as_one_word() {
+        let studio = super::super::name_target("Lumen Studio", Some("Brightway Labs"));
+        assert!(app_id_is_programs("com.brightway.lumenstudio", &studio));
+        assert!(app_id_is_programs("Brightway.LumenStudio.windows", &studio));
+        assert!(!app_id_is_programs(
+            "com.brightway.lumenstudio.beta",
+            &studio
+        ));
+        let three = super::super::name_target("Lumen 3", Some("Brightway Labs"));
+        assert!(app_id_is_programs("com.brightway.lumen3", &three));
+        let lumen = super::super::name_target("Lumen", Some("Brightway Labs"));
+        assert!(!app_id_is_programs("com.brightway.lumenstudio", &lumen));
     }
 
     #[test]
@@ -977,7 +1007,8 @@ mod tests {
         };
         let ours = "com.brightway.lumen.windows";
         let theirs = "com.brightway.other";
-        for id in [ours, theirs] {
+        let studio = "com.brightway.lumen.studio";
+        for id in [ours, theirs, studio] {
             set_value(&format!(r"{}\{id}", base("Settings")), "Enabled", "0");
             set_value(&format!(r"{}\W~{id}", base("Tiles")), "x", "1");
             set_value(&base("Usage"), id, "1");
