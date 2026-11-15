@@ -276,13 +276,55 @@ mod tests {
     #[test]
     fn the_install_folder_outranks_a_name_that_merely_matches() {
         let programs = vec![
-            program("Vendor Player", Some(r"C:\Program Files\VendorPlayer")),
-            program("Player Tools", None),
+            program("Quillmark", Some(r"C:\Program Files\Quillmark")),
+            program("Quillmark Sync", None),
         ];
-        let matches = hunt(r"C:\Program Files\VendorPlayer\player.exe", &programs);
-        assert_eq!(matches[0].program.display_name, "Vendor Player");
+        let matches = hunt(r"C:\Program Files\Quillmark\quillmark.exe", &programs);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].program.display_name, "Quillmark");
         assert!(matches[0].score >= 1000);
         assert!(matches[0].reason.contains("install folder"));
+        assert_eq!(matches[1].program.display_name, "Quillmark Sync");
+        assert!(matches[1].score > 0);
+        assert!(matches[0].score > matches[1].score);
+    }
+
+    #[test]
+    fn a_folder_inside_an_install_folder_belongs_to_that_program() {
+        let programs = vec![program("Quillmark", Some(r"C:\Program Files\Quillmark"))];
+        let matches = hunt(r"C:\Program Files\Quillmark\Plugins", &programs);
+        assert_eq!(matches.len(), 1);
+        assert!(
+            (500..1000).contains(&matches[0].score),
+            "{}",
+            matches[0].score
+        );
+        assert_eq!(
+            matches[0].reason,
+            "located inside this program's install folder"
+        );
+    }
+
+    #[test]
+    fn a_process_name_nothing_runs_still_matches_by_its_display_icon() {
+        let mut quillmark = program("Quillmark", None);
+        quillmark.display_icon = Some(r"C:\Program Files\Quillmark\quillmarkpad.exe,0".into());
+        let mut other = program("Example Other", None);
+        other.display_icon = Some(r"C:\Program Files\Example Other\other.exe,0".into());
+        let matches = hunt("quillmarkpad.exe", &[quillmark, other]);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].program.display_name, "Quillmark");
+        assert_eq!(matches[0].score, 80);
+        assert_eq!(matches[0].reason, "matches DisplayIcon (quillmarkpad.exe)");
+    }
+
+    #[test]
+    fn a_folder_named_after_the_program_is_a_weak_match() {
+        let programs = vec![program("Quillmark", None)];
+        let matches = hunt(r"C:\Archive\Quillmark\notes.txt", &programs);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].score, 30);
+        assert_eq!(matches[0].reason, "folder name matches the program");
     }
 
     #[test]
