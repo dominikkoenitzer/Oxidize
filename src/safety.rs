@@ -948,14 +948,21 @@ mod tests {
             r"C:\Temp\oxidize-elevated-12-345.out"
         )));
         for path in [
-            r"C:\Windows\System32\drivers\etc\hosts",
             r"C:\Temp\oxidize-elevated-12-345.txt",
             r"C:\Temp\other-12-345.out",
             r"C:\Temp\",
         ] {
             assert!(!is_result_file(Path::new(path)), "{path}");
-            // Refused before anything is opened or redirected.
-            assert!(send_output_to(Path::new(path)).is_err(), "{path}");
+        }
+
+        // Refused before anything is opened or redirected, even where it could write.
+        let dir = crate::backup::TestDir::new("oxidize_result_file_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["oxidize-elevated-12-345.txt", "other-12-345.out"] {
+            let path = dir.join(name);
+            std::fs::write(&path, "kept").unwrap();
+            assert!(send_output_to(&path).is_err(), "{name}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept", "{name}");
         }
     }
 
