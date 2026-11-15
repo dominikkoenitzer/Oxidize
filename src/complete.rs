@@ -210,10 +210,21 @@ pub fn vendor_step(
     if program.source.hive != Hive::CurrentUser {
         return run("installed for all users");
     }
-    let has_folder = scanner::own_install_folder(target).is_some()
-        || footprint
-            .iter()
-            .any(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
+    let mut high_dirs = footprint
+        .iter()
+        .filter(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
+    // A recorded install folder that would stay, shared ones too, keeps the files the uninstaller removes.
+    let recorded = target
+        .install_location
+        .clone()
+        .or_else(|| scanner::recorded_install_folder(program));
+    let has_folder = match recorded.as_deref() {
+        Some(loc) => {
+            scanner::own_install_folder(target).is_some()
+                || high_dirs.any(|l| system::path_under(loc, Path::new(&l.path)))
+        }
+        None => high_dirs.next().is_some(),
+    };
     if !has_folder {
         return run("no folder of its own is known");
     }
@@ -331,6 +342,10 @@ pub trait Pc {
     }
     /// Run the vendor's uninstaller; returns how it went.
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<Ran>;
+    /// Why the uninstaller cannot start because its file is gone, if it is.
+    fn uninstaller_missing(&self, plan: &UninstallPlan) -> Option<String> {
+        crate::uninstall::missing_program(plan)
+    }
     /// Wait until the program is unregistered; true when it is.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove the items, with a backup unless told otherwise.
@@ -454,6 +469,19 @@ pub fn remove_completely(
         out.report = full.unwrap_or_default();
         out.selected = at_level(&out.report, opts.level);
         out.removal = pc.remove(&out.selected, &program.display_name).ok();
+        out.seconds = start.elapsed().as_secs_f64();
+        return out;
+    }
+
+    // An uninstaller that cannot start leaves the program as it is, its windows open.
+    if let Some(e) = out
+        .vendor
+        .runs()
+        .then(|| pc.uninstaller_missing(plan))
+        .flatten()
+    {
+        out.error = Some(e);
+        out.verdict.still_installed = pc.still_installed(program);
         out.seconds = start.elapsed().as_secs_f64();
         return out;
     }
@@ -716,6 +744,8 @@ mod tests {
         vendor_takes: Vec<String>,
         /// The vendor's uninstaller is still running when the wait ends.
         never_ends: bool,
+        /// The uninstaller's file is gone.
+        uninstaller_gone: bool,
         /// Processes that stay when they are asked to close.
         stays: Vec<u32>,
         /// Processes with no window, so they are not asked and stay.
@@ -739,6 +769,7 @@ mod tests {
                 stuck: Vec::new(),
                 vendor_takes: Vec::new(),
                 never_ends: false,
+                uninstaller_gone: false,
                 stays: Vec::new(),
                 windowless: Vec::new(),
                 may_end: Vec::new(),
@@ -862,6 +893,9 @@ mod tests {
 
         fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<Ran> {
             self.calls.borrow_mut().push("uninstall".to_string());
+            if self.uninstaller_gone {
+                anyhow::bail!("{}: uninstall.exe", crate::uninstall::UNINSTALLER_MISSING);
+            }
             self.items
                 .borrow_mut()
                 .retain(|l| !self.vendor_takes.contains(&l.path));
@@ -875,6 +909,11 @@ mod tests {
                 said: "finished".to_string(),
                 ended: true,
             })
+        }
+
+        fn uninstaller_missing(&self, _plan: &UninstallPlan) -> Option<String> {
+            self.uninstaller_gone
+                .then(|| format!("{}: uninstall.exe", crate::uninstall::UNINSTALLER_MISSING))
         }
 
         fn wait_until_gone(&self, _program: &Program, _plan: &UninstallPlan) -> bool {
@@ -1314,6 +1353,30 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_uninstaller_stops_the_flow_before_anything_closes() {
+        let mut items = per_user_footprint();
+        items.push(Leftover::service(
+            "ExampleSvc",
+            r"D:\ExamplePlayer\svc.exe",
+            Confidence::High,
+            "named after the program",
+        ));
+        let mut pc = FakePc::new(items);
+        pc.uninstaller_gone = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(out.vendor.runs());
+        assert_eq!(pc.calls(), ["scan true"]);
+        assert!(out.closed.is_empty());
+        let error = out.error.unwrap_or_default();
+        assert!(
+            error.starts_with(crate::uninstall::UNINSTALLER_MISSING),
+            "{error}"
+        );
+        assert!(out.verdict.still_installed);
+    }
+
+    #[test]
     fn an_uninstaller_still_running_keeps_its_leftovers() {
         let mut pc = FakePc::new(per_user_footprint());
         pc.never_ends = true;
@@ -1520,6 +1583,55 @@ mod tests {
             &machine(),
         );
         assert!(step.runs());
+    }
+
+    #[test]
+    fn a_recorded_folder_that_stays_keeps_the_uninstaller() {
+        // The settings folder goes, the program files named otherwise would stay.
+        let mut t = target();
+        t.install_location = Some(PathBuf::from(r"D:\Example Studio\EP-files"));
+        let settings = dir(r"D:\Settings\ExamplePlayer", Confidence::High);
+        let step = vendor_step(
+            &program(Hive::CurrentUser),
+            &plan(false),
+            &t,
+            std::slice::from_ref(&settings),
+            &machine(),
+        );
+        assert!(step.runs(), "{step:?}");
+
+        // A High folder around the recorded one takes it along.
+        let around = dir(r"D:\Example Studio", Confidence::High);
+        let step = vendor_step(
+            &program(Hive::CurrentUser),
+            &plan(false),
+            &t,
+            &[settings, around],
+            &machine(),
+        );
+        assert!(!step.runs(), "{step:?}");
+    }
+
+    #[test]
+    fn a_shared_recorded_folder_keeps_the_uninstaller() {
+        // Another program records the same folder, so the target drops it and the scan leaves it.
+        let p = program(Hive::CurrentUser);
+        let mut t = target();
+        t.install_location = None;
+        let settings = dir(r"D:\Settings\ExamplePlayer", Confidence::High);
+        let step = vendor_step(
+            &p,
+            &plan(false),
+            &t,
+            std::slice::from_ref(&settings),
+            &machine(),
+        );
+        assert!(step.runs(), "{step:?}");
+
+        // A High folder that is the recorded one still takes it along.
+        let own = dir(p.install_location.as_deref().unwrap(), Confidence::High);
+        let step = vendor_step(&p, &plan(false), &t, &[settings, own], &machine());
+        assert!(!step.runs(), "{step:?}");
     }
 
     #[test]

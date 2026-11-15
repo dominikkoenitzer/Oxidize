@@ -48,6 +48,27 @@ jobs:
       - name: Build
         run: cargo build --locked --release --all-targets
 
+      # The built binary scans a made-up profile and has to report its two folders and nothing else.
+      - name: Scan a fixture profile
+        shell: pwsh
+        run: |
+          $fixture = Join-Path $env:RUNNER_TEMP 'fixture'
+          $env:APPDATA = Join-Path $fixture 'Roaming'
+          $env:LOCALAPPDATA = Join-Path $fixture 'Local'
+          $left = @((Join-Path $env:APPDATA 'Quillmark'), (Join-Path $env:LOCALAPPDATA 'Quillmark'))
+          $kept = Join-Path $env:APPDATA 'Fernleaf'
+          foreach ($dir in $left + $kept) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            Set-Content -Path (Join-Path $dir 'settings.ini') -Value 'theme=dark'
+          }
+          $out = & ./target/release/oxidize.exe scan Quillmark --json | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "scan exited with $LASTEXITCODE" }
+          $out
+          $paths = @(($out | ConvertFrom-Json).items | ForEach-Object { $_.path })
+          foreach ($dir in $left) { if ($paths -notcontains $dir) { throw "scan missed $dir" } }
+          if ($paths -contains $kept) { throw "scan reported $kept" }
+          foreach ($path in $paths) { if (-not $path.StartsWith($fixture)) { throw "scan reported $path" } }
+
       - name: Test
         run: cargo test --locked --workspace
 

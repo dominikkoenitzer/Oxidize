@@ -458,6 +458,12 @@ impl OxidizeApp {
         });
     }
 
+    fn not_elevated(&mut self, e: anyhow::Error) {
+        let line = format!("Could not elevate: {e:#}");
+        self.log.push(line.clone());
+        self.status = line;
+    }
+
     fn start_undo(&mut self, ctx: &egui::Context, name: String) {
         let line = format!("Restoring {name}...");
         self.log.push(line.clone());
@@ -1472,7 +1478,7 @@ impl OxidizeApp {
                 Action::Undo(name) => self.start_undo(ctx, name),
                 Action::RestartAdmin => match safety::relaunch_elevated() {
                     Ok(()) => std::process::exit(0),
-                    Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
+                    Err(e) => self.not_elevated(e),
                 },
                 Action::Analyse => self.start_analyse(ctx),
                 Action::FindBuildOutput => self.start_find_build_output(ctx),
@@ -3610,6 +3616,17 @@ mod tests {
         assert!(!a.safety_ctx().make_backups);
         a.make_backups = true;
         assert!(a.safety_ctx().make_backups);
+    }
+
+    #[test]
+    fn a_declined_elevation_says_so_on_screen() {
+        let mut app = app();
+        app.status = "Ready".to_string();
+        app.not_elevated(
+            oxidize::exit::Failure::cancelled("the UAC prompt was declined", false).into(),
+        );
+        assert_eq!(app.status, "Could not elevate: the UAC prompt was declined");
+        assert_eq!(app.log, [app.status.clone()]);
     }
 
     #[test]
