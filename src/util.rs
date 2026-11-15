@@ -197,22 +197,6 @@ pub fn expand_env_vars(s: &str) -> String {
     out
 }
 
-/// Split a Windows command line into arguments following the
-/// `CommandLineToArgvW` / MSVCRT rules (so a quoted path containing spaces is
-/// one argument). `argv[0]` is the executable, the rest are its arguments.
-///
-/// Rules implemented:
-///  * a run of `2n` backslashes before a `"` => `n` backslashes and the quote
-///    toggles quoting;
-///  * a run of `2n+1` backslashes before a `"` => `n` backslashes and a literal
-///    `"`;
-///  * backslashes not before a quote are literal;
-///  * `""` while inside quotes => a literal `"`;
-///  * outside quotes, runs of spaces/tabs separate arguments.
-///
-/// Note: the real API treats `argv[0]` slightly specially, but program paths in
-/// uninstall strings are either quoted or contain no embedded quotes, so the
-/// general rules produce the correct result for our inputs.
 /// Split a registry uninstall command into argv.
 ///
 /// `CommandLineToArgvW` splits an unquoted program path on its spaces, but
@@ -286,6 +270,22 @@ pub fn program_prefix_end(s: &str) -> Option<usize> {
     candidate
 }
 
+/// Split a Windows command line into arguments following the
+/// `CommandLineToArgvW` / MSVCRT rules (so a quoted path containing spaces is
+/// one argument). `argv[0]` is the executable, the rest are its arguments.
+///
+/// Rules implemented:
+///  * a run of `2n` backslashes before a `"` => `n` backslashes and the quote
+///    toggles quoting;
+///  * a run of `2n+1` backslashes before a `"` => `n` backslashes and a literal
+///    `"`;
+///  * backslashes not before a quote are literal;
+///  * `""` while inside quotes => a literal `"`;
+///  * outside quotes, runs of spaces/tabs separate arguments.
+///
+/// Note: the real API treats `argv[0]` slightly specially, but program paths in
+/// uninstall strings are either quoted or contain no embedded quotes, so the
+/// general rules produce the correct result for our inputs.
 pub fn split_command_line(cmd: &str) -> Vec<String> {
     let chars: Vec<char> = cmd.chars().collect();
     let n = chars.len();
@@ -642,6 +642,31 @@ mod tests {
         let v = split_uninstall_command(r"C:\Program Files\Foo\uninst.exe /S");
         assert_eq!(v[0], r"C:\Program Files\Foo\uninst.exe");
         assert_eq!(&v[1..], ["/S"]);
+    }
+
+    #[test]
+    fn an_unquoted_path_without_an_extension_stays_whole_until_it_names_a_file() {
+        let root = crate::backup::TestDir::new("oxidize_split_noext_test");
+        let folder = root.join("Vendor App");
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join("Uninstaller");
+        let program = program.to_str().unwrap();
+        let cmd = format!("{program} /S");
+        assert_eq!(split_uninstall_command(&cmd), [cmd.as_str()]);
+        std::fs::write(program, b"").unwrap();
+        assert_eq!(split_uninstall_command(&cmd), [program, "/S"]);
+    }
+
+    #[test]
+    fn a_real_program_before_an_exe_argument_is_the_program() {
+        let root = crate::backup::TestDir::new("oxidize_split_bat_test");
+        let folder = root.join("My Tools");
+        std::fs::create_dir_all(&folder).unwrap();
+        let bat = folder.join("start.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        let bat = bat.to_str().unwrap();
+        let v = split_uninstall_command(&format!(r"{bat} C:\App\app.exe"));
+        assert_eq!(v, [bat, r"C:\App\app.exe"]);
     }
 
     #[test]
