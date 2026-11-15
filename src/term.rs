@@ -69,6 +69,11 @@ fn error_line(colors: &Colors, msg: &str) -> String {
     format!("{} {msg}", paint_if(colors.err, "error:", "31"))
 }
 
+/// Dimmed text inside a message bound for stderr, by stderr's switch.
+fn dim_err_with(colors: &Colors, text: &str) -> String {
+    paint_if(colors.err, text, "2")
+}
+
 fn paint_if(on: bool, text: &str, code: &str) -> String {
     if on {
         format!("\x1b[{code}m{text}\x1b[0m")
@@ -111,6 +116,11 @@ pub(crate) fn try_warn(msg: &str) {
 /// `error: ...` on stderr.
 pub fn error(msg: &str) {
     eprintln!("{}", error_line(&switches(), msg));
+}
+
+/// Dimmed text for a message that `warn` or `error` prints.
+pub fn dim_err(text: &str) -> String {
+    dim_err_with(&switches(), text)
 }
 
 /// Ask a yes/no question. Empty input picks the default. When stdin is not a
@@ -271,5 +281,22 @@ mod tests {
         assert!(typed("yes\n", false));
         assert!(!typed("n\n", true));
         assert!(!answer(true, || true, || None), "a failed read is a no");
+    }
+
+    #[test]
+    fn text_dimmed_inside_an_error_follows_the_stderr_switch() {
+        let out_only = Colors {
+            out: true,
+            err: false,
+        };
+        assert_eq!(dim_err_with(&out_only, "Example.App"), "Example.App");
+        let err_only = Colors {
+            out: false,
+            err: true,
+        };
+        assert_eq!(
+            dim_err_with(&err_only, "Example.App"),
+            "\x1b[2mExample.App\x1b[0m"
+        );
     }
 }
