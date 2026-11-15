@@ -992,8 +992,7 @@ pub fn close_processes(
     use crate::complete::{CloseHow, Closed};
     use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, PostMessageW, WM_CLOSE};
 
@@ -1023,24 +1022,7 @@ pub fn close_processes(
         let access = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
         match unsafe { OpenProcess(access, false, p.pid) } {
             Ok(h) => {
-                // The id may belong to another program by now: Windows
-                // reuses them. Only the image that was picked is touched.
-                let mut buf = [0u16; 1024];
-                let mut len = buf.len() as u32;
-                let image = unsafe {
-                    QueryFullProcessImageNameW(
-                        h,
-                        PROCESS_NAME_WIN32,
-                        windows::core::PWSTR(buf.as_mut_ptr()),
-                        &mut len,
-                    )
-                }
-                .ok()
-                .map(|()| String::from_utf16_lossy(&buf[..len as usize]));
-                let same = image
-                    .as_deref()
-                    .is_some_and(|i| same_image(Path::new(i), &p.exe));
-                if !same {
+                if !runs_image(h, &p.exe) {
                     let _ = unsafe { CloseHandle(h) };
                     continue;
                 }
@@ -1120,11 +1102,102 @@ fn same_image(a: &Path, b: &Path) -> bool {
     a.as_os_str().eq_ignore_ascii_case(b.as_os_str())
 }
 
+/// Does the opened process still run `exe`? The id may belong to another
+/// program by now: Windows reuses them. Only the image that was picked is touched.
+#[cfg(windows)]
+fn runs_image(h: windows::Win32::Foundation::HANDLE, exe: &Path) -> bool {
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    }
+    .is_ok_and(|()| {
+        same_image(
+            Path::new(&String::from_utf16_lossy(&buf[..len as usize])),
+            exe,
+        )
+    })
+}
+
 #[cfg(not(windows))]
 pub fn close_processes(
     _procs: &[crate::complete::Running],
     _grace: std::time::Duration,
 ) -> Vec<crate::complete::Closed> {
+    Vec::new()
+}
+
+/// How long an ended process gets to be gone.
+#[cfg(windows)]
+const END_WAIT_MS: u32 = 2000;
+
+/// End each process by its id while it still runs the image it was listed
+/// with. Only for the windowless processes from a program's own folder that
+/// a removal was confirmed to end.
+#[cfg(windows)]
+pub fn end_processes(procs: &[crate::complete::Running]) -> Vec<crate::complete::Closed> {
+    use crate::complete::{CloseHow, Closed};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    let log = |line: &str| Machine.log(line);
+    let mut out = Vec::new();
+    for p in procs {
+        let exe = p.exe.display().to_string();
+        let said = |call: &str, e: &windows::core::Error| {
+            format!(
+                "{call} {exe} (process {}) failed with {:#010x}: {}",
+                p.pid,
+                e.code().0 as u32,
+                e.message()
+            )
+        };
+        let access = PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+        let (how, error) = match unsafe { OpenProcess(access, false, p.pid) } {
+            // It exited by itself since it was listed.
+            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => (CloseHow::Closed, None),
+            Err(e) => {
+                log(&said("OpenProcess", &e));
+                (CloseHow::Failed, Some("Windows refused access to it."))
+            }
+            Ok(h) => {
+                let done = if !runs_image(h, &p.exe) {
+                    // The id is another program's by now; the listed one is gone.
+                    (CloseHow::Closed, None)
+                } else if let Err(e) = unsafe { TerminateProcess(h, 1) } {
+                    log(&said("TerminateProcess", &e));
+                    (CloseHow::Failed, Some("Windows refused to end it."))
+                } else if unsafe { WaitForSingleObject(h, END_WAIT_MS) } == WAIT_OBJECT_0 {
+                    (CloseHow::Ended, None)
+                } else {
+                    (CloseHow::Running, None)
+                };
+                let _ = unsafe { CloseHandle(h) };
+                done
+            }
+        };
+        out.push(Closed {
+            pid: p.pid,
+            exe,
+            how,
+            error: error.map(str::to_string),
+            windowless: true,
+        });
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn end_processes(_procs: &[crate::complete::Running]) -> Vec<crate::complete::Closed> {
     Vec::new()
 }
 
@@ -1183,15 +1256,133 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
+    /// A copy of a console tool in a folder of its own, started without a
+    /// window: a stand-in for a program's background helper.
+    #[cfg(windows)]
+    fn stand_in(dir: &Path) -> (std::process::Child, crate::complete::Running) {
+        use std::os::windows::process::CommandExt;
+        fs::create_dir_all(dir).unwrap();
+        let exe = dir.join("helper.exe");
+        fs::copy(system32("PING.EXE"), &exe).unwrap();
+        let child = std::process::Command::new(&exe)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // The image as Windows names it: a temp folder may be given in short names.
+        let exe = running_processes()
+            .into_iter()
+            .find(|p| p.pid == pid)
+            .map_or(exe, |p| p.exe);
+        (child, crate::complete::Running { pid, exe })
+    }
+
+    /// A program installed in the stand-in's folder.
+    #[cfg(windows)]
+    fn installed_at(helper: &crate::complete::Running) -> crate::model::ScanTarget {
+        let mut target = crate::scanner::name_only_target("Example Player", Some("Example Studio"));
+        target.install_location = helper.exe.parent().map(Path::to_path_buf);
+        target.install_vouched = true;
+        target
+    }
+
+    /// Stop a stand-in the test started, whatever the test did to it.
+    #[cfg(windows)]
+    fn stop(mut child: std::process::Child) -> bool {
+        let ran = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        ran
+    }
+
+    #[cfg(windows)]
     #[test]
-    fn closing_never_ends_a_process() {
+    fn a_listed_process_is_ended_by_its_id_and_no_other() {
+        use crate::complete::{CloseHow, Running};
+        let dir = crate::backup::TestDir::new("oxidize end stand-in");
+        let (helper, listed) = stand_in(&dir.join("Example Player"));
+        let (other, beside) = stand_in(&dir.join("Other"));
+
+        // Picked from what really runs, with no window to go by.
+        let target = installed_at(&listed);
+        let ends =
+            crate::complete::to_end(&running_processes(), &target, std::process::id(), |_| false);
+        // The other one's id under the listed image: Windows reused the id.
+        let reused = Running {
+            pid: beside.pid,
+            exe: listed.exe.clone(),
+        };
+        let ended = end_processes(&[listed.clone(), reused]);
+        let helper_ran = stop(helper);
+        let other_ran = stop(other);
+
+        assert_eq!(ends, std::slice::from_ref(&listed));
+        assert!(!helper_ran, "the listed process is still running");
+        assert!(other_ran, "a process that was not listed was ended");
+        assert_eq!(ended.len(), 2, "{ended:?}");
+        assert_eq!(
+            (ended[0].pid, &ended[0].how, ended[0].windowless),
+            (listed.pid, &CloseHow::Ended, true)
+        );
+        // The listed image no longer runs under that id: nothing to end.
+        assert_eq!(ended[1].how, CloseHow::Closed);
+    }
+
+    /// Runs on CI only: it reads which windows exist, which a desktop in
+    /// use should not have done to it.
+    #[cfg(windows)]
+    #[test]
+    fn a_windowless_stand_in_is_asked_first_then_ended() {
+        use crate::complete::CloseHow;
+        if std::env::var_os("CI").is_none() {
+            return;
+        }
+        let dir = crate::backup::TestDir::new("oxidize end asked stand-in");
+        let (helper, listed) = stand_in(&dir.join("Example Player"));
+        let target = installed_at(&listed);
+        let ends = crate::complete::to_end(
+            &running_processes(),
+            &target,
+            std::process::id(),
+            has_window,
+        );
+        let closed = close_processes(&ends, std::time::Duration::from_secs(30));
+        let ended = end_processes(&ends);
+        let ran = stop(helper);
+        assert_eq!(ends, [listed]);
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!(closed[0].how, CloseHow::Running);
+        assert!(closed[0].windowless);
+        assert_eq!(ended[0].how, CloseHow::Ended);
+        assert!(!ran, "the stand-in is still running");
+    }
+
+    #[test]
+    fn asking_to_close_never_ends_a_process() {
         let source = include_str!("system.rs");
+        let start = source.find("pub fn close_processes(").unwrap();
+        let end = source.find("fn same_image(").unwrap();
         for call in [
             concat!("Terminate", "Process"),
             concat!("PROCESS_", "TERMINATE"),
         ] {
-            assert!(!source.contains(call), "{call} is back in system.rs");
+            assert!(
+                !source[start..end].contains(call),
+                "{call} is in close_processes"
+            );
         }
+        // Ending is for the flow's confirmed list on the command line only.
+        let call = concat!("end_", "processes(");
+        for (file, source) in [
+            ("complete.rs", include_str!("complete.rs")),
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("oxidize-gui.rs", include_str!("bin/oxidize-gui.rs")),
+        ] {
+            assert!(!source.contains(call), "{file} ends processes");
+        }
+        assert_eq!(include_str!("commands.rs").matches(call).count(), 1);
     }
 
     #[test]

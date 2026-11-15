@@ -22,9 +22,11 @@ for leftovers, and `--delete-dead` deletes the proven dead ones outright. `--ele
 
 `oxidize uninstall <program> --yes` removes a program completely in one go.
 Whatever runs from its folders is closed first: each process is asked to close
-its windows. Nothing is ended by force: one still running three seconds later,
-or one without a window to be asked through, stops the run before anything is
-uninstalled or removed, and the error names it. Nothing that runs from
+its windows. One without a window that runs from the program's own install
+folder cannot be asked, so the plan names it before the question, and once
+you confirm it is ended by its process id. Any other process still running
+three seconds later stops the run before anything is uninstalled or removed,
+and the error names it. Nothing that runs from
 anywhere else is touched. A program installed for your user alone,
 with no service, firewall rule or machine-wide file or key, is then removed by
 Oxidize itself, uninstall entry included, without starting its own
