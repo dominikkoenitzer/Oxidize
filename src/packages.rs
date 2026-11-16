@@ -772,7 +772,7 @@ mod tests {
         for good in [
             "Vendor.Notes_8wekyb3d8bbwe",
             "Microsoft.WindowsCalculator_8wekyb3d8bbwe",
-            "5319275A.WhatsAppDesktop_cv1g1gvanyjgm",
+            "5319275A.ChatterDesktop_r4m7q2k9x1tbe",
             "Vendor-App_0123456789abc",
         ] {
             assert!(is_family_name(good), "{good}");
@@ -889,12 +889,12 @@ mod tests {
         for (name, words) in [
             ("XboxSpeechToTextOverlay", 5),
             ("Microsoft.XboxSpeechToTextOverlay", 6),
-            ("TranslucentTB", 2),
+            ("ClearbarTB", 2),
             ("MSTeams", 2),
-            ("OMENLightStudio", 3),
+            ("VELLightStudio", 3),
             ("AV1VideoExtension", 4),
             ("cli", 1),
-            ("Claude", 1),
+            ("Quill", 1),
             ("", 0),
         ] {
             assert_eq!(word_count(name), words, "{name}");
@@ -918,10 +918,10 @@ mod tests {
         );
 
         // A one-word identity name adds nothing, its family name does.
-        let posh = scan_target(&package("ohmyposh.cli", "Oh My Posh"));
+        let lark = scan_target(&package("ohmylark.cli", "Oh My Lark"));
         assert_eq!(
-            posh.exact_names,
-            ["ohmyposhcli", "ohmyposhcli8wekyb3d8bbwe"]
+            lark.exact_names,
+            ["ohmylarkcli", "ohmylarkcli8wekyb3d8bbwe"]
         );
     }
 }

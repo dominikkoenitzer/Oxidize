@@ -378,6 +378,6 @@ mod tests {
     fn a_path_query_is_told_from_a_process_name() {
         assert!(looks_like_path(r"C:\Program Files\App"));
         assert!(looks_like_path("folder/app.exe"));
-        assert!(!looks_like_path("chrome.exe"));
+        assert!(!looks_like_path("glide.exe"));
     }
 }

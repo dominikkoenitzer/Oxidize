@@ -3386,19 +3386,19 @@ mod tests {
     fn installed() -> Vec<Program> {
         vec![
             program(
-                "Brave",
-                "BraveSoftware Brave-Browser",
-                Some(r#""C:\Brave\setup.exe" --uninstall"#),
+                "Belko",
+                "BelkoSoftware Belko-Browser",
+                Some(r#""C:\Belko\setup.exe" --uninstall"#),
             ),
             program(
-                "VLC media player",
-                "VLC media player",
-                Some(r"C:\VLC\uninstall.exe"),
+                "Orb media player",
+                "Orb media player",
+                Some(r"C:\Orb\uninstall.exe"),
             ),
             program(
-                "7-Zip 24.08 (x64)",
-                "7-Zip",
-                Some(r"C:\7-Zip\Uninstall.exe"),
+                "9-Zap 24.08 (x64)",
+                "9-Zap",
+                Some(r"C:\9-Zap\Uninstall.exe"),
             ),
             program("Frobnic Editor", "FrobEdit", Some(r"C:\Frob\unins000.exe")),
             program("Frobnic Viewer", "FrobView", Some(r"C:\Frob\unins001.exe")),
@@ -3423,11 +3423,11 @@ mod tests {
 
     #[test]
     fn several_names_are_parsed_and_one_is_required() {
-        let cli = Cli::try_parse_from(["oxidize", "uninstall", "brave", "vlc", "7zip", "-y"])
+        let cli = Cli::try_parse_from(["oxidize", "uninstall", "belko", "orb", "9zap", "-y"])
             .expect("several names parse");
         assert!(cli.yes);
         match cli.command {
-            Commands::Uninstall(args) => assert_eq!(args.targets, ["brave", "vlc", "7zip"]),
+            Commands::Uninstall(args) => assert_eq!(args.targets, ["belko", "orb", "9zap"]),
             other => panic!("unexpected command: {other:?}"),
         }
         assert!(Cli::try_parse_from(["oxidize", "uninstall"]).is_err());
@@ -3436,14 +3436,14 @@ mod tests {
     #[test]
     fn a_batch_runs_in_the_order_of_the_names() {
         let programs = installed();
-        let batch = plan_batch(&programs, &[], &names(&["7-zip", "brave", "vlc"]), false).unwrap();
+        let batch = plan_batch(&programs, &[], &names(&["9-zap", "belko", "orb"]), false).unwrap();
         assert_eq!(
             planned_names(&batch),
-            ["7-Zip 24.08 (x64)", "Brave", "VLC media player"]
+            ["9-Zap 24.08 (x64)", "Belko", "Orb media player"]
         );
         assert_eq!(
             plan_of(&batch[1]).argv,
-            [r"C:\Brave\setup.exe", "--uninstall"]
+            [r"C:\Belko\setup.exe", "--uninstall"]
         );
     }
 
@@ -3459,27 +3459,27 @@ mod tests {
         .unwrap();
         assert_eq!(
             planned_names(&batch),
-            ["Frobnic Viewer", "Frobnic Editor", "VLC media player"]
+            ["Frobnic Viewer", "Frobnic Editor", "Orb media player"]
         );
     }
 
     #[test]
     fn a_name_that_matches_nothing_stops_the_whole_batch() {
         let programs = installed();
-        let err = plan_batch(&programs, &[], &names(&["brave", "nosuchapp"]), false).unwrap_err();
+        let err = plan_batch(&programs, &[], &names(&["belko", "nosuchapp"]), false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.starts_with("nothing was uninstalled"), "{msg}");
         assert!(
             msg.contains("no installed program or Store app matches \"nosuchapp\""),
             "{msg}"
         );
-        assert!(!msg.contains("Brave"), "{msg}");
+        assert!(!msg.contains("Belko"), "{msg}");
     }
 
     #[test]
     fn an_ambiguous_name_lists_its_candidates_and_stops_the_batch() {
         let programs = installed();
-        let err = plan_batch(&programs, &[], &names(&["vlc", "frobnic"]), false).unwrap_err();
+        let err = plan_batch(&programs, &[], &names(&["orb", "frobnic"]), false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("\"frobnic\" matches 2 programs"), "{msg}");
         assert!(msg.contains("Frobnic Editor"), "{msg}");
@@ -3492,7 +3492,7 @@ mod tests {
         let err = plan_batch(
             &programs,
             &[],
-            &names(&["nosuchapp", "vlc", "frobnic", "driver"]),
+            &names(&["nosuchapp", "orb", "frobnic", "driver"]),
             false,
         )
         .unwrap_err();
@@ -3513,11 +3513,11 @@ mod tests {
         let batch = plan_batch(
             &programs,
             &[],
-            &names(&["brave", "vlc", "Brave", "BraveSoftware Brave-Browser"]),
+            &names(&["belko", "orb", "Belko", "BelkoSoftware Belko-Browser"]),
             false,
         )
         .unwrap();
-        assert_eq!(planned_names(&batch), ["Brave", "VLC media player"]);
+        assert_eq!(planned_names(&batch), ["Belko", "Orb media player"]);
     }
 
     #[test]
@@ -3533,8 +3533,8 @@ mod tests {
     fn silent_is_planned_per_program() {
         let mut programs = installed();
         programs[0].quiet_uninstall_string =
-            Some(r#""C:\Brave\setup.exe" --uninstall --force-uninstall"#.to_string());
-        let batch = plan_batch(&programs, &[], &names(&["brave", "vlc"]), true).unwrap();
+            Some(r#""C:\Belko\setup.exe" --uninstall --force-uninstall"#.to_string());
+        let batch = plan_batch(&programs, &[], &names(&["belko", "orb"]), true).unwrap();
         assert_eq!(plan_of(&batch[0]).source, "QuietUninstallString");
         assert_eq!(
             plan_of(&batch[0]).argv.last().map(String::as_str),
@@ -3546,7 +3546,7 @@ mod tests {
             "UninstallString, no quiet variant"
         );
 
-        let loud = plan_batch(&programs, &[], &names(&["brave"]), false).unwrap();
+        let loud = plan_batch(&programs, &[], &names(&["belko"]), false).unwrap();
         assert_eq!(plan_of(&loud[0]).source, "UninstallString");
     }
 
@@ -3655,13 +3655,13 @@ mod tests {
     fn a_batch_as_json_lists_each_program_in_order_with_counts() {
         let runs = [
             run(
-                "Brave",
+                "Belko",
                 true,
                 3,
-                Some(removed(3, 0, Some("2026-09-29 120000 Brave"))),
+                Some(removed(3, 0, Some("2026-09-29 120000 Belko"))),
             ),
-            run("VLC media player", false, 2, None),
-            run("7-Zip", true, 0, None),
+            run("Orb media player", false, 2, None),
+            run("9-Zap", true, 0, None),
         ];
         let v = batch_json(&runs, false);
         let programs = v["programs"].as_array().expect("programs is an array");
@@ -3669,7 +3669,7 @@ mod tests {
             .iter()
             .map(|p| p["program"]["display_name"].as_str().unwrap())
             .collect();
-        assert_eq!(order, ["Brave", "VLC media player", "7-Zip"]);
+        assert_eq!(order, ["Belko", "Orb media player", "9-Zap"]);
         // Each entry is the single-program object, plus whether it failed.
         for p in programs {
             assert!(p["command"].is_string());
@@ -3688,7 +3688,7 @@ mod tests {
     fn store_apps() -> Vec<Package> {
         vec![
             package("Microsoft.WindowsCalculator", "Windows Calculator"),
-            package("Vendor.Brave", "Brave"),
+            package("Vendor.Belko", "Belko"),
         ]
     }
 
@@ -3729,31 +3729,31 @@ mod tests {
             };
             assert!(msg.contains("empty one"), "{msg}");
         }
-        let Err(Resolve::Ambiguous(msg)) = resolve_any(&programs, &apps, "brave") else {
-            panic!("brave is both a program and a Store app");
+        let Err(Resolve::Ambiguous(msg)) = resolve_any(&programs, &apps, "belko") else {
+            panic!("belko is both a program and a Store app");
         };
         assert!(
-            msg.starts_with("\"brave\" matches 1 program and 1 Store app:"),
+            msg.starts_with("\"belko\" matches 1 program and 1 Store app:"),
             "{msg}"
         );
-        assert!(msg.contains("Brave  BraveSoftware Brave-Browser"), "{msg}");
+        assert!(msg.contains("Belko  BelkoSoftware Belko-Browser"), "{msg}");
         assert!(
-            msg.contains("Brave (Store app)  Vendor.Brave_8wekyb3d8bbwe"),
+            msg.contains("Belko (Store app)  Vendor.Belko_8wekyb3d8bbwe"),
             "{msg}"
         );
         // Either id picks one.
         assert!(matches!(
-            resolve_any(&programs, &apps, "BraveSoftware Brave-Browser"),
-            Ok(Resolved::Program(p)) if p.display_name == "Brave"
+            resolve_any(&programs, &apps, "BelkoSoftware Belko-Browser"),
+            Ok(Resolved::Program(p)) if p.display_name == "Belko"
         ));
         assert_eq!(
-            resolved_app(&programs, &apps, "Vendor.Brave_8wekyb3d8bbwe"),
-            "Vendor.Brave_8wekyb3d8bbwe"
+            resolved_app(&programs, &apps, "Vendor.Belko_8wekyb3d8bbwe"),
+            "Vendor.Belko_8wekyb3d8bbwe"
         );
         // In a batch the ambiguity stops everything.
-        let err = plan_batch(&programs, &apps, &names(&["vlc", "brave"]), false).unwrap_err();
+        let err = plan_batch(&programs, &apps, &names(&["orb", "belko"]), false).unwrap_err();
         assert!(
-            format!("{err:#}").contains("\"brave\" matches 1 program and 1 Store app"),
+            format!("{err:#}").contains("\"belko\" matches 1 program and 1 Store app"),
             "{err:#}"
         );
     }
@@ -3761,13 +3761,13 @@ mod tests {
     #[test]
     fn an_exact_name_beats_a_part_of_another_kinds_name() {
         let programs = installed();
-        let apps = vec![package("Vendor.Player", "VLC media player Remote")];
+        let apps = vec![package("Vendor.Player", "Orb media player Remote")];
         assert!(matches!(
-            resolve_any(&programs, &apps, "vlc media player"),
-            Ok(Resolved::Program(p)) if p.display_name == "VLC media player"
+            resolve_any(&programs, &apps, "orb media player"),
+            Ok(Resolved::Program(p)) if p.display_name == "Orb media player"
         ));
         assert!(matches!(
-            resolve_any(&programs, &apps, "vlc"),
+            resolve_any(&programs, &apps, "orb"),
             Err(Resolve::Ambiguous(_))
         ));
     }
@@ -3794,20 +3794,20 @@ mod tests {
         let batch = plan_batch(
             &programs,
             &apps,
-            &names(&["vlc", "calculator", "7-zip", "Windows Calculator"]),
+            &names(&["orb", "calculator", "9-zap", "Windows Calculator"]),
             false,
         )
         .unwrap();
         assert_eq!(
             planned_names(&batch),
             [
-                "VLC media player",
+                "Orb media player",
                 "Windows Calculator",
-                "7-Zip 24.08 (x64)"
+                "9-Zap 24.08 (x64)"
             ]
         );
         assert!(matches!(&batch[1], Step::Store(app) if app.name == "Microsoft.WindowsCalculator"));
-        assert_eq!(plan_of(&batch[2]).argv, [r"C:\7-Zip\Uninstall.exe"]);
+        assert_eq!(plan_of(&batch[2]).argv, [r"C:\9-Zap\Uninstall.exe"]);
     }
 
     #[test]
@@ -3824,7 +3824,7 @@ mod tests {
         let err = plan_batch(
             &programs,
             &apps,
-            &names(&["vlc", "engine", "microsoft store", "nosuchapp"]),
+            &names(&["orb", "engine", "microsoft store", "nosuchapp"]),
             false,
         )
         .unwrap_err();
@@ -4513,7 +4513,7 @@ mod tests {
         );
 
         // In a batch it sits next to the programs, with the same counts.
-        let v = batch_json(&[run, self::run("VLC media player", true, 0, None)], false);
+        let v = batch_json(&[run, self::run("Orb media player", true, 0, None)], false);
         let entries = v["programs"].as_array().unwrap();
         assert_eq!(entries[0]["kind"], "store");
         assert_eq!(entries[0]["failed"], false);
@@ -4580,7 +4580,7 @@ mod tests {
 
     #[test]
     fn a_listed_program_keeps_its_json_and_gains_a_kind_in_front() {
-        let p = program("Brave", "BraveSoftware Brave-Browser", Some("x.exe"));
+        let p = program("Belko", "BelkoSoftware Belko-Browser", Some("x.exe"));
         let before = serde_json::to_string_pretty(&p).unwrap();
         let listed = serde_json::to_string_pretty(&Listed::Program(p)).unwrap();
         assert!(
@@ -4663,7 +4663,7 @@ mod tests {
 
     #[test]
     fn programs_and_store_apps_sort_filter_and_count_together() {
-        let mut rows = vec![Listed::Program(program("Zed", "Zed", None))];
+        let mut rows = vec![Listed::Program(program("Zinnia", "Zinnia", None))];
         rows.extend(store_rows(
             &FakePackageStore::new(vec![
                 package("Vendor.Notes", "Notes"),
@@ -4673,11 +4673,11 @@ mod tests {
             .unwrap(),
             false,
         ));
-        rows.push(Listed::Program(program("brave", "brave", None)));
+        rows.push(Listed::Program(program("belko", "belko", None)));
         sort_rows(&mut rows, SortKey::Name);
         assert_eq!(
             row_names(&rows),
-            ["brave", "Microsoft Store", "Notes", "Zed"]
+            ["belko", "Microsoft Store", "Notes", "Zinnia"]
         );
         assert_eq!(rows[2].source(), "store");
         assert_eq!(rows[3].source(), "");
