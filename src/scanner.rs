@@ -3122,10 +3122,10 @@ mod tests {
     }
 
     fn target() -> ScanTarget {
-        let mut t = name_target("Google Chrome", Some("Google LLC"));
-        t.exe_names = vec!["chrome.exe".to_string()];
+        let mut t = name_target("Corvane Glide", Some("Corvane LLC"));
+        t.exe_names = vec!["glide.exe".to_string()];
         t.registry = Some((
-            "Google Chrome".to_string(),
+            "Corvane Glide".to_string(),
             RegistrySource::new(Hive::LocalMachine, RegistryView::Native64),
         ));
         t
@@ -3492,15 +3492,15 @@ mod tests {
 
     #[test]
     fn vendor_word_is_dropped_from_product_tokens() {
-        let t = name_target("Mozilla Thunderbird (x64 en-US)", Some("Mozilla"));
-        assert_eq!(t.name_tokens, vec!["thunderbird".to_string()]);
+        let t = name_target("Halvern Postbird (x64 en-US)", Some("Halvern"));
+        assert_eq!(t.name_tokens, vec!["postbird".to_string()]);
         // The program's own folder is a strong match now.
         assert!(matches!(
-            score_product("Thunderbird", &t),
+            score_product("Postbird", &t),
             Some((Confidence::High, _))
         ));
         // A shared vendor folder is not.
-        assert!(score_product("Mozilla-1de4eec8", &t).is_none());
+        assert!(score_product("Halvern-1de4eec8", &t).is_none());
     }
 
     #[test]
@@ -3556,103 +3556,103 @@ mod tests {
     fn install_folder_tokens_leave_out_the_container() {
         // A winget package: the folder repeats the words of the path above it.
         let loc = Path::new(
-            r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\Fastfetch-cli.Fastfetch_Microsoft.Winget.Source_8wekyb3d8bbwe",
+            r"C:\Users\x\AppData\Local\Microsoft\WinGet\Packages\Sysglance-cli.Sysglance_Microsoft.Winget.Source_8wekyb3d8bbwe",
         );
         let tokens = folder_tokens(loc, loc.file_name().unwrap().to_str().unwrap());
-        assert!(tokens.contains(&"fastfetch".to_string()));
+        assert!(tokens.contains(&"sysglance".to_string()));
         assert!(!tokens.contains(&"microsoft".to_string()));
         assert!(!tokens.contains(&"winget".to_string()));
 
         // A plain install folder still gives up its name.
-        let loc = Path::new(r"C:\Program Files\Obsidian");
+        let loc = Path::new(r"C:\Program Files\Marrowpad");
         assert_eq!(
             folder_tokens(loc, loc.file_name().unwrap().to_str().unwrap()),
-            vec!["obsidian".to_string()]
+            vec!["marrowpad".to_string()]
         );
     }
 
     #[test]
     fn a_product_named_folder_wins_over_the_vendor_reading() {
-        // "Git" by "The Git Development Community": the publisher carries
-        // the product word, and the folder is still Git's own.
-        let git = name_target("Git", Some("The Git Development Community"));
-        assert!(matches_publisher("Git", &git));
-        assert!(is_exact_product("Git", &git));
+        // "Knot" by "The Knot Development Community": the publisher carries
+        // the product word, and the folder is still Knot's own.
+        let knot = name_target("Knot", Some("The Knot Development Community"));
+        assert!(matches_publisher("Knot", &knot));
+        assert!(is_exact_product("Knot", &knot));
         // A real vendor folder still is one.
-        let brave = name_target("Brave", Some("Brave Software Inc"));
-        assert!(matches_publisher("BraveSoftware", &brave));
-        assert!(!is_exact_product("BraveSoftware", &brave));
+        let belko = name_target("Belko", Some("Belko Software Inc"));
+        assert!(matches_publisher("BelkoSoftware", &belko));
+        assert!(!is_exact_product("BelkoSoftware", &belko));
     }
 
     #[test]
     fn a_folder_holding_a_longer_namesake_is_a_family_folder() {
         let root = crate::backup::TestDir::new("oxidize_namesake_test");
-        fs::create_dir_all(root.join("Python").join("Python313")).unwrap();
-        fs::create_dir_all(root.join("Git").join("bin")).unwrap();
+        fs::create_dir_all(root.join("Serpa").join("Serpa313")).unwrap();
+        fs::create_dir_all(root.join("Knot").join("bin")).unwrap();
 
-        let python = name_target("Python 3.13.7 (64-bit)", Some("Python Software Foundation"));
-        assert!(holds_namesake_child(&root.join("Python"), &python));
-        let git = name_target("Git", Some("The Git Development Community"));
-        assert!(!holds_namesake_child(&root.join("Git"), &git));
+        let serpa = name_target("Serpa 3.13.7 (64-bit)", Some("Serpa Software Foundation"));
+        assert!(holds_namesake_child(&root.join("Serpa"), &serpa));
+        let knot = name_target("Knot", Some("The Knot Development Community"));
+        assert!(!holds_namesake_child(&root.join("Knot"), &knot));
     }
 
     #[test]
     fn name_only_target_guesses_the_vendor() {
-        let t = name_only_target("Google Chrome", None);
-        assert_eq!(t.name_tokens, vec!["chrome".to_string()]);
-        assert!(matches_publisher("Google", &t));
+        let t = name_only_target("Corvane Glide", None);
+        assert_eq!(t.name_tokens, vec!["glide".to_string()]);
+        assert!(matches_publisher("Corvane", &t));
         assert!(matches!(
-            score_product("Chrome", &t),
+            score_product("Glide", &t),
             Some((Confidence::High, _))
         ));
-        let t = name_only_target("Steam", None);
-        assert_eq!(t.name_tokens, vec!["steam".to_string()]);
+        let t = name_only_target("Ludra", None);
+        assert_eq!(t.name_tokens, vec!["ludra".to_string()]);
         assert!(t.publisher.is_none());
     }
 
     #[test]
     fn vendor_only_name_keeps_its_token() {
-        let t = name_target("Steam", Some("Valve Corporation"));
-        assert_eq!(t.name_tokens, vec!["steam".to_string()]);
-        let t = name_target("Brave", Some("Brave Software Inc"));
-        assert_eq!(t.name_tokens, vec!["brave".to_string()]);
+        let t = name_target("Ludra", Some("Ostel Corporation"));
+        assert_eq!(t.name_tokens, vec!["ludra".to_string()]);
+        let t = name_target("Belko", Some("Belko Software Inc"));
+        assert_eq!(t.name_tokens, vec!["belko".to_string()]);
     }
 
     #[test]
     fn exact_and_substring_matches() {
         let t = target();
         assert!(matches!(
-            score_product("Google Chrome", &t),
+            score_product("Corvane Glide", &t),
             Some((Confidence::High, _))
         ));
         assert!(matches!(
-            score_product("Google Chrome Beta", &t),
+            score_product("Corvane Glide Beta", &t),
             Some((Confidence::High, _))
         ));
         // The vendor word is dropped, so the product word alone is the name.
-        assert_eq!(t.name_tokens, vec!["chrome".to_string()]);
+        assert_eq!(t.name_tokens, vec!["glide".to_string()]);
         assert!(matches!(
-            score_product("Chrome", &t),
+            score_product("Glide", &t),
             Some((Confidence::High, _))
         ));
         // Two-word product: one word alone is only plausible.
-        let two = name_target("Wallpaper Engine", None);
+        let two = name_target("Backdrop Engine", None);
         assert!(matches!(
-            score_product("Wallpaper Engine", &two),
+            score_product("Backdrop Engine", &two),
             Some((Confidence::High, _))
         ));
         assert!(matches!(
-            score_product("Wallpaper", &two),
+            score_product("Backdrop", &two),
             Some((Confidence::Medium, _))
         ));
     }
 
     #[test]
     fn one_word_matches_only_when_the_name_is_that_word() {
-        // "Brave Update Service" is Brave's: the name really is one word.
-        let brave = name_target("Brave", Some("Brave Software Inc"));
+        // "Belko Update Service" is Belko's: the name really is one word.
+        let belko = name_target("Belko", Some("Belko Software Inc"));
         assert!(matches!(
-            score_product("Brave Update Service", &brave),
+            score_product("Belko Update Service", &belko),
             Some((Confidence::High, _))
         ));
 
@@ -3670,9 +3670,9 @@ mod tests {
         ));
 
         // Version noise does not stop a name from being one word.
-        let mbam = name_target("Malwarebytes version 5.6.5.306", Some("Malwarebytes"));
+        let ward = name_target("Wardstone version 5.6.5.306", Some("Wardstone"));
         assert!(matches!(
-            score_product("Malwarebytes Anti-Malware", &mbam),
+            score_product("Wardstone Anti-Malware", &ward),
             Some((Confidence::High, _))
         ));
     }
@@ -3684,17 +3684,17 @@ mod tests {
             Some("Microsoft Corporation"),
         );
         assert_eq!(sdk.name_tokens, vec!["sdk".to_string()]);
-        assert!(score_product("NVIDIA FrameView SDK", &sdk).is_none());
+        assert!(score_product("Velloran FrameScope SDK", &sdk).is_none());
 
         // The same words on both sides still match, inside the vendor key
-        // "GitHub" the child "CLI" is the product.
-        let cli = name_target("GitHub CLI", Some("GitHub, Inc."));
+        // "Hubforge" the child "CLI" is the product.
+        let cli = name_target("Hubforge CLI", Some("Hubforge, Inc."));
         assert_eq!(cli.name_tokens, vec!["cli".to_string()]);
         assert!(matches!(
             score_product("CLI", &cli),
             Some((Confidence::High, _))
         ));
-        assert!(score_product("claude-cli-nodejs", &cli).is_none());
+        assert!(score_product("quill-cli-nodejs", &cli).is_none());
     }
 
     #[test]
@@ -3703,11 +3703,11 @@ mod tests {
             r"C:\WINDOWS\system32\svchost.exe"
         )));
         assert!(windows_hosted_service(Path::new(
-            r"C:\WINDOWS\System32\DriverStore\FileRepository\logi.inf_amd64_1\logi_service.exe"
+            r"C:\WINDOWS\System32\DriverStore\FileRepository\tavra.inf_amd64_1\tavra_service.exe"
         )));
         // A program that drops its own service binary in System32 still counts.
         assert!(!windows_hosted_service(Path::new(
-            r"C:\WINDOWS\SysWOW64\wallpaperservice32.exe"
+            r"C:\WINDOWS\SysWOW64\backdropservice32.exe"
         )));
     }
 
@@ -3715,17 +3715,17 @@ mod tests {
     fn a_folder_that_holds_another_install_is_left_alone() {
         let root = crate::backup::TestDir::new("oxidize_shared_test");
         let game = root
-            .join("Steam")
+            .join("Ludra")
             .join("library")
             .join("common")
             .join("game");
         fs::create_dir_all(&game).unwrap();
 
-        let steam = name_target("Steam", Some("Valve Corporation"));
+        let ludra = name_target("Ludra", Some("Ostel Corporation"));
 
-        // On its own the folder is Steam's, by name.
+        // On its own the folder is Ludra's, by name.
         let mut out = Vec::new();
-        scan_dir_children(&root, &steam, &[], false, &fs_roots(), &mut out);
+        scan_dir_children(&root, &ludra, &[], false, &fs_roots(), &mut out);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].confidence, Confidence::High);
 
@@ -3733,7 +3733,7 @@ mod tests {
         let mut out = Vec::new();
         scan_dir_children(
             &root,
-            &steam,
+            &ludra,
             std::slice::from_ref(&game),
             false,
             &fs_roots(),
@@ -3794,28 +3794,28 @@ mod tests {
 
     #[test]
     fn what_runs_the_uninstall_is_not_the_programs_own() {
-        // A Steam game uninstalls through Steam. Steam's autostart value and
-        // its firewall rules stay Steam's.
-        let steam = r"C:\Program Files (x86)\Steam\steam.exe";
-        let game_dir = r"C:\Program Files (x86)\Steam\steamapps\common\wallpaper_engine";
+        // A Ludra game uninstalls through Ludra. Ludra's autostart value and
+        // its firewall rules stay Ludra's.
+        let ludra = r"C:\Program Files (x86)\Ludra\ludra.exe";
+        let game_dir = r"C:\Program Files (x86)\Ludra\ludraapps\common\backdrop_engine";
         let game = build_target(&registered(
-            "Wallpaper Engine",
+            "Backdrop Engine",
             Some(game_dir),
-            Some(r"C:\Program Files (x86)\Steam\steam\games\5b3bd0d9e5800b93.ico"),
-            Some(&format!("\"{steam}\" steam://uninstall/431960")),
+            Some(r"C:\Program Files (x86)\Ludra\ludra\games\5b3bd0d9e5800b93.ico"),
+            Some(&format!("\"{ludra}\" ludra://uninstall/431960")),
         ));
         assert!(game.exe_names.is_empty(), "{:?}", game.exe_names);
-        assert!(match_run_value("Steam", &format!("\"{steam}\" -silent"), &game).is_none());
-        for rule in ["Steam", "Steam Web Helper"] {
+        assert!(match_run_value("Ludra", &format!("\"{ludra}\" -silent"), &game).is_none());
+        for rule in ["Ludra", "Ludra Web Helper"] {
             assert!(
-                match_exe_item(rule, Some(Path::new(steam)), &game).is_none(),
+                match_exe_item(rule, Some(Path::new(ludra)), &game).is_none(),
                 "{rule}"
             );
         }
         // The game's own rule is still the game's.
         let launcher = PathBuf::from(game_dir).join("launcher.exe");
         assert!(matches!(
-            match_exe_item("Wallpaper Engine", Some(launcher.as_path()), &game),
+            match_exe_item("Backdrop Engine", Some(launcher.as_path()), &game),
             Some((Confidence::High, _))
         ));
 
@@ -3869,35 +3869,36 @@ mod tests {
 
     #[test]
     fn a_vendor_folder_recorded_as_the_install_folder_owns_nothing() {
-        // Intel's Bluetooth driver records `Program Files (x86)\Intel`, where
+        // Intel is on the shipped vendor deny list, so this test keeps its real folder name.
+        // Intel's radio driver records `Program Files (x86)\Intel`, where
         // the Driver & Support Assistant keeps its two services.
         let intel = PathBuf::from(r"C:\Program Files (x86)\Intel");
         let dsa = intel.join(r"Driver and Support Assistant\x86");
-        let mut bluetooth = registered(
-            "Intel(R) Wireless Bluetooth(R)",
+        let mut radio = registered(
+            "Intel(R) Wireless Radio(R)",
             Some(r"C:\Program Files (x86)\Intel\"),
             None,
             Some("MsiExec.exe /I{00000020-0240-1033-84C8-B8D95FA3C8C3}"),
         );
-        bluetooth.publisher = Some("Intel Corporation".to_string());
+        radio.publisher = Some("Intel Corporation".to_string());
         let runs = vec![
             (
                 vec![
-                    "DSAService".to_string(),
+                    "XSAService".to_string(),
                     "Intel(R) Driver & Support Assistant".to_string(),
                 ],
-                dsa.join("DSAService.exe"),
+                dsa.join("XSAService.exe"),
             ),
             (
                 vec![
-                    "DSAUpdateService".to_string(),
+                    "XSAUpdateService".to_string(),
                     "Intel(R) Driver & Support Assistant Updater".to_string(),
                 ],
-                dsa.join("DSAUpdateService.exe"),
+                dsa.join("XSAUpdateService.exe"),
             ),
         ];
         let snap = Snapshot::new();
-        let t = build_target_from(&bluetooth, Some(intel.clone()), &[], &runs, &snap);
+        let t = build_target_from(&radio, Some(intel.clone()), &[], &runs, &snap);
         assert!(t.install_location.is_none(), "{:?}", t.install_location);
         for (names, exe) in &runs {
             for name in names {
@@ -3909,7 +3910,7 @@ mod tests {
         }
         // Another program installed inside makes a folder shared too.
         let t = build_target_from(
-            &bluetooth,
+            &radio,
             Some(intel.clone()),
             &[intel.join("Some Other Product")],
             &[],
@@ -4034,19 +4035,19 @@ mod tests {
         // Autostart values that run Windows PowerShell by its bare name.
         let runs = [
             (
-                "DiscordVencord",
-                r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\x\start-discord.ps1""#,
+                "ChatterPatch",
+                r#"powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\x\start-chatter.ps1""#,
             ),
             (
-                "Mochi",
-                r#"powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'C:\Users\x\AppData\Local\Programs\Mochi\bin\mochic.exe' -ArgumentList 'start' -WindowStyle Hidden""#,
+                "Tiler",
+                r#"powershell.exe -NoProfile -WindowStyle Hidden -Command "Start-Process -FilePath 'C:\Users\x\AppData\Local\Programs\Tiler\bin\tilerc.exe' -ArgumentList 'start' -WindowStyle Hidden""#,
             ),
         ];
         for (name, data) in runs {
             assert!(match_run_value(name, data, &pwsh).is_none(), "{name}");
         }
         // A scheduled task's command holds the bare name alone.
-        assert!(match_exe_item("Mochi", Some(Path::new("powershell.exe")), &pwsh).is_none());
+        assert!(match_exe_item("Tiler", Some(Path::new("powershell.exe")), &pwsh).is_none());
 
         // A bare name nothing answers to is unknown, not missing.
         let foo = name_target("Fooberry", None);
@@ -4065,51 +4066,51 @@ mod tests {
 
     #[test]
     fn one_word_of_a_longer_name_claims_nothing_on_its_own() {
-        // `AppData\Local\docker-secrets-engine` is Docker's.
-        let engine = name_target("Wallpaper Engine", Some("Wallpaper Engine Team"));
-        assert_eq!(engine.name_tokens, ["wallpaper", "engine"]);
-        assert!(score_product("docker-secrets-engine", &engine).is_none());
+        // `AppData\Local\vessel-secrets-engine` is Vessel's.
+        let engine = name_target("Backdrop Engine", Some("Backdrop Engine Team"));
+        assert_eq!(engine.name_tokens, ["backdrop", "engine"]);
+        assert!(score_product("vessel-secrets-engine", &engine).is_none());
         // Its own leftovers are named after it.
-        for name in ["Wallpaper Engine", "wallpaper_engine", "WallpaperEngine"] {
+        for name in ["Backdrop Engine", "backdrop_engine", "BackdropEngine"] {
             assert!(
                 matches!(score_product(name, &engine), Some((Confidence::High, _))),
                 "{name}"
             );
         }
         assert!(matches!(
-            score_product("Wallpaper", &engine),
+            score_product("Backdrop", &engine),
             Some((Confidence::Medium, _))
         ));
 
         // A one-word name stays one, whatever words its install folder adds:
-        // NVIDIA App's own self-update task still is its.
-        let mut nvapp = registered(
-            "NVIDIA App 11.0.9.251",
+        // Velloran App's own self-update task still is its.
+        let mut velapp = registered(
+            "Velloran App 11.0.9.251",
             Some(
-                r"C:\Program Files\NVIDIA Corporation\Installer2\Display.NvApp.{EAB5A4EC-3E37-4254-9510-236A9B8FF631}",
+                r"C:\Program Files\Velloran Corporation\Installer2\Display.VelApp.{EAB5A4EC-3E37-4254-9510-236A9B8FF631}",
             ),
             None,
             None,
         );
-        nvapp.publisher = Some("NVIDIA Corporation".to_string());
-        let nvapp = build_target(&nvapp);
-        assert!(nvapp.name_tokens.len() > 1, "{:?}", nvapp.name_tokens);
-        assert!(score_product("NVIDIA App SelfUpdate_", &nvapp).is_some());
+        velapp.publisher = Some("Velloran Corporation".to_string());
+        let velapp = build_target(&velapp);
+        assert!(velapp.name_tokens.len() > 1, "{:?}", velapp.name_tokens);
+        assert!(score_product("Velloran App SelfUpdate_", &velapp).is_some());
 
-        // The firewall rules for Python 3.13's `python.exe` are not the
+        // The firewall rules for Serpa 3.13's `serpa.exe` are not the
         // launcher's, by their name or by their path.
-        let python = r"C:\Users\x\AppData\Local\Programs\Python\Python313\python.exe";
-        let launcher = name_target("Python Launcher", Some("Python Software Foundation"));
-        assert!(score_product("python.exe", &launcher).is_none());
-        assert!(match_exe_item("python.exe", Some(Path::new(python)), &launcher).is_none());
+        let serpa = r"C:\Users\x\AppData\Local\Programs\Serpa\Serpa313\serpa.exe";
+        let launcher = name_target("Serpa Launcher", Some("Serpa Software Foundation"));
+        assert!(score_product("serpa.exe", &launcher).is_none());
+        assert!(match_exe_item("serpa.exe", Some(Path::new(serpa)), &launcher).is_none());
         assert!(matches!(
-            score_product("Python Launcher", &launcher),
+            score_product("Serpa Launcher", &launcher),
             Some((Confidence::High, _))
         ));
-        // Python itself keeps them.
-        let interpreter = name_target("Python 3.13.7 (64-bit)", Some("Python Software Foundation"));
+        // Serpa itself keeps them.
+        let interpreter = name_target("Serpa 3.13.7 (64-bit)", Some("Serpa Software Foundation"));
         assert!(matches!(
-            score_product("python.exe", &interpreter),
+            score_product("serpa.exe", &interpreter),
             Some((Confidence::High, _))
         ));
     }
@@ -4129,17 +4130,17 @@ mod tests {
             score_product("desktop", &runtime),
             Some((Confidence::High, _))
         ));
-        // Intel's "Driver & Support Assistant" and HP's updater task.
-        let dsa = name_target("Intel\u{ae} Driver & Support Assistant", Some("Intel"));
+        // Tavra's "Driver & Support Assistant" and ZQ's updater task.
+        let dsa = name_target("Tavra\u{ae} Driver & Support Assistant", Some("Tavra"));
         assert_eq!(dsa.name_tokens, ["support"]);
         assert!(!matches!(
-            score_product("HP Support Solutions Framework Updater", &dsa),
+            score_product("ZQ Support Solutions Framework Updater", &dsa),
             Some((Confidence::High, _))
         ));
         // Their own names still match, the whole name with more around it
-        // too: Intel's folder, HP's own updater task.
+        // too: Tavra's folder, ZQ's own updater task.
         for name in [
-            "Intel Driver & Support Assistant",
+            "Tavra Driver & Support Assistant",
             "Driver and Support Assistant",
         ] {
             assert!(
@@ -4147,9 +4148,9 @@ mod tests {
                 "{name}"
             );
         }
-        let hp = name_target("HP Support Solutions Framework", Some("HP Inc."));
+        let zq = name_target("ZQ Support Solutions Framework", Some("ZQ Inc."));
         assert!(matches!(
-            score_product("HP Support Solutions Framework Updater", &hp),
+            score_product("ZQ Support Solutions Framework Updater", &zq),
             Some((Confidence::High, _))
         ));
         assert!(matches!(
@@ -4161,15 +4162,15 @@ mod tests {
     #[test]
     fn unrelated_names_do_not_match() {
         let t = target();
-        assert!(score_product("Mozilla Firefox", &t).is_none());
-        assert!(score_product("7-Zip", &t).is_none());
+        assert!(score_product("Halvern Ember", &t).is_none());
+        assert!(score_product("9-Zap", &t).is_none());
     }
 
     #[test]
     fn publisher_is_detected_for_descent() {
         let t = target();
-        assert!(matches_publisher("Google", &t));
-        assert!(!matches_publisher("Mozilla", &t));
+        assert!(matches_publisher("Corvane", &t));
+        assert!(!matches_publisher("Halvern", &t));
     }
 
     #[test]
@@ -4177,38 +4178,38 @@ mod tests {
         assert!(fs_denied("Windows"));
         assert!(fs_denied("Common Files"));
         assert!(reg_denied("Microsoft"));
-        assert!(!fs_denied("Google"));
+        assert!(!fs_denied("Corvane"));
         assert!(path_within_shared_dir(Path::new(
             r"C:\Program Files\Common Files\Vendor"
         )));
         assert!(!path_within_shared_dir(Path::new(
-            r"C:\Program Files\BraveSoftware"
+            r"C:\Program Files\BelkoSoftware"
         )));
     }
 
     #[test]
     fn word_boundary_prevents_concatenation_false_positive() {
-        let zoom = name_target("Zoom", Some("Zoom Video Communications, Inc."));
-        assert!(score_product("ZoomIt", &zoom).is_none());
+        let tolk = name_target("Tolk", Some("Tolk Video Communications, Inc."));
+        assert!(score_product("TolkIt", &tolk).is_none());
         assert!(matches!(
-            score_product("Zoom", &zoom),
+            score_product("Tolk", &tolk),
             Some((Confidence::High, _))
         ));
     }
 
     #[test]
     fn single_generic_token_is_never_high() {
-        let vlc = name_target("VLC media player", Some("VideoLAN"));
-        assert_eq!(vlc.name_tokens, vec!["vlc".to_string()]);
-        assert!(score_product("Windows Media Player", &vlc).is_none());
+        let orb = name_target("Orb media player", Some("Orblan"));
+        assert_eq!(orb.name_tokens, vec!["orb".to_string()]);
+        assert!(score_product("Windows Media Player", &orb).is_none());
     }
 
     #[test]
     fn publisher_only_folder_descends_not_flagged() {
-        let brave = name_target("Brave", Some("Brave Software Inc"));
-        assert!(matches_publisher("BraveSoftware", &brave));
+        let belko = name_target("Belko", Some("Belko Software Inc"));
+        assert!(matches_publisher("BelkoSoftware", &belko));
         assert!(matches!(
-            score_product("Brave-Browser", &brave),
+            score_product("Belko-Browser", &belko),
             Some((Confidence::High, _))
         ));
     }
@@ -4385,31 +4386,31 @@ mod tests {
     #[test]
     fn contains_subslice_is_word_aligned() {
         let hay = vec![
-            "google".to_string(),
-            "chrome".to_string(),
+            "corvane".to_string(),
+            "glide".to_string(),
             "beta".to_string(),
         ];
         assert!(contains_subslice(
             &hay,
-            &["google".to_string(), "chrome".to_string()]
+            &["corvane".to_string(), "glide".to_string()]
         ));
         assert!(!contains_subslice(
             &hay,
-            &["chrome".to_string(), "google".to_string()]
+            &["glide".to_string(), "corvane".to_string()]
         ));
         assert!(!contains_subslice(
-            &["zoomit".to_string()],
-            &["zoom".to_string()]
+            &["tolkit".to_string()],
+            &["tolk".to_string()]
         ));
     }
 
     #[test]
     fn dangling_paths_that_name_the_product_match() {
         let t = target();
-        let gone = Path::new(r"C:\Program Files\Google\Chrome\Application\chrome.exe");
+        let gone = Path::new(r"C:\Program Files\Corvane\Glide\Application\glide.exe");
         assert!(path_names_product(gone, &t));
         assert!(!path_names_product(
-            Path::new(r"C:\Program Files\Mozilla Firefox\firefox.exe"),
+            Path::new(r"C:\Program Files\Halvern Ember\ember.exe"),
             &t
         ));
     }
@@ -4433,15 +4434,15 @@ mod tests {
         // `AppData\Local\speech` holds Windows' speech data.
         assert!(score_product("speech", &t).is_none());
         assert!(!is_exact_product("speech", &t));
-        // Warframe's firewall rules, by their name and by their program.
+        // Starwake's firewall rules, by their name and by their program.
         for rule in [
-            "Warframe Epic Game 64-bit (TCP-In)",
-            "Warframe Epic Game 64-bit (TCP-Out)",
+            "Starwake Kiln Game 64-bit (TCP-In)",
+            "Starwake Kiln Game 64-bit (TCP-Out)",
         ] {
             assert!(match_exe_item(rule, None, &t).is_none(), "{rule}");
         }
         assert!(!path_names_product(
-            Path::new(r"C:\Program Files\Epic Games\Warframe\Downloaded\Warframe.x64.exe"),
+            Path::new(r"C:\Program Files\Kiln Games\Starwake\Downloaded\Starwake.x64.exe"),
             &t
         ));
         for other in ["Game", "Games", "Window", "Speech Recognition", "Game Bar"] {
@@ -4473,14 +4474,14 @@ mod tests {
             );
         }
 
-        // One word of the identity is no name either: `ohmyposh.cli` does not
-        // claim a folder "cli", but its shown name still claims `oh-my-posh`.
-        let mut posh = crate::packages::fake::package("ohmyposh.cli", "Oh My Posh");
-        posh.publisher = Some("Jan Joris De Dobbeleer".to_string());
-        let posh = crate::packages::scan_target(&posh);
-        assert!(score_product("cli", &posh).is_none());
+        // One word of the identity is no name either: `ohmylark.cli` does not
+        // claim a folder "cli", but its shown name still claims `oh-my-lark`.
+        let mut lark = crate::packages::fake::package("ohmylark.cli", "Oh My Lark");
+        lark.publisher = Some("Wren Collective".to_string());
+        let lark = crate::packages::scan_target(&lark);
+        assert!(score_product("cli", &lark).is_none());
         assert!(matches!(
-            score_product("oh-my-posh", &posh),
+            score_product("oh-my-lark", &lark),
             Some((Confidence::High, _))
         ));
 

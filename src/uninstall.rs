@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn recognises_product_guids() {
         assert!(looks_like_guid("{2D7E0D49-1A2B-3C4D-5E6F-708192A3B4C5}"));
-        assert!(!looks_like_guid("Google Chrome"));
+        assert!(!looks_like_guid("Corvane Glide"));
         assert!(!looks_like_guid("{too-short}"));
     }
 }

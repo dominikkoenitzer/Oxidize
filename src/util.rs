@@ -485,9 +485,9 @@ mod tests {
 
     #[test]
     fn tokenises_significantly() {
-        let toks = significant_tokens("Google Chrome 124.0.1 (x64)");
-        assert!(toks.contains(&"google".to_string()));
-        assert!(toks.contains(&"chrome".to_string()));
+        let toks = significant_tokens("Corvane Glide 124.0.1 (x64)");
+        assert!(toks.contains(&"corvane".to_string()));
+        assert!(toks.contains(&"glide".to_string()));
         // Version numbers and "x64" are dropped.
         assert!(!toks.iter().any(|t| t == "x64"));
         assert!(!toks.iter().any(|t| t.chars().all(|c| c.is_ascii_digit())));
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn normalises_to_alnum_lower() {
-        assert_eq!(normalize("Google Chrome!"), "googlechrome");
+        assert_eq!(normalize("Corvane Glide!"), "corvaneglide");
     }
 
     #[test]
