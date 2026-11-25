@@ -74,5 +74,5 @@ jobs:
             dist/oxidize-windows-x64.zip
             dist/oxidize-windows-x64.zip.sha256
           fail_on_unmatched_files: true
-          body: "Download and install Oxidize from https://oxidize.punds.ch."
+          body: "Download and install Oxidize from https://portfolio-izanagi.vercel.app/projects/oxidize."
           generate_release_notes: false

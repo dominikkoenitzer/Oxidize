@@ -4,9 +4,9 @@ Oxidize runs on Windows only and has no installer. Each release has three files:
 
 | file | |
 |---|---|
-| [`oxidize-gui.exe`](https://oxidize.punds.ch) | the window app |
-| [`oxidize.exe`](https://oxidize.punds.ch) | the command line |
-| [`oxidize-windows-x64.zip`](https://oxidize.punds.ch) | both in one zip |
+| [`oxidize-gui.exe`](https://portfolio-izanagi.vercel.app/projects/oxidize) | the window app |
+| [`oxidize.exe`](https://portfolio-izanagi.vercel.app/projects/oxidize) | the command line |
+| [`oxidize-windows-x64.zip`](https://portfolio-izanagi.vercel.app/projects/oxidize) | both in one zip |
 
 To type `oxidize` in any terminal, `oxidize.exe` has to be in a folder on your
 PATH. Make a folder such as `C:\Tools` and move `oxidize.exe` into it. Search

@@ -7,7 +7,7 @@ Oxidize uninstalls Windows programs and removes what they leave behind.
   <img src="site/img/hero-light-1440.webp" width="720" alt="Oxidize with Quillmark selected and the seven items that belong to it, grouped by kind, each with how sure Oxidize is and why">
 </picture>
 
-[Download Oxidize](https://oxidize.punds.ch), then double-click it.
+[Download Oxidize](https://portfolio-izanagi.vercel.app/projects/oxidize), then double-click it.
 
 The file is not signed, so Windows may say "Windows protected your PC"; click More info, then Run anyway.
 
