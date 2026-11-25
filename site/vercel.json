@@ -1,5 +1,7 @@
 {
   "redirects": [
+    { "source": "/", "destination": "https://portfolio-izanagi.vercel.app/projects/oxidize", "permanent": true },
+    { "source": "/index.html", "destination": "https://portfolio-izanagi.vercel.app/projects/oxidize", "permanent": true },
     {
       "source": "/download/windows",
       "destination": "https://github.com/dominikkoenitzer/Oxidize/releases/latest/download/oxidize-gui.exe",
