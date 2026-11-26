@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::OnceLock;
 use std::thread;
 
@@ -521,13 +521,22 @@ fn install_roots() -> Vec<PathBuf> {
 /// The deepest of `roots` that `p` is inside, and the folder names from
 /// there down to `p`, both by their long names. `None` when `p` is in none
 /// of them, or is one, or climbs with `..`, which would put it somewhere else
-/// than it reads.
+/// than it reads. Also `None` for the device form `\\.\`, whose parts do not
+/// line up with a root's, and for a name with a trailing dot or space behind
+/// `\\?\`, which below the plain root would name another folder.
 fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
     if p.components()
         .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
     {
         return None;
     }
+    let verbatim = match p.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::DeviceNS(_) => return None,
+            kind => kind.is_verbatim(),
+        },
+        _ => false,
+    };
     let p = system::long_path(p);
     let key = norm_path_key(&p);
     let (root, _) = roots
@@ -539,12 +548,15 @@ fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
         })
         .filter(|(_, k)| dir_contains(k, &key))
         .max_by_key(|(_, k)| k.len())?;
-    let segments = p
+    let segments: Vec<String> = p
         .components()
         .skip(root.components().count())
         .filter_map(|c| c.as_os_str().to_str())
         .map(str::to_string)
         .collect();
+    if verbatim && segments.iter().any(|s| s.ends_with(['.', ' '])) {
+        return None;
+    }
     Some((root, segments))
 }
 
@@ -1609,15 +1621,18 @@ fn norm_path_str(p: &str) -> String {
 }
 
 /// `p` by its long names, normalised for a compare, read as Windows reads a
-/// file path: without the extended-length prefix and without the trailing
-/// dots and spaces it ignores on each part, so `C:\Vendor.`, `C:\Vendor ` and
-/// `\\?\C:\Vendor` are `C:\Vendor`. `.` and `..` stay as written.
+/// file path: without the `\\?\` or `\\.\` prefix and, unless it was written
+/// with `\\?\`, without the trailing dots and spaces Windows ignores on each
+/// part. So `C:\Vendor.`, `C:\Vendor `, `\\.\C:\Vendor.` and `\\?\C:\Vendor`
+/// are `C:\Vendor`, while `\\?\C:\Vendor.` stays the other folder it names.
+/// `.` and `..` stay as written; resolve_for_guard trims them, which never
+/// meets a `..`, since canonicalize resolves it and below_root refuses it.
 fn norm_path_key(p: &Path) -> String {
     let s = norm_path_str(&system::long_path(p).to_string_lossy());
-    drop_long_prefix(&s)
-        .split('\\')
+    let (s, verbatim) = split_long_prefix(&s);
+    s.split('\\')
         .map(|part| {
-            if part.chars().all(|c| c == '.') {
+            if verbatim || part.chars().all(|c| c == '.') {
                 part
             } else {
                 part.trim_end_matches(['.', ' '])
@@ -1629,11 +1644,26 @@ fn norm_path_key(p: &Path) -> String {
         .to_string()
 }
 
-/// A lowercased path without its `\\?\` or `\\?\UNC\` prefix.
+/// A lowercased path without its `\\?\`, `\\?\UNC\`, `\\.\` or `\\.\UNC\`
+/// prefix.
 fn drop_long_prefix(s: &str) -> String {
-    s.strip_prefix("\\\\?\\unc\\")
-        .map(|rest| format!("\\\\{rest}"))
-        .unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(s).to_string())
+    split_long_prefix(s).0
+}
+
+/// A lowercased path without its prefix, as drop_long_prefix gives it, and
+/// whether that prefix was `\\?\`, behind which Windows takes each name as
+/// written.
+fn split_long_prefix(s: &str) -> (String, bool) {
+    for (prefix, verbatim) in [("\\\\?\\", true), ("\\\\.\\", false)] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            let rest = rest
+                .strip_prefix("unc\\")
+                .map(|share| format!("\\\\{share}"))
+                .unwrap_or_else(|| rest.to_string());
+            return (rest, verbatim);
+        }
+    }
+    (s.to_string(), false)
 }
 
 /// Strict containment on normalised path strings, separator-aware.
