@@ -3390,7 +3390,7 @@ mod tests {
                 format!("\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher")
             );
         }
-        for name in ["7-Zip", "Git"] {
+        for name in ["9-Zap", "Knot"] {
             assert!(refuse_wordless(name, &named(name, None)).is_ok());
         }
         let with_publisher = named("Go", Some("Example Studio"));
