@@ -5066,7 +5066,14 @@ mod tests {
         let short = short_name(&own);
         assert_ne!(short, own, "no short names on this volume");
 
-        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        // A folder of the program's name that is there in another tool's
+        // folder is that tool's, read from either form.
+        let mut t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(in_others_folder(&own, &t));
+        assert!(in_others_folder(&short, &t), "{}", short.display());
+        assert!(!path_names_product(&short, &t), "{}", short.display());
+        // Recorded as the program's install folder, it is the program's.
+        t.install_location = Some(own.parent().unwrap().to_path_buf());
         assert!(path_names_product(&own, &t));
         assert!(path_names_product(&short, &t), "{}", short.display());
         assert!(!in_others_folder(&short, &t), "{}", short.display());
