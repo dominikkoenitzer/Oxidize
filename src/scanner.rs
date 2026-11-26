@@ -519,26 +519,33 @@ fn install_roots() -> Vec<PathBuf> {
 }
 
 /// The deepest of `roots` that `p` is inside, and the folder names from
-/// there down to `p`. `None` when `p` is in none of them, or is one, or
-/// climbs with `..`, which would put it somewhere else than it reads.
+/// there down to `p`, both by their long names. `None` when `p` is in none
+/// of them, or is one, or climbs with `..`, which would put it somewhere else
+/// than it reads.
 fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
     if p.components()
         .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
     {
         return None;
     }
-    let key = norm_path_key(p);
-    let root = roots
+    let p = system::long_path(p);
+    let key = norm_path_key(&p);
+    let (root, _) = roots
         .iter()
-        .filter(|r| dir_contains(&norm_path_key(r), &key))
-        .max_by_key(|r| norm_path_key(r).len())?;
+        .map(|r| {
+            let r = system::long_path(r);
+            let k = norm_path_key(&r);
+            (r, k)
+        })
+        .filter(|(_, k)| dir_contains(k, &key))
+        .max_by_key(|(_, k)| k.len())?;
     let segments = p
         .components()
         .skip(root.components().count())
         .filter_map(|c| c.as_os_str().to_str())
         .map(str::to_string)
         .collect();
-    Some((root.clone(), segments))
+    Some((root, segments))
 }
 
 /// The vendor's word, from what the program says about itself: its name,
@@ -1477,7 +1484,7 @@ fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
     if in_others_folder(p, target) {
         return false;
     }
-    let named = p.components().any(|c| {
+    let named = system::long_path(p).components().any(|c| {
         c.as_os_str()
             .to_str()
             .map(|s| matches!(score_product(s, target), Some((Confidence::High, _))))
@@ -1601,8 +1608,9 @@ fn norm_path_str(p: &str) -> String {
         .to_string()
 }
 
+/// `p` by its long names, normalised for a compare.
 fn norm_path_key(p: &Path) -> String {
-    norm_path_str(&p.to_string_lossy())
+    norm_path_str(&system::long_path(p).to_string_lossy())
 }
 
 /// Strict containment on normalised path strings, separator-aware.
@@ -5023,6 +5031,91 @@ mod tests {
         let t = name_target("Lumen", Some("Brightway LLC"));
         let vendors = program_files().join(r"Brightway\Lumen\lumen.exe");
         assert!(path_names_product(&vendors, &t));
+    }
+
+    /// `p` with each part that has a short 8.3 name written that way.
+    fn short_name(p: &Path) -> PathBuf {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = p
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut buf = vec![0u16; 32_768];
+        let n = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        assert!(
+            n > 0 && n < buf.len(),
+            "{}: {}",
+            p.display(),
+            std::io::Error::last_os_error()
+        );
+        PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+    }
+
+    #[test]
+    fn a_short_path_is_read_by_its_long_names() {
+        // The program's own folder in a test tool's library below
+        // `%LOCALAPPDATA%`, written with the short names Windows keeps for
+        // long ones, as a record made from a short `%TEMP%` holds it.
+        let tools = LocalDir::new("OxidizeShortPathTest");
+        let own = tools.join(r"library\common\Lumen Browser\lumen.exe");
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, "MZ").unwrap();
+        let short = short_name(&own);
+        assert_ne!(short, own, "no short names on this volume");
+
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(path_names_product(&own, &t));
+        assert!(path_names_product(&short, &t), "{}", short.display());
+        assert!(!in_others_folder(&short, &t), "{}", short.display());
+
+        // The same root and the same folder names below it, from either side.
+        let roots = install_roots();
+        assert_eq!(below_root(&short, &roots), below_root(&own, &roots));
+        let short_tools = short_name(&tools);
+        assert_eq!(
+            below_root(&own, std::slice::from_ref(&short_tools)).map(|(_, s)| s),
+            Some(
+                ["library", "common", "Lumen Browser", "lumen.exe"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+        assert!(system::path_under(&short, &tools));
+        assert!(system::path_under(&own, &short_tools));
+    }
+
+    #[test]
+    fn a_short_install_folder_is_shared_with_the_installs_in_it() {
+        // A vendor folder that another program is installed in, recorded
+        // with short names on one side and long names on the other.
+        let tools = LocalDir::new("OxidizeShortSharedTest");
+        let loc = tools.join(r"Brightway Software");
+        let other = loc.join(r"Lumen Updater Service");
+        fs::create_dir_all(&other).unwrap();
+        let short_loc = short_name(&loc);
+        let short_other = short_name(&other);
+        assert_ne!(short_loc, loc, "no short names on this volume");
+
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(shared_install_folder(
+            &loc,
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
+        assert!(
+            shared_install_folder(&short_loc, &t, std::slice::from_ref(&other), &[]),
+            "{}",
+            short_loc.display()
+        );
+        assert!(
+            shared_install_folder(&loc, &t, std::slice::from_ref(&short_other), &[]),
+            "{}",
+            short_other.display()
+        );
     }
 
     #[test]
