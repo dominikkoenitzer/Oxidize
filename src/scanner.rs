@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::sync::OnceLock;
 use std::thread;
 
@@ -519,26 +519,45 @@ fn install_roots() -> Vec<PathBuf> {
 }
 
 /// The deepest of `roots` that `p` is inside, and the folder names from
-/// there down to `p`. `None` when `p` is in none of them, or is one, or
-/// climbs with `..`, which would put it somewhere else than it reads.
+/// there down to `p`, both by their long names. `None` when `p` is in none
+/// of them, or is one, or climbs with `..`, which would put it somewhere else
+/// than it reads. Also `None` for the device form `\\.\`, whose parts do not
+/// line up with a root's, and for a name with a trailing dot or space behind
+/// `\\?\`, which below the plain root would name another folder.
 fn below_root(p: &Path, roots: &[PathBuf]) -> Option<(PathBuf, Vec<String>)> {
     if p.components()
         .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
     {
         return None;
     }
-    let key = norm_path_key(p);
-    let root = roots
+    let verbatim = match p.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::DeviceNS(_) => return None,
+            kind => kind.is_verbatim(),
+        },
+        _ => false,
+    };
+    let p = system::long_path(p);
+    let key = norm_path_key(&p);
+    let (root, _) = roots
         .iter()
-        .filter(|r| dir_contains(&norm_path_key(r), &key))
-        .max_by_key(|r| norm_path_key(r).len())?;
-    let segments = p
+        .map(|r| {
+            let r = system::long_path(r);
+            let k = norm_path_key(&r);
+            (r, k)
+        })
+        .filter(|(_, k)| dir_contains(k, &key))
+        .max_by_key(|(_, k)| k.len())?;
+    let segments: Vec<String> = p
         .components()
         .skip(root.components().count())
         .filter_map(|c| c.as_os_str().to_str())
         .map(str::to_string)
         .collect();
-    Some((root.clone(), segments))
+    if verbatim && segments.iter().any(|s| s.ends_with(['.', ' '])) {
+        return None;
+    }
+    Some((root, segments))
 }
 
 /// The vendor's word, from what the program says about itself: its name,
@@ -1477,7 +1496,7 @@ fn path_names_product(p: &Path, target: &ScanTarget) -> bool {
     if in_others_folder(p, target) {
         return false;
     }
-    let named = p.components().any(|c| {
+    let named = system::long_path(p).components().any(|c| {
         c.as_os_str()
             .to_str()
             .map(|s| matches!(score_product(s, target), Some((Confidence::High, _))))
@@ -1601,8 +1620,50 @@ fn norm_path_str(p: &str) -> String {
         .to_string()
 }
 
+/// `p` by its long names, normalised for a compare, read as Windows reads a
+/// file path: without the `\\?\` or `\\.\` prefix and, unless it was written
+/// with `\\?\`, without the trailing dots and spaces Windows ignores on each
+/// part. So `C:\Vendor.`, `C:\Vendor `, `\\.\C:\Vendor.` and `\\?\C:\Vendor`
+/// are `C:\Vendor`, while `\\?\C:\Vendor.` stays the other folder it names.
+/// `.` and `..` stay as written; resolve_for_guard trims them, which never
+/// meets a `..`, since canonicalize resolves it and below_root refuses it.
 fn norm_path_key(p: &Path) -> String {
-    norm_path_str(&p.to_string_lossy())
+    let s = norm_path_str(&system::long_path(p).to_string_lossy());
+    let (s, verbatim) = split_long_prefix(&s);
+    s.split('\\')
+        .map(|part| {
+            if verbatim || part.chars().all(|c| c == '.') {
+                part
+            } else {
+                part.trim_end_matches(['.', ' '])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\\")
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+/// A lowercased path without its `\\?\`, `\\?\UNC\`, `\\.\` or `\\.\UNC\`
+/// prefix.
+fn drop_long_prefix(s: &str) -> String {
+    split_long_prefix(s).0
+}
+
+/// A lowercased path without its prefix, as drop_long_prefix gives it, and
+/// whether that prefix was `\\?\`, behind which Windows takes each name as
+/// written.
+fn split_long_prefix(s: &str) -> (String, bool) {
+    for (prefix, verbatim) in [("\\\\?\\", true), ("\\\\.\\", false)] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            let rest = rest
+                .strip_prefix("unc\\")
+                .map(|share| format!("\\\\{share}"))
+                .unwrap_or_else(|| rest.to_string());
+            return (rest, verbatim);
+        }
+    }
+    (s.to_string(), false)
 }
 
 /// Strict containment on normalised path strings, separator-aware.
@@ -1655,11 +1716,8 @@ fn resolve_for_guard(p: &Path) -> String {
         })
         .unwrap_or_else(|_| p.to_path_buf());
     let s = real.to_string_lossy().to_lowercase().replace('/', "\\");
-    let s = s
-        .strip_prefix("\\\\?\\unc\\")
-        .map(|rest| format!("\\\\{rest}"))
-        .unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string());
-    s.split('\\')
+    drop_long_prefix(&s)
+        .split('\\')
         .map(|part| part.trim_end_matches(['.', ' ']))
         .collect::<Vec<_>>()
         .join("\\")
@@ -4476,6 +4534,55 @@ mod tests {
     }
 
     #[test]
+    fn a_protected_folder_written_as_windows_reads_it_is_protected() {
+        let windir = env_dir("windir").unwrap().to_string_lossy().to_string();
+        let new_file = "oxidize-guard-test.dll";
+        let mut written = vec![
+            format!(r"{windir}."),
+            format!(r"{windir} "),
+            format!(r"{windir}. ."),
+            format!(r"{windir}.\System32"),
+            format!(r"{windir} \System32\{new_file}"),
+            format!(r"\\?\{windir}"),
+            format!(r"\\?\{windir}\System32\{new_file}"),
+            format!(r"\\.\{windir}"),
+            format!(r"\\.\{windir}\System32\{new_file}"),
+        ];
+        if let Some(pf) = env_dir("ProgramFiles") {
+            let short = short_name(&pf).to_string_lossy().to_string();
+            assert!(short.contains('~'), "no short name for {}", pf.display());
+            written.push(short.clone());
+            written.push(format!(r"\\?\{short}"));
+        }
+        // A file not there yet below a short name in the Windows folder; servicing leaves some folders
+        // there without one, so take the first that has it.
+        let store = [
+            Path::new(&windir).to_path_buf(),
+            Path::new(&windir).join("System32"),
+        ]
+        .iter()
+        .flat_map(|d| fs::read_dir(d).unwrap().flatten())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| short_name(&e.path()))
+        .find(|s| {
+            s.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains('~'))
+        })
+        .map(|s| s.to_string_lossy().to_string())
+        .expect("no folder with a short name in the Windows folder");
+        written.push(format!(r"{store}\{new_file}"));
+        for p in &written {
+            assert!(is_protected_path(Path::new(p)), "{p}");
+        }
+        assert!(!is_protected_path(Path::new(
+            r"C:\Program Files\Some Vendor\Some App."
+        )));
+        assert!(!is_protected_path(Path::new(
+            r"\\?\C:\Program Files\Some Vendor\Some App"
+        )));
+    }
+
+    #[test]
     fn a_path_not_there_yet_behind_a_junction_is_read_where_the_junction_leads() {
         let base = std::env::temp_dir().join("oxidize_guard_new_behind_junction_test");
         let link = base.join("windows link");
@@ -5025,6 +5132,171 @@ mod tests {
         assert!(path_names_product(&vendors, &t));
     }
 
+    /// `p` with each part that has a short 8.3 name written that way.
+    fn short_name(p: &Path) -> PathBuf {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+        let wide: Vec<u16> = p
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut buf = vec![0u16; 32_768];
+        let n = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+        assert!(
+            n > 0 && n < buf.len(),
+            "{}: {}",
+            p.display(),
+            std::io::Error::last_os_error()
+        );
+        PathBuf::from(String::from_utf16_lossy(&buf[..n]))
+    }
+
+    #[test]
+    fn a_short_path_is_read_by_its_long_names() {
+        // The program's own folder in a test tool's library below
+        // `%LOCALAPPDATA%`, written with the short names Windows keeps for
+        // long ones, as a record made from a short `%TEMP%` holds it.
+        let tools = LocalDir::new("OxidizeShortPathTest");
+        let own = tools.join(r"library\common\Lumen Browser\lumen.exe");
+        fs::create_dir_all(own.parent().unwrap()).unwrap();
+        fs::write(&own, "MZ").unwrap();
+        let short = short_name(&own);
+        assert_ne!(short, own, "no short names on this volume");
+
+        // A folder of the program's name that is there in another tool's
+        // folder is that tool's, read from either form.
+        let mut t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(in_others_folder(&own, &t));
+        assert!(in_others_folder(&short, &t), "{}", short.display());
+        assert!(!path_names_product(&short, &t), "{}", short.display());
+        // Recorded as the program's install folder, it is the program's.
+        t.install_location = Some(own.parent().unwrap().to_path_buf());
+        assert!(path_names_product(&own, &t));
+        assert!(path_names_product(&short, &t), "{}", short.display());
+        assert!(!in_others_folder(&short, &t), "{}", short.display());
+
+        // The same root and the same folder names below it, from either side.
+        let roots = install_roots();
+        assert_eq!(below_root(&short, &roots), below_root(&own, &roots));
+        let short_tools = short_name(&tools);
+        assert_eq!(
+            below_root(&own, std::slice::from_ref(&short_tools)).map(|(_, s)| s),
+            Some(
+                ["library", "common", "Lumen Browser", "lumen.exe"]
+                    .map(String::from)
+                    .to_vec()
+            )
+        );
+        assert!(system::path_under(&short, &tools));
+        assert!(system::path_under(&own, &short_tools));
+    }
+
+    #[test]
+    fn a_short_install_folder_is_shared_with_the_installs_in_it() {
+        // A vendor folder that another program is installed in, recorded
+        // with short names on one side and long names on the other.
+        let tools = LocalDir::new("OxidizeShortSharedTest");
+        let loc = tools.join(r"Brightway Software");
+        let other = loc.join(r"Lumen Updater Service");
+        fs::create_dir_all(&other).unwrap();
+        let short_loc = short_name(&loc);
+        let short_other = short_name(&other);
+        assert_ne!(short_loc, loc, "no short names on this volume");
+
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        assert!(shared_install_folder(
+            &loc,
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
+        assert!(
+            shared_install_folder(&short_loc, &t, std::slice::from_ref(&other), &[]),
+            "{}",
+            short_loc.display()
+        );
+        assert!(
+            shared_install_folder(&loc, &t, std::slice::from_ref(&short_other), &[]),
+            "{}",
+            short_other.display()
+        );
+    }
+
+    #[test]
+    fn an_install_folder_written_as_windows_reads_it_is_shared_with_the_installs_in_it() {
+        // The vendor folder with a trailing dot or space, or the extended-length
+        // prefix, on one side: Windows reads each as the same folder.
+        let loc = PathBuf::from(r"C:\Program Files\Brightway Software");
+        let other = loc.join("Lumen Updater Service");
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        for written in [
+            r"C:\Program Files\Brightway Software.",
+            r"C:\Program Files\Brightway Software ",
+            r"C:\Program Files\Brightway Software. .",
+            r"C:\Program Files.\Brightway Software",
+            r"\\?\C:\Program Files\Brightway Software",
+            r"\\?\c:\program files\brightway software\",
+            r"\\.\C:\Program Files\Brightway Software",
+            r"\\.\C:\Program Files\Brightway Software.",
+        ] {
+            let written = Path::new(written);
+            assert!(
+                shared_install_folder(written, &t, std::slice::from_ref(&other), &[]),
+                "{}",
+                written.display()
+            );
+        }
+        for written in [
+            r"C:\Program Files\Brightway Software\Lumen Updater Service.",
+            r"\\?\C:\Program Files\Brightway Software\Lumen Updater Service ",
+            r"\\.\C:\Program Files\Brightway Software\Lumen Updater Service",
+            r"\\.\c:\program files\brightway software\lumen updater service. ",
+        ] {
+            assert!(
+                shared_install_folder(&loc, &t, &[PathBuf::from(written)], &[]),
+                "{written}"
+            );
+        }
+        assert!(shared_install_folder(
+            Path::new(r"\\fileserver\apps\Brightway Software"),
+            &t,
+            &[PathBuf::from(
+                r"\\?\UNC\fileserver\apps\Brightway Software\Lumen Updater Service"
+            )],
+            &[]
+        ));
+        let unc = Path::new(r"\\fileserver\apps\Brightway Software");
+        assert!(shared_install_folder(
+            unc,
+            &t,
+            &[PathBuf::from(
+                r"\\.\UNC\fileserver\apps\Brightway Software\Lumen Updater Service"
+            )],
+            &[]
+        ));
+        assert!(shared_install_folder(
+            Path::new(r"\\.\UNC\fileserver\apps\Brightway Software."),
+            &t,
+            &[unc.join("Lumen Updater Service")],
+            &[]
+        ));
+        // Read that way, another folder stays another folder.
+        assert!(!shared_install_folder(
+            Path::new(r"C:\Program Files\Brightway."),
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
+        assert!(!shared_install_folder(
+            Path::new(r"C:\Program Files\Brightway Software\..\Lumen"),
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
+    }
+
     #[test]
     fn a_file_or_folder_there_named_like_the_program_in_anothers_folder_is_theirs() {
         // Another tool's own file and folder that carry the program's name.
@@ -5531,6 +5803,53 @@ mod tests {
         let t = build_target_from(&player(), Some(climbing), &[], &[], &snap);
         assert!(!t.install_vouched);
         assert_eq!(t.vendor_dir, None);
+    }
+
+    #[test]
+    fn a_verbatim_name_with_a_trailing_dot_or_space_is_another_folder() {
+        // Behind `\\?\` Windows keeps `Brightway.` as written, a folder apart
+        // from `Brightway`, and a plain path to it would name the other one.
+        let roots = install_roots();
+        let verbatim =
+            |tail: &str| PathBuf::from(format!(r"\\?\{}\{tail}", program_files().display()));
+        for tail in [
+            r"Brightway.\Versions\App",
+            r"Brightway \Versions\App",
+            r"Brightway. .\Versions\App",
+            r"Brightway\Versions.\App",
+        ] {
+            let p = verbatim(tail);
+            assert_ne!(
+                norm_path_key(&p),
+                norm_path_key(&program_files().join(tail.replace(['.', ' '], "")))
+            );
+            assert!(below_root(&p, &roots).is_none(), "{}", p.display());
+        }
+        let mut dotted = player();
+        let loc = verbatim(&format!(r"Brightway.\Versions\{BUILD}"));
+        dotted.install_location = Some(loc.to_string_lossy().into_owned());
+        let snap = Snapshot::with_programs(vec![dotted.clone()]);
+        let t = build_target_from(&dotted, Some(loc), &[], &[], &snap);
+        assert_eq!(t.vendor_dir, None);
+        // Without such a name the verbatim path is the plain one.
+        let (root, segments) = below_root(&verbatim(r"Brightway\Versions\App"), &roots).unwrap();
+        assert_eq!(
+            norm_path_key(&root.join(&segments[0])),
+            norm_path_key(&program_files().join("Brightway"))
+        );
+    }
+
+    #[test]
+    fn a_device_path_is_below_no_root() {
+        // `\\.\UNC\server\share` has more parts than `\\server\share`, so the
+        // names below a root would be counted from the wrong place.
+        let roots = install_roots();
+        for p in [
+            PathBuf::from(format!(r"\\.\{}\Brightway\App", program_files().display())),
+            PathBuf::from(r"\\.\UNC\fileserver\apps\Brightway\App"),
+        ] {
+            assert!(below_root(&p, &roots).is_none(), "{}", p.display());
+        }
     }
 
     #[test]

@@ -89,10 +89,55 @@ fn known_path(id: &windows::core::GUID) -> Option<PathBuf> {
     Some(PathBuf::from(text.ok()?)).filter(|p| p.is_absolute())
 }
 
-/// Case-insensitive "is `p` inside `dir`" on string paths.
+/// `p` with the short 8.3 names Windows keeps for long ones written out in
+/// full, as far down as `p` exists; the rest stays as written. A record made
+/// from a short `%TEMP%` holds `C:\Users\RUNNER~1\...`, which a compare of
+/// strings would take for some other place than `C:\Users\runneradmin\...`.
+/// Without a `~` there is no short name in it, and the disk is not asked.
+pub fn long_path(p: &Path) -> PathBuf {
+    if !p.as_os_str().as_encoded_bytes().contains(&b'~') || !p.is_absolute() {
+        return p.to_path_buf();
+    }
+    #[cfg(windows)]
+    {
+        let mut rest = Vec::new();
+        let mut at = p;
+        loop {
+            if let Some(long) = long_path_name(at) {
+                return rest.iter().rev().fold(long, |dir, name| dir.join(name));
+            }
+            let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else {
+                break;
+            };
+            rest.push(name);
+            at = parent;
+        }
+    }
+    p.to_path_buf()
+}
+
+/// What `GetLongPathNameW` makes of `p`; None when `p` is not there.
+#[cfg(windows)]
+fn long_path_name(p: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetLongPathNameW;
+    let wide: Vec<u16> = p
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buf = vec![0u16; 32_768];
+    let n = unsafe { GetLongPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+    (n > 0 && n < buf.len()).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..n])))
+}
+
+/// Case-insensitive "is `p` inside `dir`" on string paths, each read by its
+/// long names.
 pub fn path_under(p: &Path, dir: &Path) -> bool {
     let norm = |x: &Path| {
-        x.to_string_lossy()
+        long_path(x)
+            .to_string_lossy()
             .to_lowercase()
             .replace('/', "\\")
             .trim_end_matches('\\')
