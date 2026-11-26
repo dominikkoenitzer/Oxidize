@@ -4484,6 +4484,55 @@ mod tests {
     }
 
     #[test]
+    fn a_protected_folder_written_as_windows_reads_it_is_protected() {
+        let windir = env_dir("windir").unwrap().to_string_lossy().to_string();
+        let new_file = "oxidize-guard-test.dll";
+        let mut written = vec![
+            format!(r"{windir}."),
+            format!(r"{windir} "),
+            format!(r"{windir}. ."),
+            format!(r"{windir}.\System32"),
+            format!(r"{windir} \System32\{new_file}"),
+            format!(r"\\?\{windir}"),
+            format!(r"\\?\{windir}\System32\{new_file}"),
+            format!(r"\\.\{windir}"),
+            format!(r"\\.\{windir}\System32\{new_file}"),
+        ];
+        if let Some(pf) = env_dir("ProgramFiles") {
+            let short = short_name(&pf).to_string_lossy().to_string();
+            assert!(short.contains('~'), "no short name for {}", pf.display());
+            written.push(short.clone());
+            written.push(format!(r"\\?\{short}"));
+        }
+        // A file not there yet below a short name in the Windows folder; servicing leaves some folders
+        // there without one, so take the first that has it.
+        let store = [
+            Path::new(&windir).to_path_buf(),
+            Path::new(&windir).join("System32"),
+        ]
+        .iter()
+        .flat_map(|d| fs::read_dir(d).unwrap().flatten())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| short_name(&e.path()))
+        .find(|s| {
+            s.file_name()
+                .is_some_and(|n| n.to_string_lossy().contains('~'))
+        })
+        .map(|s| s.to_string_lossy().to_string())
+        .expect("no folder with a short name in the Windows folder");
+        written.push(format!(r"{store}\{new_file}"));
+        for p in &written {
+            assert!(is_protected_path(Path::new(p)), "{p}");
+        }
+        assert!(!is_protected_path(Path::new(
+            r"C:\Program Files\Some Vendor\Some App."
+        )));
+        assert!(!is_protected_path(Path::new(
+            r"\\?\C:\Program Files\Some Vendor\Some App"
+        )));
+    }
+
+    #[test]
     fn a_path_not_there_yet_behind_a_junction_is_read_where_the_junction_leads() {
         let base = std::env::temp_dir().join("oxidize_guard_new_behind_junction_test");
         let link = base.join("windows link");
@@ -5123,6 +5172,60 @@ mod tests {
             "{}",
             short_other.display()
         );
+    }
+
+    #[test]
+    fn an_install_folder_written_as_windows_reads_it_is_shared_with_the_installs_in_it() {
+        // The vendor folder with a trailing dot or space, or the extended-length
+        // prefix, on one side: Windows reads each as the same folder.
+        let loc = PathBuf::from(r"C:\Program Files\Brightway Software");
+        let other = loc.join("Lumen Updater Service");
+        let t = name_target("Lumen Browser", Some("Brightway LLC"));
+        for written in [
+            r"C:\Program Files\Brightway Software.",
+            r"C:\Program Files\Brightway Software ",
+            r"C:\Program Files\Brightway Software. .",
+            r"C:\Program Files.\Brightway Software",
+            r"\\?\C:\Program Files\Brightway Software",
+            r"\\?\c:\program files\brightway software\",
+        ] {
+            let written = Path::new(written);
+            assert!(
+                shared_install_folder(written, &t, std::slice::from_ref(&other), &[]),
+                "{}",
+                written.display()
+            );
+        }
+        for written in [
+            r"C:\Program Files\Brightway Software\Lumen Updater Service.",
+            r"\\?\C:\Program Files\Brightway Software\Lumen Updater Service ",
+        ] {
+            assert!(
+                shared_install_folder(&loc, &t, &[PathBuf::from(written)], &[]),
+                "{written}"
+            );
+        }
+        assert!(shared_install_folder(
+            Path::new(r"\\fileserver\apps\Brightway Software"),
+            &t,
+            &[PathBuf::from(
+                r"\\?\UNC\fileserver\apps\Brightway Software\Lumen Updater Service"
+            )],
+            &[]
+        ));
+        // Read that way, another folder stays another folder.
+        assert!(!shared_install_folder(
+            Path::new(r"C:\Program Files\Brightway."),
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
+        assert!(!shared_install_folder(
+            Path::new(r"C:\Program Files\Brightway Software\..\Lumen"),
+            &t,
+            std::slice::from_ref(&other),
+            &[]
+        ));
     }
 
     #[test]
