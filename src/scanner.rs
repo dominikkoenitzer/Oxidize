@@ -5208,6 +5208,8 @@ mod tests {
             r"C:\Program Files.\Brightway Software",
             r"\\?\C:\Program Files\Brightway Software",
             r"\\?\c:\program files\brightway software\",
+            r"\\.\C:\Program Files\Brightway Software",
+            r"\\.\C:\Program Files\Brightway Software.",
         ] {
             let written = Path::new(written);
             assert!(
@@ -5219,6 +5221,8 @@ mod tests {
         for written in [
             r"C:\Program Files\Brightway Software\Lumen Updater Service.",
             r"\\?\C:\Program Files\Brightway Software\Lumen Updater Service ",
+            r"\\.\C:\Program Files\Brightway Software\Lumen Updater Service",
+            r"\\.\c:\program files\brightway software\lumen updater service. ",
         ] {
             assert!(
                 shared_install_folder(&loc, &t, &[PathBuf::from(written)], &[]),
@@ -5231,6 +5235,21 @@ mod tests {
             &[PathBuf::from(
                 r"\\?\UNC\fileserver\apps\Brightway Software\Lumen Updater Service"
             )],
+            &[]
+        ));
+        let unc = Path::new(r"\\fileserver\apps\Brightway Software");
+        assert!(shared_install_folder(
+            unc,
+            &t,
+            &[PathBuf::from(
+                r"\\.\UNC\fileserver\apps\Brightway Software\Lumen Updater Service"
+            )],
+            &[]
+        ));
+        assert!(shared_install_folder(
+            Path::new(r"\\.\UNC\fileserver\apps\Brightway Software."),
+            &t,
+            &[unc.join("Lumen Updater Service")],
             &[]
         ));
         // Read that way, another folder stays another folder.
@@ -5754,6 +5773,53 @@ mod tests {
         let t = build_target_from(&player(), Some(climbing), &[], &[], &snap);
         assert!(!t.install_vouched);
         assert_eq!(t.vendor_dir, None);
+    }
+
+    #[test]
+    fn a_verbatim_name_with_a_trailing_dot_or_space_is_another_folder() {
+        // Behind `\\?\` Windows keeps `Brightway.` as written, a folder apart
+        // from `Brightway`, and a plain path to it would name the other one.
+        let roots = install_roots();
+        let verbatim =
+            |tail: &str| PathBuf::from(format!(r"\\?\{}\{tail}", program_files().display()));
+        for tail in [
+            r"Brightway.\Versions\App",
+            r"Brightway \Versions\App",
+            r"Brightway. .\Versions\App",
+            r"Brightway\Versions.\App",
+        ] {
+            let p = verbatim(tail);
+            assert_ne!(
+                norm_path_key(&p),
+                norm_path_key(&program_files().join(tail.replace(['.', ' '], "")))
+            );
+            assert!(below_root(&p, &roots).is_none(), "{}", p.display());
+        }
+        let mut dotted = player();
+        let loc = verbatim(&format!(r"Brightway.\Versions\{BUILD}"));
+        dotted.install_location = Some(loc.to_string_lossy().into_owned());
+        let snap = Snapshot::with_programs(vec![dotted.clone()]);
+        let t = build_target_from(&dotted, Some(loc), &[], &[], &snap);
+        assert_eq!(t.vendor_dir, None);
+        // Without such a name the verbatim path is the plain one.
+        let (root, segments) = below_root(&verbatim(r"Brightway\Versions\App"), &roots).unwrap();
+        assert_eq!(
+            norm_path_key(&root.join(&segments[0])),
+            norm_path_key(&program_files().join("Brightway"))
+        );
+    }
+
+    #[test]
+    fn a_device_path_is_below_no_root() {
+        // `\\.\UNC\server\share` has more parts than `\\server\share`, so the
+        // names below a root would be counted from the wrong place.
+        let roots = install_roots();
+        for p in [
+            PathBuf::from(format!(r"\\.\{}\Brightway\App", program_files().display())),
+            PathBuf::from(r"\\.\UNC\fileserver\apps\Brightway\App"),
+        ] {
+            assert!(below_root(&p, &roots).is_none(), "{}", p.display());
+        }
     }
 
     #[test]
