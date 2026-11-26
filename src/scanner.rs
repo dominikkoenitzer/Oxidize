@@ -1608,9 +1608,32 @@ fn norm_path_str(p: &str) -> String {
         .to_string()
 }
 
-/// `p` by its long names, normalised for a compare.
+/// `p` by its long names, normalised for a compare, read as Windows reads a
+/// file path: without the extended-length prefix and without the trailing
+/// dots and spaces it ignores on each part, so `C:\Vendor.`, `C:\Vendor ` and
+/// `\\?\C:\Vendor` are `C:\Vendor`. `.` and `..` stay as written.
 fn norm_path_key(p: &Path) -> String {
-    norm_path_str(&system::long_path(p).to_string_lossy())
+    let s = norm_path_str(&system::long_path(p).to_string_lossy());
+    drop_long_prefix(&s)
+        .split('\\')
+        .map(|part| {
+            if part.chars().all(|c| c == '.') {
+                part
+            } else {
+                part.trim_end_matches(['.', ' '])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\\")
+        .trim_end_matches('\\')
+        .to_string()
+}
+
+/// A lowercased path without its `\\?\` or `\\?\UNC\` prefix.
+fn drop_long_prefix(s: &str) -> String {
+    s.strip_prefix("\\\\?\\unc\\")
+        .map(|rest| format!("\\\\{rest}"))
+        .unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(s).to_string())
 }
 
 /// Strict containment on normalised path strings, separator-aware.
@@ -1663,11 +1686,8 @@ fn resolve_for_guard(p: &Path) -> String {
         })
         .unwrap_or_else(|_| p.to_path_buf());
     let s = real.to_string_lossy().to_lowercase().replace('/', "\\");
-    let s = s
-        .strip_prefix("\\\\?\\unc\\")
-        .map(|rest| format!("\\\\{rest}"))
-        .unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string());
-    s.split('\\')
+    drop_long_prefix(&s)
+        .split('\\')
         .map(|part| part.trim_end_matches(['.', ' ']))
         .collect::<Vec<_>>()
         .join("\\")
