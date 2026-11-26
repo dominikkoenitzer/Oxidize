@@ -7,7 +7,9 @@ in File Explorer, program launch counts, the thumbnail cache and the
 clipboard history. Only these lists go; the files they point to stay, and so
 do pinned items. Windows clears the recent items and jump lists itself first,
 so Explorer hears of it without a restart, and its own Disk Cleanup handler
-empties the thumbnail cache. `--traces` never touches temporary folders,
+empties the thumbnail cache. When the protected list reaches into the Recent
+folder, Windows is not asked, since it would clear everything; the items go
+one by one and the protected ones stay. `--traces` never touches temporary folders,
 browser data, mail or the data of programs. It shows what it would clear;
 `--yes` clears it. In the window it is Clean slate on the Clean up tab: one
 list, one button.
@@ -72,6 +74,8 @@ are never cleaned, with everything in them, temp folders included. `%TEMP%`
 and other variables work in the list, and the Clean up tab edits it.
 A line that is not a full path once variables are expanded, or that names a
 whole drive, protects nothing; it stays in the file but not in the list.
+Lines starting with `#` are notes, and a save from the Clean up tab keeps
+them where they are.
 `oxidize protect` prints the list, and `oxidize protect --check <path>` says
 whether that path is on it or inside a folder that is, and which entry
 covers it.

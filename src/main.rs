@@ -7,7 +7,7 @@ use clap::Parser;
 
 use oxidize::cli::{self, Cli};
 use oxidize::exit::{self, Failure};
-use oxidize::{commands, safety, term};
+use oxidize::{commands, out, safety, term};
 
 fn main() {
     if std::env::args_os().len() <= 1 {
@@ -69,7 +69,7 @@ fn elevate(cli: &Cli) -> anyhow::Result<i32> {
                 format!("the elevated run ended with exit code {code} and printed nothing");
             return Err(Failure::new("error", code, message, false).into());
         }
-        std::io::stdout().write_all(&out)?;
+        oxidize::out::write_bytes(&out);
     }
     Ok(code)
 }
@@ -91,7 +91,8 @@ fn finish(result: anyhow::Result<i32>, json: bool) -> ! {
             if !o.reported {
                 if json {
                     let doc = exit::error_json(o.code, &o.message);
-                    println!("{}", serde_json::to_string_pretty(&doc).unwrap_or_default());
+                    let doc = serde_json::to_string_pretty(&doc).unwrap_or_default();
+                    out::write(format_args!("{doc}\n"));
                 } else {
                     term::error(&o.message);
                 }

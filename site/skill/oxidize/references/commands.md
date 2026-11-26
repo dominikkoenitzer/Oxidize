@@ -47,7 +47,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 
 - `PROGRAM`: a name, a unique part of it, or its id: the `registry_key` of a program or the `family_name` of a Store app. Matching tries the exact id, then the exact name, then a unique part of the name.
 - Several names run one after another. Every name must match exactly one program before anything runs; otherwise nothing runs and the unclear names are listed with their candidates.
-- Closing: a process whose executable lies in the program's install folder, or in a folder the scan gives the program at High confidence, is asked to close its windows. Nothing is ended by force: one still running three seconds later, or one without a window to be asked through, stops the run with an error before the uninstaller or any removal. Processes in the Windows folder, Oxidize itself and the processes that started it are never closed.
+- Closing: a process whose executable lies in the program's install folder, or in a folder the scan gives the program at High confidence, is asked to close its windows. One without a window that runs from the program's own install folder is named under the plan and, once the run is confirmed by the prompt or `--yes`, ended by its id. Any other process still running three seconds later, or without a window elsewhere, stops the run with an error before the uninstaller or any removal. Processes in the Windows folder, Oxidize itself and the processes that started it are never closed.
 - The uninstaller is skipped when the program is registered for the current user only, has a folder of its own, is not a Windows Installer product, and owns nothing machine-wide: no service, firewall rule, or key, value or PATH entry in HKLM, and no file under Program Files, ProgramData or the Public folder. Oxidize then removes all of it itself, the uninstall entry included. Every other program runs its uninstaller first.
 - `--use-uninstaller`: always run the program's own uninstaller.
 - `--silent`: use the program's unattended uninstall switches where it has them. For Windows Installer products this adds `/qn /norestart`, for an uninstaller named `unins000.exe` (or another number) without a recorded quiet command `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`, and for an uninstaller whose file carries the stamp of another widely used install system, `/S`. A program without any of these runs its normal uninstall command. `-y` and `--json` imply `--silent`.
@@ -62,7 +62,7 @@ Removes each program completely: closes what runs from its folders, runs its own
 
 ## scan
 
-`oxidize scan PROGRAM [--publisher TEXT] [--remove] [--medium | --all | --level LEVEL]`
+`oxidize scan PROGRAM [--publisher TEXT] [--remove [--medium | --all | --level LEVEL]]`
 
 Finds a program's leftovers. Reads only unless `--remove` is given.
 
@@ -81,7 +81,7 @@ Lists folders no installed program claims, and PATH entries, autostart values, s
 
 ## trace
 
-`oxidize trace EXE_OR_PROCESS [--uninstall] [--silent] [--keep] [--medium | --all | --level LEVEL]`
+`oxidize trace EXE_OR_PROCESS [--uninstall [--silent] [--keep] [--medium | --all | --level LEVEL]]`
 
 Finds the program behind a running process or an executable.
 
@@ -113,7 +113,7 @@ Puts back everything a backup holds, in reverse order of removal, after the ques
 
 ## clean
 
-`oxidize clean [--temp] [--crash-dumps [--dump PATH]... [--skip-dumps-of PROGRAM]...] [--recycle-bin] [--browser-cache] [--component-store] [--delivery-optimization] [--windows-old] [--orphans [--delete-dead]] [--build-output] [--recycle-bin-days DAYS] [--medium | --all | --level LEVEL]`
+`oxidize clean [--temp] [--crash-dumps [--dump PATH]... [--skip-dumps-of PROGRAM]...] [--recycle-bin] [--browser-cache] [--component-store] [--delivery-optimization] [--windows-old] [--orphans [--delete-dead] [--medium | --all | --level LEVEL]] [--build-output] [--recycle-bin-days DAYS]`
 
 Counts what each category holds, from the files themselves, and what stays and why. Reads only unless `--yes` is given; then it cleans and reports per category what was freed and what stayed. It never asks a question, so `--elevate` always brings the elevated run's output back.
 

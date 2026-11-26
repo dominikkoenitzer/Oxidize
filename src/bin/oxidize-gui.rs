@@ -49,6 +49,16 @@ fn window_icon() -> egui::IconData {
 }
 
 fn main() -> eframe::Result {
+    // A release build has no console, so its failures are told in a box.
+    let boxed = cfg!(not(debug_assertions));
+    if boxed {
+        let window = std::thread::current().id();
+        std::panic::set_hook(window_panic_hook(
+            window,
+            show_message,
+            std::panic::take_hook(),
+        ));
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1180.0, 760.0])
@@ -59,12 +69,73 @@ fn main() -> eframe::Result {
             .with_icon(window_icon()),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Oxidize",
         options,
         Box::new(|cc| Ok(Box::new(OxidizeApp::new(cc)))),
-    )
+    );
+    if boxed {
+        report_start(result, show_message)
+    } else {
+        result
+    }
 }
+
+/// What the box says when the window cannot start.
+const START_FAILED: &str = "Oxidize could not open its window.";
+/// What the box says when the window's thread panics.
+const STOPPED: &str = "Oxidize stopped unexpectedly.";
+
+/// The panic hook's own type, as `std::panic::take_hook` gives it.
+type PanicHook = Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync>;
+
+/// Show `START_FAILED` when the window could not start.
+fn report_start(result: eframe::Result, show: impl FnOnce(&str)) -> eframe::Result {
+    if result.is_err() {
+        show(START_FAILED);
+    }
+    result
+}
+
+/// A hook that shows `STOPPED` for a panic on the `window` thread, then runs `previous`.
+fn window_panic_hook(
+    window: std::thread::ThreadId,
+    show: impl Fn(&str) + Send + Sync + 'static,
+    previous: PanicHook,
+) -> PanicHook {
+    let shown = std::sync::atomic::AtomicBool::new(false);
+    Box::new(move |info| {
+        // Once only: a second panic on that thread gets no second box.
+        if std::thread::current().id() == window
+            && !shown.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            show(STOPPED);
+        }
+        previous(info)
+    })
+}
+
+/// A one-sentence box on its own thread, so its loop never calls back into the window.
+#[cfg(windows)]
+fn show_message(text: &str) {
+    use windows::core::{w, HSTRING};
+    use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let text = text.to_string();
+    let shown = std::thread::Builder::new().spawn(move || unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(text),
+            w!("Oxidize"),
+            MB_OK | MB_ICONERROR,
+        );
+    });
+    if let Ok(thread) = shown {
+        let _ = thread.join();
+    }
+}
+
+#[cfg(not(windows))]
+fn show_message(_text: &str) {}
 
 /// Messages sent from background worker threads back to the UI thread.
 enum Msg {
@@ -186,6 +257,9 @@ struct OxidizeApp {
     reveal: bool,
     /// The table's scroll offset and visible height, from the last frame.
     table_view: (f32, f32),
+    /// The search field and the table's own widgets, from the last frame.
+    search_id: Option<egui::Id>,
+    table_ids: egui::IdSet,
     show_log: bool,
 
     // Options (mirror the CLI flags).
@@ -203,6 +277,9 @@ struct OxidizeApp {
     /// work is done.
     close_when_done: bool,
     status: String,
+    /// The program whose next scan leaves the status as it is: the re-scan
+    /// after a removal that partly failed, so the failed count stays shown.
+    keep_status_for: Option<String>,
     log: Vec<String>,
     confirm: Option<Confirm>,
 
@@ -212,6 +289,10 @@ struct OxidizeApp {
 
     /// What Undo runs on its worker thread; a test puts a stand-in here.
     restore_backup: fn(&str, bool) -> Result<Vec<RestoreItem>, String>,
+    /// What a scan runs on its worker thread; a test puts a stand-in here.
+    scan_program: fn(&Program) -> ScanReport,
+    /// What a list reload runs on its worker thread; a test puts a stand-in here.
+    read_programs: fn(bool) -> Vec<Program>,
 }
 
 /// Finds the backup by name and puts it back, or only checks it in a dry run.
@@ -219,6 +300,14 @@ fn restore_backup(name: &str, dry_run: bool) -> Result<Vec<RestoreItem>, String>
     backup::find_backup(name)
         .and_then(|info| restore::restore(&info, dry_run))
         .map_err(|e| format!("{e:#}"))
+}
+
+/// Scans the machine for `program`, with one reading of it for both steps.
+fn scan_program(program: &Program) -> ScanReport {
+    let snap = scanner::Snapshot::new();
+    let target = scanner::build_target_with(program, &snap);
+    let installed = uninstall::still_installed(program);
+    scanner::scan_with(&target, installed, &snap)
 }
 
 impl OxidizeApp {
@@ -243,6 +332,8 @@ impl OxidizeApp {
             focus_search: true,
             reveal: false,
             table_view: (0.0, 0.0),
+            search_id: None,
+            table_ids: egui::IdSet::default(),
             show_log: false,
             dry_run: false,
             // Removals keep no backup unless the user turns it on.
@@ -253,11 +344,14 @@ impl OxidizeApp {
             jobs: 0,
             close_when_done: false,
             status: String::new(),
+            keep_status_for: None,
             log: Vec::new(),
             confirm: None,
             tx,
             rx,
             restore_backup,
+            scan_program,
+            read_programs: registry::enumerate_installed_programs,
         }
     }
 
@@ -271,8 +365,9 @@ impl OxidizeApp {
         let tx = app.tx.clone();
         let ctx = cc.egui_ctx.clone();
         let include_system = app.include_system;
+        let read_programs = app.read_programs;
         std::thread::spawn(move || {
-            let programs = registry::enumerate_installed_programs(include_system);
+            let programs = read_programs(include_system);
             let _ = tx.send(Msg::Programs(programs));
             ctx.request_repaint();
         });
@@ -287,6 +382,11 @@ impl OxidizeApp {
     /// One job sent its answer.
     fn job_done(&mut self) {
         self.jobs = self.jobs.saturating_sub(1);
+    }
+
+    /// One part of an analysis sent its answer.
+    fn analysis_part_done(&mut self) {
+        self.cleanup.analysis_jobs = self.cleanup.analysis_jobs.saturating_sub(1);
     }
 
     /// What closing the window does. While work runs it waits: a removal
@@ -334,9 +434,8 @@ impl OxidizeApp {
     /// result in the status line.
     fn reload_programs(&mut self, ctx: &egui::Context) {
         let include_system = self.include_system;
-        self.spawn(ctx, move || {
-            Msg::Programs(registry::enumerate_installed_programs(include_system))
-        });
+        let read_programs = self.read_programs;
+        self.spawn(ctx, move || Msg::Programs(read_programs(include_system)));
     }
 
     /// Extract icons (on a background thread) for any programs we don't have a
@@ -367,17 +466,13 @@ impl OxidizeApp {
     }
 
     fn start_scan(&mut self, ctx: &egui::Context, program: Program) {
-        self.status = format!("Scanning for leftovers of {}...", program.display_name);
-        self.spawn(ctx, move || {
-            // One reading of the machine serves both steps.
-            let snap = scanner::Snapshot::new();
-            let target = scanner::build_target_with(&program, &snap);
-            let installed = uninstall::still_installed(&program);
-            let report = scanner::scan_with(&target, installed, &snap);
-            Msg::Scan {
-                id: program.id().to_string(),
-                report,
-            }
+        // A newer scan says what it finds, whatever an earlier removal held.
+        self.keep_status_for = None;
+        self.status = scanning_status(&program.display_name);
+        let scan_program = self.scan_program;
+        self.spawn(ctx, move || Msg::Scan {
+            id: program.id().to_string(),
+            report: scan_program(&program),
         });
     }
 
@@ -411,7 +506,10 @@ impl OxidizeApp {
         self.spawn(ctx, move || {
             match safety::remove_leftovers(&items, &label, &safety_ctx) {
                 Ok(outcome) => Msg::Removed(outcome),
-                Err(e) => Msg::Error(format!("Removal failed: {e:#}")),
+                Err(e) => Msg::Error(match safety::BackupRefused::of(&e) {
+                    Some(refused) => format!("Nothing was removed. {}", refused.window_text()),
+                    None => format!("Removal failed: {e:#}"),
+                }),
             }
         });
     }
@@ -458,6 +556,12 @@ impl OxidizeApp {
         });
     }
 
+    fn not_elevated(&mut self, e: anyhow::Error) {
+        let line = format!("Could not elevate: {e:#}");
+        self.log.push(line.clone());
+        self.status = line;
+    }
+
     fn start_undo(&mut self, ctx: &egui::Context, name: String) {
         let line = format!("Restoring {name}...");
         self.log.push(line.clone());
@@ -475,6 +579,7 @@ impl OxidizeApp {
 
     fn start_analyse(&mut self, ctx: &egui::Context) {
         self.status = "Analysing what can be cleaned...".to_string();
+        self.cleanup.analysis_jobs = 2;
         let protected = self.cleanup.protected.clone();
         self.spawn(ctx, move || {
             let (places, analysis) =
@@ -746,25 +851,32 @@ impl OxidizeApp {
                         .all()
                         .map(|l| !report.installed && l.confidence == Confidence::High)
                         .collect();
-                    self.status = if report.installed {
-                        format!(
-                            "{} up {}. It is still installed.",
-                            count(report.total(), "item makes", "items make"),
-                            report.program_name
-                        )
-                    } else {
-                        format!(
-                            "{} of {}.",
-                            count(report.total(), "leftover", "leftovers"),
-                            report.program_name
-                        )
-                    };
+                    if self.keep_status_for.take().as_deref() != Some(id.as_str()) {
+                        self.status = if report.installed {
+                            format!(
+                                "{} up {}. It is still installed.",
+                                count(report.total(), "item makes", "items make"),
+                                report.program_name
+                            )
+                        } else {
+                            format!(
+                                "{} of {}.",
+                                count(report.total(), "leftover", "leftovers"),
+                                report.program_name
+                            )
+                        };
+                    }
                     self.scan_for = Some(id);
                     self.scan = Some(report);
                     self.job_done();
                 }
-                // A scan the user has already moved on from.
-                Msg::Scan { .. } => self.job_done(),
+                // A scan the user has already moved on from; its own status goes too.
+                Msg::Scan { report, .. } => {
+                    if self.status == scanning_status(&report.program_name) {
+                        self.status.clear();
+                    }
+                    self.job_done();
+                }
                 Msg::Uninstalled {
                     program,
                     message,
@@ -798,7 +910,7 @@ impl OxidizeApp {
                                 .to_string(),
                         );
                     }
-                    self.status = line;
+                    self.status = line.clone();
                     self.job_done();
                     if !dry_run {
                         // Re-scan to show what remains, and refresh the list.
@@ -806,6 +918,11 @@ impl OxidizeApp {
                         if let Some(program) = self.selected_program() {
                             let program = program.clone();
                             self.start_scan(ctx, program);
+                            if outcome.failed > 0 {
+                                // What failed stays in view through the re-scan.
+                                self.status = line;
+                                self.keep_status_for = self.selected.clone();
+                            }
                         }
                         self.reload_programs(ctx);
                     }
@@ -837,20 +954,23 @@ impl OxidizeApp {
                 }
                 Msg::Analysed(found) => {
                     let (places, analysis) = *found;
-                    self.status = analysed_status(&analysis);
+                    self.status = analysed_status(&analysis, &analysis.default_choice());
                     self.cleanup.take_analysis(places, analysis);
+                    self.analysis_part_done();
                     self.job_done();
                 }
                 Msg::BuildFound(found) => {
                     self.cleanup.take_build_output(*found);
+                    // The look comes after the ticks, so the status sums the ticks.
                     if let Some((_, analysis)) = &self.cleanup.analysis {
-                        self.status = analysed_status(analysis);
+                        self.status = analysed_status(analysis, &self.cleanup.choice());
                     }
                     self.job_done();
                 }
                 Msg::Cleaned(results) => self.on_cleaned(results),
                 Msg::TracesFound(found) => {
                     self.cleanup.slate.take_found(found);
+                    self.analysis_part_done();
                     self.job_done();
                 }
                 Msg::TracesCleared(results) => self.on_traces_cleared(results),
@@ -858,6 +978,8 @@ impl OxidizeApp {
                     // A cleaning that stopped is no longer under way.
                     self.cleanup.cleaning = false;
                     self.cleanup.drop_look_tick();
+                    // One kind of work runs at a time: during an analysis this was a part of it.
+                    self.analysis_part_done();
                     self.log.extend(system::take_tool_log());
                     self.log.push(format!("ERROR: {e}"));
                     self.status = e;
@@ -909,7 +1031,7 @@ impl OxidizeApp {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::F)) {
             self.focus_search = true;
         }
-        if display.is_empty() {
+        if display.is_empty() || !self.table_has_keys(ctx) {
             return;
         }
         let page = ((self.table_view.1 / ROW_HEIGHT).floor() as isize).max(1);
@@ -935,6 +1057,14 @@ impl OxidizeApp {
             self.select(&id);
             self.reveal = true;
         }
+    }
+
+    /// True while focus is on the table, the search field or nothing, and no menu is open.
+    fn table_has_keys(&self, ctx: &egui::Context) -> bool {
+        !egui::Popup::is_any_open(ctx)
+            && ctx
+                .memory(|m| m.focused())
+                .is_none_or(|id| self.search_id == Some(id) || self.table_ids.contains(&id))
     }
 
     /// Render the confirmation modal, if any, and act on the user's choice.
@@ -1171,11 +1301,19 @@ fn complete_log(name: &str, out: &Outcome, dry_run: bool) -> Vec<String> {
             lines.push(format!("Backup kept: {backup}"));
         }
     }
-    if let Some(e) = &out.error {
-        lines.push(format!("ERROR: {}", window_error(e)));
+    if let Some(e) = complete_error(out) {
+        lines.push(format!("ERROR: {e}"));
     }
     lines.push(complete_status(name, out, false));
     lines
+}
+
+/// Why a complete removal stopped, as the window words it.
+fn complete_error(out: &Outcome) -> Option<String> {
+    match &out.refused {
+        Some(refused) => Some(refused.window_text()),
+        None => out.error.as_deref().map(window_error),
+    }
 }
 
 /// An error as the window shows it: the window has a button where the
@@ -1196,6 +1334,11 @@ fn never_started(out: &Outcome) -> bool {
     out.error.is_some() && out.vendor.runs() && out.uninstaller.is_none()
 }
 
+/// The status line while a program is scanned.
+fn scanning_status(name: &str) -> String {
+    format!("Scanning for leftovers of {name}...")
+}
+
 /// One line on how a complete removal ended, for the status bar.
 fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
     if dry_run {
@@ -1209,9 +1352,11 @@ fn complete_status(name: &str, out: &Outcome, dry_run: bool) -> String {
         stop
     } else if never_started(out) {
         format!("{name}: the uninstaller did not start. Nothing was removed.")
+    } else if let Some(refused) = &out.refused {
+        format!("{name}: {}", refused.window_text())
     } else if let Some(e) = &out.error {
         e.clone()
-    } else if out.verdict.still_installed {
+    } else if out.uninstaller_left_it_registered() {
         format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running."
         )
@@ -1471,7 +1616,7 @@ impl OxidizeApp {
                 Action::Undo(name) => self.start_undo(ctx, name),
                 Action::RestartAdmin => match safety::relaunch_elevated() {
                     Ok(()) => std::process::exit(0),
-                    Err(e) => self.log.push(format!("Could not elevate: {e:#}")),
+                    Err(e) => self.not_elevated(e),
                 },
                 Action::Analyse => self.start_analyse(ctx),
                 Action::FindBuildOutput => self.start_find_build_output(ctx),
@@ -1515,12 +1660,11 @@ impl OxidizeApp {
     }
 }
 
-/// The status line after an analysis.
-fn analysed_status(analysis: &clean::Analysis) -> String {
-    let chosen = analysis.default_choice();
+/// The status line after an analysis, summing what `chosen` ticks.
+fn analysed_status(analysis: &clean::Analysis, chosen: &clean::Choice) -> String {
     format!(
         "Analysed. The ticked categories hold {}.",
-        util::human_size(analysis.chosen_bytes(&chosen))
+        util::human_size(analysis.chosen_bytes(chosen))
     )
 }
 
@@ -1696,6 +1840,7 @@ impl OxidizeApp {
                     .desired_width(width)
                     .margin(egui::Margin::symmetric(8, 5)),
             );
+            self.search_id = Some(search.id);
             if self.focus_search {
                 search.request_focus();
                 self.focus_search = false;
@@ -1741,6 +1886,7 @@ impl OxidizeApp {
     /// The program table: a header to sort by and one row per program,
     /// drawn only where it is visible.
     fn table(&mut self, ui: &mut egui::Ui, t: &Tint, display: &[usize]) {
+        self.table_ids.clear();
         let cols = columns(ui.available_width());
         self.table_header(ui, t, &cols);
         if display.is_empty() {
@@ -1798,7 +1944,9 @@ impl OxidizeApp {
                 let mut clicked = None;
                 for row in rows {
                     let i = display[row];
-                    if self.program_row(ui, t, &cols, i, &body) {
+                    let response = self.program_row(ui, t, &cols, i, &body);
+                    self.table_ids.insert(response.id);
+                    if response.clicked() {
                         clicked = Some(i);
                     }
                 }
@@ -1827,6 +1975,7 @@ impl OxidizeApp {
             };
             let id = ui.scope_id().with(("sort", col.column.title()));
             let response = ui.interact(hit, id, egui::Sense::click());
+            self.table_ids.insert(id);
             response.widget_info(|| {
                 egui::WidgetInfo::labeled(egui::Role::Button, true, col.column.title())
             });
@@ -1862,7 +2011,7 @@ impl OxidizeApp {
         );
     }
 
-    /// One program's row. True when it was clicked.
+    /// One program's row.
     fn program_row(
         &self,
         ui: &mut egui::Ui,
@@ -1870,7 +2019,7 @@ impl OxidizeApp {
         cols: &[Placed],
         i: usize,
         font: &egui::FontId,
-    ) -> bool {
+    ) -> egui::Response {
         let program = &self.programs[i];
         let selected = self.selected.as_deref() == Some(program.id());
         let (rect, response) = ui.allocate_exact_size(
@@ -1881,7 +2030,7 @@ impl OxidizeApp {
             egui::WidgetInfo::selected(egui::Role::Button, true, selected, &program.display_name)
         });
         if !ui.is_rect_visible(rect) {
-            return response.clicked();
+            return response;
         }
         let painter = ui.painter_at(rect);
         if selected {
@@ -1920,7 +2069,7 @@ impl OxidizeApp {
                 Column::Source => weak(scope_label(program)),
             }
         }
-        response.clicked()
+        response
     }
 
     /// The panel on the right: the selected program, its three actions, what
@@ -2211,7 +2360,7 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             ))
             .color(t.weak),
         );
-    } else if v.still_installed && !never_started(out) {
+    } else if out.uninstaller_left_it_registered() {
         ui.add(
             egui::Label::new(
                 RichText::new(format!(
@@ -2233,8 +2382,8 @@ fn show_complete(ui: &mut egui::Ui, t: &Tint, done: &Completed, undo: bool, idle
             .color(t.weak),
         );
     }
-    if let Some(e) = &out.error {
-        ui.add(egui::Label::new(RichText::new(window_error(e)).color(t.red)).wrap());
+    if let Some(e) = complete_error(out) {
+        ui.add(egui::Label::new(RichText::new(e).color(t.red)).wrap());
     }
     if undo {
         ui.add_space(6.0);
@@ -2303,7 +2452,9 @@ fn render_sections(
 fn leftover_row(ui: &mut egui::Ui, t: &Tint, item: &Leftover, checked: Option<&mut bool>) {
     ui.horizontal_top(|ui| {
         if let Some(checked) = checked {
-            ui.add(egui::Checkbox::without_text(checked));
+            // The path beside the box names it for a screen reader.
+            ui.add(egui::Checkbox::without_text(checked))
+                .accessible_name(item.path.clone());
         }
         let (tag, _) = ui.allocate_exact_size(egui::vec2(46.0, 18.0), egui::Sense::hover());
         ui.painter().text(
@@ -3568,6 +3719,12 @@ unsafe fn hicon_to_rgba(
         &mut bi,
         DIB_RGB_COLORS,
     );
+    // An icon without alpha keeps its clear parts in the AND mask.
+    let mask = if lines != 0 && buf.as_chunks::<4>().0.iter().all(|p| p[3] == 0) {
+        mask_pixels(hdc, info.hbmMask, w, h)
+    } else {
+        None
+    };
     ReleaseDC(None, hdc);
     cleanup(&info);
     if lines == 0 {
@@ -3579,13 +3736,66 @@ unsafe fn hicon_to_rgba(
     for px in pixels.iter_mut() {
         px.swap(0, 2);
     }
-    // Some icons report no alpha at all (all zero); treat those as opaque.
-    if pixels.iter().all(|p| p[3] == 0) {
-        for px in pixels.iter_mut() {
-            px[3] = 255;
-        }
-    }
+    fill_alpha(pixels, mask.as_deref().map(|m| m.as_chunks::<4>().0));
     Some((buf, w as u32, h as u32))
+}
+
+/// The AND mask of an icon as 32-bit rows, when it is the size of the colour bitmap.
+#[cfg(windows)]
+unsafe fn mask_pixels(
+    hdc: windows::Win32::Graphics::Gdi::HDC,
+    mask: windows::Win32::Graphics::Gdi::HBITMAP,
+    w: i32,
+    h: i32,
+) -> Option<Vec<u8>> {
+    use std::ffi::c_void;
+    use windows::Win32::Graphics::Gdi::{
+        GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, HGDIOBJ,
+    };
+
+    let mut bm = BITMAP::default();
+    let got = GetObjectW(
+        HGDIOBJ(mask.0),
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut _ as *mut c_void),
+    );
+    if got == 0 || bm.bmWidth != w || bm.bmHeight != h {
+        return None;
+    }
+
+    let mut bi = BITMAPINFO::default();
+    bi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = 0; // BI_RGB
+
+    let mut buf = vec![0u8; (w as usize) * (h as usize) * 4];
+    let lines = GetDIBits(
+        hdc,
+        mask,
+        0,
+        h as u32,
+        Some(buf.as_mut_ptr() as *mut c_void),
+        &mut bi,
+        DIB_RGB_COLORS,
+    );
+    (lines == h).then_some(buf)
+}
+
+/// Alpha for an icon that has none: clear where Windows shows what is behind it, else opaque.
+#[cfg(any(windows, test))]
+fn fill_alpha(pixels: &mut [[u8; 4]], mask: Option<&[[u8; 4]]>) {
+    if pixels.iter().any(|p| p[3] != 0) {
+        return;
+    }
+    let mask = mask.filter(|m| m.len() == pixels.len());
+    for (i, px) in pixels.iter_mut().enumerate() {
+        // A set mask bit over black is see-through; over a colour Windows inverts, so keep it.
+        let clear = mask.is_some_and(|m| m[i][..3] != [0, 0, 0]) && px[..3] == [0, 0, 0];
+        px[3] = if clear { 0 } else { 255 };
+    }
 }
 
 #[cfg(test)]
@@ -3593,14 +3803,97 @@ mod tests {
     use super::*;
     use oxidize::model::{Hive, RegistrySource, RegistryView};
 
-    /// The window with a stand-in protected list, so no test reads the
-    /// user's own.
+    /// The window with a stand-in protected list, scan and list reload, so
+    /// no test reads the user's list or this machine.
     fn app() -> OxidizeApp {
-        OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())))
+        let mut app = OxidizeApp::blank(cleanup::Cleanup::from_file(Ok(stand_in_list())));
+        app.scan_program = stand_in_scan;
+        app.read_programs = stand_in_programs;
+        app
     }
+
+    /// A scan that finds nothing of a program that is gone.
+    fn stand_in_scan(program: &Program) -> ScanReport {
+        ScanReport {
+            program_name: program.display_name.clone(),
+            installed: false,
+            items: Vec::new(),
+        }
+    }
+
+    /// A list reload that finds no program.
+    fn stand_in_programs(_include_system: bool) -> Vec<Program> {
+        Vec::new()
+    }
+
+    /// How long the stand-ins' answers may take to come back.
+    const ANSWER_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
     fn stand_in_list() -> std::path::PathBuf {
         std::env::temp_dir().join("oxidize-gui-test-protected.txt")
+    }
+
+    #[test]
+    fn a_window_that_cannot_start_shows_one_box() {
+        let mut shown = Vec::new();
+        let result = report_start(Err(eframe::Error::AppCreation("no context".into())), |t| {
+            shown.push(t.to_string())
+        });
+        assert!(result.is_err());
+        assert_eq!(shown, [START_FAILED]);
+    }
+
+    #[test]
+    fn a_window_that_starts_shows_no_box() {
+        let mut shown = 0;
+        assert!(report_start(Ok(()), |_| shown += 1).is_ok());
+        assert_eq!(shown, 0);
+    }
+
+    #[test]
+    fn only_a_panic_on_the_window_thread_shows_a_box() {
+        use std::sync::{Arc, Mutex};
+        let shown = Arc::new(Mutex::new(Vec::<String>::new()));
+        let passed_on = Arc::new(Mutex::new(Vec::<&str>::new()));
+        let (go, wait) = channel::<()>();
+        let window = std::thread::spawn(move || {
+            wait.recv().unwrap();
+            let _ = std::panic::catch_unwind(|| panic!("window"));
+            panic!("window again");
+        });
+        let previous: Arc<PanicHook> = Arc::new(std::panic::take_hook());
+        let (seen, earlier, passed) = (shown.clone(), previous.clone(), passed_on.clone());
+        std::panic::set_hook(window_panic_hook(
+            window.thread().id(),
+            move |t| seen.lock().unwrap().push(t.to_string()),
+            Box::new(move |info| {
+                if let Some(&p) = info.payload().downcast_ref::<&str>() {
+                    passed.lock().unwrap().push(p);
+                }
+                (*earlier)(info)
+            }),
+        ));
+        let worker_ended = std::thread::spawn(|| panic!("worker")).join();
+        let ctx = egui::Context::default();
+        let mut app = app();
+        app.spawn(&ctx, || panic!("engine"));
+        let msg = app.rx.recv_timeout(std::time::Duration::from_secs(10));
+        let shown_before = shown.lock().unwrap().clone();
+        go.send(()).unwrap();
+        let window_ended = window.join();
+        std::panic::set_hook(Box::new(move |info| (*previous)(info)));
+
+        assert!(window_ended.is_err() && worker_ended.is_err());
+        assert!(
+            matches!(&msg, Ok(Msg::Error(e)) if e == "the operation stopped unexpectedly"),
+            "the worker sent no error"
+        );
+        assert!(shown_before.is_empty(), "{shown_before:?}");
+        assert_eq!(*shown.lock().unwrap(), [STOPPED]);
+        let passed_on = passed_on.lock().unwrap();
+        for p in ["worker", "engine", "window", "window again"] {
+            assert!(passed_on.contains(&p), "{p} missed the previous hook");
+        }
     }
 
     #[test]
@@ -3613,8 +3906,88 @@ mod tests {
     }
 
     #[test]
+    fn a_declined_elevation_says_so_on_screen() {
+        let mut app = app();
+        app.status = "Ready".to_string();
+        app.not_elevated(
+            oxidize::exit::Failure::cancelled("the UAC prompt was declined", false).into(),
+        );
+        assert_eq!(app.status, "Could not elevate: the UAC prompt was declined");
+        assert_eq!(app.log, [app.status.clone()]);
+    }
+
+    #[test]
     fn the_tests_keep_to_a_stand_in_protected_list() {
         assert_eq!(app().cleanup.list_file, Ok(stand_in_list()));
+    }
+
+    #[test]
+    fn an_icon_without_alpha_is_clear_where_its_mask_is_set() {
+        let mut pixels = [[10, 20, 30, 0], [0, 0, 0, 0], [40, 50, 60, 0], [0, 0, 0, 0]];
+        let mask = [
+            [0, 0, 0, 0],
+            [255, 255, 255, 0],
+            [0, 0, 0, 0],
+            [255, 255, 255, 0],
+        ];
+        fill_alpha(&mut pixels, Some(&mask));
+        assert_eq!(pixels.map(|p| p[3]), [255, 0, 255, 0]);
+        assert_eq!(pixels[0], [10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn an_icon_with_alpha_keeps_it_whatever_its_mask_says() {
+        let mut pixels = [[10, 20, 30, 128], [0, 0, 0, 0], [40, 50, 60, 255]];
+        fill_alpha(&mut pixels, Some(&[[255, 255, 255, 0]; 3]));
+        assert_eq!(pixels.map(|p| p[3]), [128, 0, 255]);
+    }
+
+    #[test]
+    fn an_icon_without_alpha_or_a_mask_that_fits_is_opaque() {
+        let mut pixels = [[10, 20, 30, 0]; 2];
+        fill_alpha(&mut pixels, None);
+        assert_eq!(pixels.map(|p| p[3]), [255, 255]);
+
+        let mut pixels = [[10, 20, 30, 0]; 2];
+        fill_alpha(&mut pixels, Some(&[[255, 255, 255, 0]]));
+        assert_eq!(pixels.map(|p| p[3]), [255, 255]);
+    }
+
+    #[test]
+    fn a_coloured_pixel_under_a_set_mask_bit_stays_visible() {
+        let mut pixels = [[200, 0, 0, 0], [0, 0, 0, 0]];
+        fill_alpha(&mut pixels, Some(&[[255, 255, 255, 0]; 2]));
+        assert_eq!(pixels.map(|p| p[3]), [255, 0]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_icon_made_without_alpha_comes_out_clear_where_its_mask_is_set() {
+        use windows::Win32::UI::WindowsAndMessaging::{CreateIcon, DestroyIcon};
+        // Left half masked over black, right half red under a clear mask.
+        let and_bits: Vec<u8> = (0..16).flat_map(|_| [0xFF, 0x00]).collect();
+        let xor_bits: Vec<u8> = (0..16 * 16)
+            .flat_map(|i| {
+                if i % 16 < 8 {
+                    [0, 0, 0, 0]
+                } else {
+                    [0, 0, 255, 0]
+                }
+            })
+            .collect();
+        let (rgba, w, h) = unsafe {
+            let icon = CreateIcon(None, 16, 16, 1, 32, and_bits.as_ptr(), xor_bits.as_ptr())
+                .expect("a 16 by 16 icon");
+            let out = hicon_to_rgba(icon);
+            let _ = DestroyIcon(icon);
+            out.expect("the icon converts")
+        };
+        assert_eq!((w, h), (16, 16));
+        let (pixels, _) = rgba.as_chunks::<4>();
+        assert_eq!(pixels[0], [0, 0, 0, 0]);
+        assert_eq!(pixels[15], [255, 0, 0, 255]);
+        assert_eq!(pixels[16 * 15 + 7], [0, 0, 0, 0]);
+        assert_eq!(pixels[16 * 15 + 8], [255, 0, 0, 255]);
     }
 
     #[test]
@@ -3709,6 +4082,36 @@ mod tests {
     }
 
     #[test]
+    fn the_status_after_a_look_for_build_output_counts_the_ticks() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        ticked_to_look(&mut app);
+        let (_, analysis) = app.cleanup.analysis.as_ref().unwrap();
+        let unticked = analysis.finding(clean::Category::Orphans).unwrap().clone();
+        let mut found = analysis
+            .finding(clean::Category::BuildOutput)
+            .unwrap()
+            .clone();
+        app.cleanup.set(&unticked, false);
+        found.skipped = false;
+        found.count = 2;
+        found.bytes = 300;
+        app.jobs = 1;
+        app.tx.send(Msg::BuildFound(Box::new(found))).unwrap();
+        app.drain_messages(&ctx);
+        let (_, analysis) = app.cleanup.analysis.as_ref().unwrap();
+        let ticked = analysis.chosen_bytes(&app.cleanup.choice());
+        assert_ne!(ticked, analysis.chosen_bytes(&analysis.default_choice()));
+        assert_eq!(
+            app.status,
+            format!(
+                "Analysed. The ticked categories hold {}.",
+                util::human_size(ticked)
+            )
+        );
+    }
+
+    #[test]
     fn an_uninstalled_program_stays_selected_for_its_leftovers() {
         let name = "Oxidize Gui Test Leftovers";
         let program = Program {
@@ -3749,7 +4152,7 @@ mod tests {
         // And it is scanned again, now as a program that is gone, so its
         // leftovers can be ticked and removed.
         let start = std::time::Instant::now();
-        while app.scan.is_none() && start.elapsed() < std::time::Duration::from_secs(300) {
+        while app.scan.is_none() && start.elapsed() < ANSWER_WAIT {
             std::thread::sleep(std::time::Duration::from_millis(50));
             app.drain_messages(&ctx);
         }
@@ -3757,6 +4160,13 @@ mod tests {
         assert_eq!(app.scan_for.as_deref(), Some(program.id()));
         assert!(!report.installed);
         assert_eq!(app.selected.as_deref(), Some(program.id()));
+
+        // A later reload, such as Refresh, keeps the leftovers on screen.
+        assert_eq!(app.jobs, 0);
+        app.tx.send(Msg::Programs(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.scan.is_some(), "the leftovers on screen were dropped");
+        assert_eq!(app.jobs, 0, "a second scan started");
     }
 
     #[test]
@@ -3785,6 +4195,78 @@ mod tests {
         // And a stray extra answer never takes the count below zero.
         app.job_done();
         assert_eq!(app.jobs, 0);
+    }
+
+    /// A scan of this program that is answered while another is selected.
+    fn stale_scan(app: &mut OxidizeApp, program: &Program) -> Msg {
+        app.select(program.id());
+        app.status = scanning_status(&program.display_name);
+        app.jobs = 1;
+        app.select("another-program");
+        Msg::Scan {
+            id: program.id().to_string(),
+            report: ScanReport {
+                program_name: program.display_name.clone(),
+                ..ScanReport::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_dropped_scan_does_not_leave_its_status_behind() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let program = example_program();
+        let msg = stale_scan(&mut app, &program);
+        app.tx.send(msg).unwrap();
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+        assert!(app.scan.is_none());
+        assert!(
+            !app.status.contains(&program.display_name),
+            "{}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn a_dropped_scan_keeps_a_status_written_since() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        let program = example_program();
+        let msg = stale_scan(&mut app, &program);
+        assert!(app.close_step(true).is_some());
+        let since = app.status.clone();
+        app.tx.send(msg).unwrap();
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+        assert_eq!(app.status, since);
+    }
+
+    #[test]
+    fn the_tab_counts_only_the_parts_of_an_analysis() {
+        let ctx = egui::Context::default();
+        let mut app = app();
+        // The list loading at launch is work, but no analysis.
+        app.jobs = 1;
+        app.tx
+            .send(Msg::Error("the list stopped".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.cleanup.analysis_jobs, 0);
+
+        // An analysis whose file count stopped: the trace search still ends it.
+        app.jobs = 2;
+        app.cleanup.analysis_jobs = 2;
+        app.tx.send(Msg::TracesFound(Vec::new())).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.cleanup.analysis_jobs, 1);
+        app.tx
+            .send(Msg::Error("the count stopped".to_string()))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.cleanup.analysis_jobs, 0);
+        assert!(!app.busy());
     }
 
     #[test]
@@ -3821,6 +4303,133 @@ mod tests {
         assert!(app.status.starts_with("dry run"), "{}", app.status);
         // A preview changes nothing, so nothing is read again.
         assert!(!app.busy());
+    }
+
+    #[test]
+    fn a_removal_that_failed_keeps_its_count_through_the_re_scan() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let mut app = app();
+        app.programs = vec![program.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let outcome = DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        };
+        app.tx.send(Msg::Removed(outcome)).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // The re-scan and the list reload it started both answer. Only the
+        // scan goes through, so the program stays selected.
+        let mut answers = 0;
+        let mut scan = None;
+        let start = std::time::Instant::now();
+        while answers < 2 && start.elapsed() < ANSWER_WAIT {
+            match app.rx.try_recv() {
+                Ok(msg) => {
+                    answers += 1;
+                    if matches!(msg, Msg::Scan { .. }) {
+                        scan = Some(msg);
+                    }
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        app.job_done();
+        app.tx
+            .send(scan.expect("the program is scanned again"))
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert!(app.scan.is_some());
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // A later scan of it says what it found, as before.
+        app.jobs = 1;
+        let report = ScanReport {
+            program_name: "Example Player".to_string(),
+            installed: false,
+            items: Vec::new(),
+        };
+        app.tx
+            .send(Msg::Scan {
+                id: program.id().to_string(),
+                report,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "0 leftovers of Example Player.");
+    }
+
+    #[test]
+    fn a_scan_after_another_program_was_picked_during_the_re_scan_says_what_it_found() {
+        let ctx = egui::Context::default();
+        let program = example_program();
+        let other = Program {
+            registry_key: "other-app".to_string(),
+            display_name: "Other App".to_string(),
+            ..example_program()
+        };
+        let mut app = app();
+        app.programs = vec![program.clone(), other.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        let outcome = DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        };
+        app.tx.send(Msg::Removed(outcome)).unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.status, "1 removed, 1 failed");
+
+        // Another program is picked while the re-scan runs, so its answer is
+        // dropped. The list reload is left out to keep that selection.
+        app.select(other.id());
+        let answers = wait_for_answers(&mut app, 2);
+        app.job_done();
+        for msg in answers {
+            if matches!(msg, Msg::Scan { .. }) {
+                app.tx.send(msg).unwrap();
+            }
+        }
+        app.drain_messages(&ctx);
+        assert!(!app.busy());
+
+        // Back to the first program and a scan of it.
+        app.select(program.id());
+        app.act(&ctx, Action::Scan(program.clone()));
+        assert_eq!(app.status, "Scanning for leftovers of Example Player...");
+        for msg in wait_for_answers(&mut app, 1) {
+            app.tx.send(msg).unwrap();
+        }
+        app.drain_messages(&ctx);
+        let found = app.scan.as_ref().expect("the scan is shown").total();
+        assert_eq!(
+            app.status,
+            format!(
+                "{} of Example Player.",
+                count(found, "leftover", "leftovers")
+            )
+        );
+    }
+
+    /// Takes `n` answers of the background work off the channel.
+    fn wait_for_answers(app: &mut OxidizeApp, n: usize) -> Vec<Msg> {
+        let mut answers = Vec::new();
+        let start = std::time::Instant::now();
+        while answers.len() < n && start.elapsed() < ANSWER_WAIT {
+            match app.rx.try_recv() {
+                Ok(msg) => answers.push(msg),
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
+        assert_eq!(answers.len(), n, "the background work answers");
+        answers
     }
 
     #[test]
@@ -3907,6 +4516,7 @@ mod tests {
                 windowless: false,
             }],
             would_close: Vec::new(),
+            would_end: Vec::new(),
             vendor: VendorStep::Skip {
                 reason: "installed for this user only".to_string(),
             },
@@ -3927,6 +4537,7 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            refused: None,
             seconds: 4.2,
         }
     }
@@ -4895,6 +5506,129 @@ mod tests {
         assert_eq!(scroll_to_show(14, 5.0 * ROW_HEIGHT, height), None);
     }
 
+    /// One frame of the whole window at 1180 by 760 with `keys` pressed.
+    fn frame_with(ctx: &egui::Context, app: &mut OxidizeApp, keys: &[egui::Key]) {
+        use eframe::App as _;
+        let mut frame = eframe::Frame::_new_kittest();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1180.0, 760.0),
+            )),
+            events: keys
+                .iter()
+                .map(|&key| egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+        out.textures_delta.clear();
+    }
+
+    /// Two programs, the first selected and scanned with one leftover ticked, and both ids.
+    fn two_programs_one_scanned() -> (egui::Context, OxidizeApp, [String; 2]) {
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let mut app = app();
+        let mut other = example_program();
+        other.registry_key = "example-editor".to_string();
+        other.display_name = "Example Editor".to_string();
+        app.programs = vec![example_program(), other];
+        let display = app.display_indices(chrono::Local::now().date_naive());
+        let ids = [0, 1].map(|row| app.programs[display[row]].id().to_string());
+        app.selected = Some(ids[0].clone());
+        app.jobs = 1;
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            std::path::PathBuf::from(r"D:\Apps\Example"),
+            Confidence::High,
+            "found",
+            None,
+            false,
+        );
+        let report = ScanReport {
+            program_name: "Example".to_string(),
+            installed: false,
+            items: vec![item],
+        };
+        app.tx
+            .send(Msg::Scan {
+                id: ids[0].clone(),
+                report,
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.checked, [true]);
+        (ctx, app, ids)
+    }
+
+    /// Press Tab until the focused widget's rect passes `wanted`.
+    fn tab_to(ctx: &egui::Context, app: &mut OxidizeApp, wanted: impl Fn(egui::Rect) -> bool) {
+        for _ in 0..80 {
+            frame_with(ctx, app, &[egui::Key::Tab]);
+            frame_with(ctx, app, &[]);
+            if let Some(id) = ctx.memory(|m| m.focused()) {
+                let rect = ctx
+                    .read_response(id)
+                    .expect("the focused widget is shown")
+                    .rect;
+                if wanted(rect) {
+                    return;
+                }
+            }
+        }
+        panic!("Tab never reached the widget it was sent to");
+    }
+
+    #[test]
+    fn the_arrow_keys_leave_the_table_alone_while_the_details_or_a_menu_have_focus() {
+        let (ctx, mut app, ids) = two_programs_one_scanned();
+        frame_with(&ctx, &mut app, &[]);
+        // The details column, below the toolbar and above the status bar.
+        let details = 1180.0 - details_width(1180.0);
+        tab_to(&ctx, &mut app, |rect| {
+            rect.left() >= details && rect.top() > 60.0 && rect.bottom() < 700.0
+        });
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[0].as_str()));
+        assert!(app.scan.is_some(), "the scan and its ticks stay");
+        assert_eq!(app.checked, [true]);
+
+        // A menu such as Options keeps its open state in egui's memory.
+        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap()));
+        egui::Popup::open_id(&ctx, egui::Id::unique("a menu"));
+        frame_with(&ctx, &mut app, &[egui::Key::PageDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[0].as_str()));
+        assert!(app.scan.is_some());
+    }
+
+    #[test]
+    fn the_arrow_keys_move_the_table_from_the_search_field_a_row_or_nothing() {
+        let (ctx, mut app, ids) = two_programs_one_scanned();
+        // The search field has focus once the window opens.
+        frame_with(&ctx, &mut app, &[]);
+        assert!(ctx.memory(|m| m.focused()).is_some());
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[1].as_str()));
+
+        ctx.memory_mut(|m| m.surrender_focus(m.focused().unwrap()));
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowUp]);
+        assert_eq!(app.selected.as_deref(), Some(ids[0].as_str()));
+
+        let details = 1180.0 - details_width(1180.0);
+        tab_to(&ctx, &mut app, |rect| {
+            rect.right() <= details && (rect.height() - ROW_HEIGHT).abs() < 0.5
+        });
+        frame_with(&ctx, &mut app, &[egui::Key::ArrowDown]);
+        assert_eq!(app.selected.as_deref(), Some(ids[1].as_str()));
+    }
+
     #[test]
     fn the_table_drops_columns_as_it_narrows() {
         let shown = |width: f32| columns(width).iter().map(|c| c.column).collect::<Vec<_>>();
@@ -5134,6 +5868,63 @@ mod tests {
         out.verdict.nothing_left = false;
         out.verdict.still_installed = true;
         out.error = Some(uninstall::NEEDS_ADMIN.to_string());
+        let shown = complete_shown(out);
+        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(!shown.contains("cancelled"), "{shown}");
+    }
+
+    #[test]
+    fn a_complete_removal_without_a_backup_folder_points_to_the_setting() {
+        let refused = safety::BackupRefused {
+            reason: r"creating C:\Users\me\backups: Access is denied. (os error 5)".to_string(),
+        };
+        let mut out = finished(None);
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.error = Some(refused.to_string());
+        out.refused = Some(refused);
+        let status = complete_status("Example Player", &out, false);
+        let log = complete_log("Example Player", &out, false).join("\n");
+        let shown = complete_shown(out);
+        for words in [status, log, shown] {
+            assert!(words.contains("Back up before deleting"), "{words}");
+            assert!(!words.contains("--no-backup"), "{words}");
+            assert!(!words.contains("os error"), "{words}");
+        }
+    }
+
+    /// The text the details of a finished complete removal show.
+    fn complete_shown(outcome: Outcome) -> String {
+        let done = Completed {
+            program: example_program(),
+            outcome,
+            dry_run: false,
+        };
+        let ctx = egui::Context::default();
+        apply_style(&ctx);
+        let t = Tint::of(ctx.global_style().visuals.dark_mode);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            show_complete(ui, &t, &done, false, true);
+        });
+        output.textures_delta.clear();
+        let mut shown = String::new();
+        for clipped in &output.shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                shown.push_str(text.galley.text());
+                shown.push('\n');
+            }
+        }
+        shown
+    }
+
+    #[test]
+    fn a_program_that_would_not_close_is_not_called_cancelled_in_the_details() {
+        let mut out = finished(None);
+        out.closed[0].how = CloseHow::Running;
+        out.removal = None;
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        out.error = complete::still_running(&out.closed);
         let done = Completed {
             program: example_program(),
             outcome: out,
@@ -5153,8 +5944,61 @@ mod tests {
                 shown.push('\n');
             }
         }
-        assert!(shown.contains("Restart as administrator"), "{shown}");
+        assert!(shown.contains("player.exe is still running"), "{shown}");
         assert!(!shown.contains("cancelled"), "{shown}");
+    }
+
+    #[test]
+    fn a_skipped_uninstaller_is_not_called_cancelled_when_the_entry_stays() {
+        // Oxidize removed the program itself; its uninstall entry would not go.
+        let mut out = finished(None);
+        out.removal = Some(DeletionOutcome {
+            attempted: 2,
+            deleted: 1,
+            failed: 1,
+            ..DeletionOutcome::default()
+        });
+        out.verdict.nothing_left = false;
+        out.verdict.still_installed = true;
+        let shown = |out: &Outcome| {
+            let done = Completed {
+                program: example_program(),
+                outcome: out.clone(),
+                dry_run: false,
+            };
+            let ctx = egui::Context::default();
+            apply_style(&ctx);
+            let t = Tint::of(ctx.global_style().visuals.dark_mode);
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                show_complete(ui, &t, &done, false, true);
+            });
+            output.textures_delta.clear();
+            let mut text = String::new();
+            for clipped in &output.shapes {
+                if let egui::Shape::Text(t) = &clipped.shape {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+            }
+            text
+        };
+        assert_eq!(
+            complete_status("Example Player", &out, false),
+            "Example Player: some items could not be removed."
+        );
+        let view = shown(&out);
+        assert!(!view.contains("cancelled"), "{view}");
+
+        // The line stays for an uninstaller that ran and left it registered.
+        out.vendor = VendorStep::Run {
+            silent: true,
+            reason: "installed for all users".to_string(),
+        };
+        out.uninstaller = Some("finished".to_string());
+        let status = complete_status("Example Player", &out, false);
+        assert!(status.contains("may have been cancelled"), "{status}");
+        let view = shown(&out);
+        assert!(view.contains("may have been cancelled"), "{view}");
     }
 
     /// True when `shapes` hold a copper outline drawn on `rect`.
@@ -5315,6 +6159,233 @@ mod tests {
             assert!(has_ring(&shapes, rect, copper), "no focus ring at {rect:?}");
         }
         assert!(seen.len() > 5, "{}", seen.len());
+    }
+
+    /// The text from the top of the text `first` picks down to the bottom of
+    /// the one `last` picks in the same panel, each with the smallest widget
+    /// under its centre and the clip.
+    fn texts_between(
+        ctx: &egui::Context,
+        shapes: &[egui::epaint::ClippedShape],
+        first: impl Fn(&egui::epaint::TextShape) -> bool,
+        last: impl Fn(&egui::epaint::TextShape) -> bool,
+    ) -> Vec<(String, egui::Rect, egui::Rect)> {
+        let texts: Vec<(egui::Rect, &egui::epaint::TextShape)> = shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(text) => Some((c.clip_rect, text)),
+                _ => None,
+            })
+            .collect();
+        let find = |pick: &dyn Fn(&egui::epaint::TextShape) -> bool, panel: Option<egui::Rect>| {
+            texts
+                .iter()
+                .find(|(clip, text)| panel.is_none_or(|p| *clip == p) && pick(text))
+                .map(|(clip, text)| (*clip, text.visual_bounding_rect()))
+                .unwrap_or_else(|| {
+                    let drawn: Vec<&str> = texts.iter().map(|(_, t)| t.galley.text()).collect();
+                    panic!("not among the drawn text: {drawn:?}")
+                })
+        };
+        let (clip, top) = find(&first, None);
+        let (_, bottom) = find(&last, Some(clip));
+        let widgets: Vec<egui::Rect> = ctx.viewport(|v| {
+            v.prev_pass
+                .widgets
+                .layers()
+                .flat_map(|(_, w)| w.iter().map(|w| w.rect))
+                .collect()
+        });
+        texts
+            .iter()
+            .filter(|(c, text)| {
+                let y = text.visual_bounding_rect().center().y;
+                *c == clip && (top.top()..=bottom.bottom()).contains(&y)
+            })
+            .map(|(_, text)| {
+                let own = text.visual_bounding_rect();
+                let rect = widgets
+                    .iter()
+                    .filter(|w| w.contains(own.center()))
+                    .min_by(|a, b| a.area().total_cmp(&b.area()))
+                    .copied()
+                    .unwrap_or(own);
+                (text.galley.text().to_string(), rect, clip)
+            })
+            .fold(Vec::new(), |mut line, item| {
+                // A widget may draw its text twice in one place.
+                if !line.contains(&item) {
+                    line.push(item);
+                }
+                line
+            })
+    }
+
+    #[test]
+    fn the_toolbar_and_the_clean_up_head_overlap_at_no_window_width() {
+        use eframe::App as _;
+        let mut faults = Vec::new();
+        for dry_run in [false, true] {
+            for (tab, analysed, view) in [
+                (Tab::Programs, false, cleanup::View::Files),
+                (Tab::Cleanup, false, cleanup::View::Files),
+                (Tab::Cleanup, true, cleanup::View::Files),
+                (Tab::Cleanup, true, cleanup::View::Slate),
+            ] {
+                let ctx = egui::Context::default();
+                apply_style(&ctx);
+                let mut app = app();
+                app.dry_run = dry_run;
+                app.tab = tab;
+                if analysed {
+                    app.cleanup
+                        .take_analysis(clean::Places::default(), cleanup::tests::analysis());
+                    app.cleanup.slate.found = Some(Vec::new());
+                    app.cleanup.view = view;
+                }
+                let mut frame = eframe::Frame::_new_kittest();
+                // One window made narrower and wider again, one frame per size.
+                for size in [
+                    egui::vec2(1180.0, 760.0),
+                    egui::vec2(900.0, 600.0),
+                    egui::vec2(800.0, 600.0),
+                    egui::vec2(720.0, 480.0),
+                    egui::vec2(900.0, 600.0),
+                    egui::vec2(1180.0, 760.0),
+                ] {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    };
+                    let mut out = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                    out.textures_delta.clear();
+                    let case = format!("{}x{} dry run {dry_run} {tab:?} {view:?}", size.x, size.y);
+                    let name = |t: &egui::epaint::TextShape| t.galley.text() == "Oxidize";
+                    let mut lines = vec![texts_between(&ctx, &out.shapes, name, name)];
+                    if tab == Tab::Cleanup {
+                        // The head: the headline, its buttons, the line under
+                        // it and, once analysed, the switch between the views.
+                        lines.push(texts_between(
+                            &ctx,
+                            &out.shapes,
+                            |t| t.galley.job.sections[0].format.font_id.size == 24.0,
+                            |t| {
+                                if analysed {
+                                    t.galley.text() == "Clean slate"
+                                } else {
+                                    t.galley.text().starts_with("Counts what")
+                                }
+                            },
+                        ));
+                        let head = &lines[1];
+                        if !head
+                            .iter()
+                            .any(|(a, ..)| a.starts_with("Protected folders"))
+                        {
+                            faults.push(format!("{case}: the head's buttons are not in {head:?}"));
+                        }
+                    }
+                    for line in lines {
+                        for (i, (a, ra, clip)) in line.iter().enumerate() {
+                            if !clip.expand(0.5).contains_rect(*ra) {
+                                faults.push(format!("{case}: {a:?} at {ra:?} leaves {clip:?}"));
+                            }
+                            for (b, rb, _) in &line[i + 1..] {
+                                let both = ra.intersect(*rb);
+                                if both.width() > 0.5 && both.height() > 0.5 {
+                                    faults.push(format!(
+                                        "{case}: {a:?} at {ra:?} and {b:?} at {rb:?}"
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(faults.is_empty(), "{}", faults.join("\n"));
+    }
+
+    #[test]
+    fn every_checkbox_has_a_name_for_a_screen_reader() {
+        use eframe::App as _;
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        apply_style(&ctx);
+        let program = example_program();
+        let path = r"D:\Games\Example Player";
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            std::path::PathBuf::from(path),
+            Confidence::High,
+            "found",
+            None,
+            false,
+        );
+        let mut app = app();
+        app.programs = vec![program.clone()];
+        app.selected = Some(program.id().to_string());
+        app.jobs = 1;
+        app.tx
+            .send(Msg::Scan {
+                id: program.id().to_string(),
+                report: ScanReport {
+                    program_name: "Example Player".to_string(),
+                    installed: false,
+                    items: vec![item],
+                },
+            })
+            .unwrap();
+        app.drain_messages(&ctx);
+        assert_eq!(app.checked.len(), 1);
+        app.cleanup
+            .take_analysis(clean::Places::default(), cleanup::tests::analysis());
+        app.cleanup.focus = Some(clean::Category::Orphans);
+        let mut frame = eframe::Frame::_new_kittest();
+        let mut names = Vec::new();
+        for tab in [Tab::Programs, Tab::Cleanup] {
+            app.tab = tab;
+            let mut out = None;
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1180.0, 760.0),
+                    )),
+                    ..Default::default()
+                };
+                let mut full = ctx.run_ui(input, |ui| app.ui(ui, &mut frame));
+                full.textures_delta.clear();
+                out = Some(full);
+            }
+            let update = out
+                .unwrap()
+                .platform_output
+                .accesskit_update
+                .expect("AccessKit is on");
+            let boxes: Vec<String> = update
+                .nodes
+                .iter()
+                .filter(|(_, node)| node.role() == egui::accesskit::Role::CheckBox)
+                .map(|(_, node)| node.label().unwrap_or_default().to_string())
+                .collect();
+            assert!(!boxes.is_empty(), "{tab:?} shows no checkbox");
+            assert!(
+                boxes.iter().all(|name| !name.trim().is_empty()),
+                "{tab:?}: a checkbox has no name: {boxes:?}"
+            );
+            names.extend(boxes);
+        }
+        let folder = cleanup::tests::analysis()
+            .finding(clean::Category::Orphans)
+            .unwrap()
+            .folders[0]
+            .path
+            .display()
+            .to_string();
+        for name in [path, clean::Category::Orphans.title(), folder.as_str()] {
+            assert!(names.iter().any(|n| n == name), "{name} in {names:?}");
+        }
     }
 
     #[test]

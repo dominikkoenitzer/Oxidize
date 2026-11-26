@@ -105,7 +105,7 @@ pub fn plan(program: &Program, silent: bool) -> Result<UninstallPlan> {
 
     let mut argv = util::split_uninstall_command(&util::expand_env_vars(&raw));
     if argv.first().is_none_or(|exe| exe.trim().is_empty()) {
-        bail!("uninstall command parsed to nothing: {raw:?}");
+        bail!("uninstall command parsed to nothing: {raw}");
     }
     // The switch goes right after the program, since `_?=` has to stay last.
     if stamped
@@ -183,6 +183,18 @@ pub fn run_with(plan: &UninstallPlan, stdin: Stdio, stdout: Stdio) -> Result<Exi
         .stdout(stdout)
         .status()
         .map_err(|e| launch_error(e, exe))
+}
+
+/// The launch error a gone program file would give, known before anything runs; bare names are left to the search path.
+pub fn missing_program(plan: &UninstallPlan) -> Option<String> {
+    let exe = plan.argv.first()?;
+    let path = Path::new(exe);
+    let gone = |p: &Path| matches!(std::fs::metadata(p), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+    // Windows adds .exe to a program path that has no extension.
+    let gone = path.is_absolute()
+        && gone(path)
+        && (path.extension().is_some() || gone(Path::new(&format!("{exe}.exe"))));
+    gone.then(|| format!("{UNINSTALLER_MISSING}: {exe}"))
 }
 
 fn launch_error(e: std::io::Error, exe: &str) -> anyhow::Error {
@@ -401,6 +413,46 @@ mod tests {
         let asked = plan(&p, false).unwrap();
         assert!(!asked.unattended);
         assert_eq!(asked.argv, [r"C:\Apps\App\unins000.exe"]);
+    }
+
+    #[test]
+    fn a_missing_program_file_is_known_before_the_launch() {
+        let plan_for = |exe: &str| UninstallPlan {
+            argv: vec![exe.to_string(), "/S".to_string()],
+            is_msi: false,
+            source: "UninstallString".to_string(),
+            unattended: false,
+        };
+        let here = std::env::current_exe().unwrap();
+        assert_eq!(
+            missing_program(&plan_for(&here.display().to_string())),
+            None
+        );
+        // Without its extension it is still found, as Windows finds it.
+        let bare = here.with_extension("");
+        assert_eq!(
+            missing_program(&plan_for(&bare.display().to_string())),
+            None
+        );
+        // A bare name is looked up at launch.
+        assert_eq!(missing_program(&plan_for("MsiExec.exe")), None);
+
+        let gone = std::env::temp_dir().join("oxidize no such uninstaller.exe");
+        let gone = gone.display().to_string();
+        assert_eq!(
+            missing_program(&plan_for(&gone)),
+            Some(format!("{UNINSTALLER_MISSING}: {gone}"))
+        );
+    }
+
+    #[test]
+    fn a_command_that_names_no_program_is_shown_as_recorded() {
+        let p = program(r#""" C:\Apps\App\setup.exe"#, None);
+        let err = plan(&p, false).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"uninstall command parsed to nothing: "" C:\Apps\App\setup.exe"#
+        );
     }
 
     #[test]

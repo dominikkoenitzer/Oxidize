@@ -48,6 +48,8 @@ pub struct Cleanup {
     /// The ticked categories are being cleaned; the analysis went with
     /// the work.
     pub cleaning: bool,
+    /// Analysis parts still running: the file count and the trace search.
+    pub analysis_jobs: u8,
 }
 
 /// The two views of the tab, each with its own one action.
@@ -66,7 +68,7 @@ impl Cleanup {
     }
 
     /// What stands where the analysis was, while there is none.
-    fn without_analysis(&self) -> (String, String) {
+    fn without_analysis(&self, busy: bool) -> (String, String) {
         if self.cleaning {
             ("Cleaning...".into(), "Removing what was ticked.".into())
         } else if let Some(results) = &self.results {
@@ -76,9 +78,25 @@ impl Cleanup {
                 "Analyse again to see what is left.".into(),
             )
         } else {
+            self.first_view(busy)
+        }
+    }
+
+    /// The two lines before anything is analysed, or while it is.
+    fn first_view(&self, busy: bool) -> (String, String) {
+        if let Some(why) = self.refusal(&Action::Analyse) {
+            ("Clean up this PC".into(), why)
+        } else if busy {
             (
                 "Analysing...".into(),
                 "Counting what each category holds.".into(),
+            )
+        } else {
+            (
+                "Clean up this PC".into(),
+                "Counts what temporary files, caches and Windows' own stores hold. \
+                 Nothing is deleted until you choose."
+                    .into(),
             )
         }
     }
@@ -115,7 +133,13 @@ impl Cleanup {
             focus: None,
             busy: false,
             cleaning: false,
+            analysis_jobs: 0,
         }
+    }
+
+    /// An analysis runs, and not only some other work.
+    fn analysing(&self) -> bool {
+        self.analysis_jobs > 0
     }
 
     /// Why `action` cannot run: it needs the protected list, and the list
@@ -185,7 +209,6 @@ impl Cleanup {
 
     /// What the ticks amount to: only categories that can be cleaned, and
     /// the folders only while their category is ticked.
-    #[cfg(test)]
     pub fn choice(&self) -> Choice {
         match &self.analysis {
             Some((_, a)) => self.choice_in(a),
@@ -367,47 +390,41 @@ fn head(
     action: &mut Option<Action>,
 ) {
     let analysed = state.has_something();
-    let (big, small) = headline(state, busy);
+    let (big, small) = headline(state, state.analysing());
+    // The buttons' width on one line, as the last pass laid them out.
+    let id = ui.scope_id().with("head_buttons");
+    let wanted = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(0.0);
+    let mut room = f32::INFINITY;
+    let mut width = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new(big).size(24.0).color(t.text));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let tall = egui::vec2(0.0, 34.0);
-            if !analysed {
-                if ui
-                    .add_enabled(!busy, primary_button(t, "Analyse this PC").min_size(tall))
-                    .on_hover_text("Count what each category holds. Changes nothing.")
-                    .clicked()
-                {
-                    *action = Some(Action::Analyse);
-                }
-            } else {
-                match state.view {
-                    View::Files => files_button(ui, t, state, busy, dry_run, action),
-                    View::Slate => slate::button(ui, t, &state.slate, busy, dry_run, action),
-                }
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Analyse again").min_size(tall))
-                    .on_hover_text("Count again. Changes nothing.")
-                    .clicked()
-                {
-                    *action = Some(Action::Analyse);
-                }
-            }
-            let protected = state.protected.entries().len();
-            let label = format!("Protected folders  {protected}");
-            if ui
-                .add(
-                    egui::Button::new(RichText::new(label).color(t.weak))
-                        .frame(false)
-                        .selected(state.show_protected),
-                )
-                .on_hover_text("Folders and files Clean up never touches")
-                .clicked()
-            {
-                state.show_protected = !state.show_protected;
-            }
-        });
+        room = ui.available_width();
+        if wanted <= room {
+            let row = egui::Layout::right_to_left(egui::Align::Center);
+            width = Some(
+                ui.with_layout(row, |ui| {
+                    buttons(ui, t, state, busy, dry_run, analysed, action)
+                })
+                .inner,
+            );
+        }
     });
+    // Too wide beside the headline: the buttons take their own lines under it.
+    let width = width.unwrap_or_else(|| {
+        let lines = egui::Layout::right_to_left(egui::Align::Center).with_main_wrap(true);
+        // One row high to start with, so the first row does not centre on the whole panel.
+        let row = egui::vec2(ui.available_width(), 34.0);
+        ui.allocate_ui_with_layout(row, lines, |ui| {
+            buttons(ui, t, state, busy, dry_run, analysed, action)
+        })
+        .inner
+    });
+    if width != wanted {
+        ui.data_mut(|d| d.insert_temp(id, width));
+        if (width <= room) != (wanted <= room) {
+            ui.ctx().request_discard("the head buttons moved");
+        }
+    }
     ui.add(egui::Label::new(RichText::new(small).color(t.weak)).wrap());
     if analysed {
         ui.add_space(14.0);
@@ -426,28 +443,65 @@ fn head(
     ui.separator();
 }
 
-/// The two lines at the top left: a figure, and what it is.
-fn headline(state: &Cleanup, busy: bool) -> (String, String) {
-    match (state.view, &state.analysis) {
-        _ if !state.has_something() => {
-            if let Some(why) = state.refusal(&Action::Analyse) {
-                ("Clean up this PC".into(), why)
-            } else if busy {
-                (
-                    "Analysing...".into(),
-                    "Counting what each category holds.".into(),
-                )
-            } else {
-                (
-                    "Clean up this PC".into(),
-                    "Counts what temporary files, caches and Windows' own stores hold. \
-                     Nothing is deleted until you choose."
-                        .into(),
-                )
-            }
+/// The head's buttons, right to left, and how wide they are on one line.
+fn buttons(
+    ui: &mut egui::Ui,
+    t: &Tint,
+    state: &mut Cleanup,
+    busy: bool,
+    dry_run: bool,
+    analysed: bool,
+    action: &mut Option<Action>,
+) -> f32 {
+    let tall = egui::vec2(0.0, 34.0);
+    let mut widths = Vec::new();
+    if !analysed {
+        let analyse = ui
+            .add_enabled(!busy, primary_button(t, "Analyse this PC").min_size(tall))
+            .on_hover_text("Count what each category holds. Changes nothing.");
+        if analyse.clicked() {
+            *action = Some(Action::Analyse);
         }
+        widths.push(analyse.rect.width());
+    } else {
+        let main = match state.view {
+            View::Files => files_button(ui, t, state, busy, dry_run, action),
+            View::Slate => slate::button(ui, t, &state.slate, busy, dry_run, action),
+        };
+        widths.extend(main.map(|r| r.rect.width()));
+        let again = ui
+            .add_enabled(!busy, egui::Button::new("Analyse again").min_size(tall))
+            .on_hover_text("Count again. Changes nothing.");
+        if again.clicked() {
+            *action = Some(Action::Analyse);
+        }
+        widths.push(again.rect.width());
+    }
+    let protected = state.protected.entries().len();
+    let label = format!("Protected folders  {protected}");
+    let toggle = ui
+        .add(
+            egui::Button::new(RichText::new(label).color(t.weak))
+                .frame(false)
+                .selected(state.show_protected),
+        )
+        .on_hover_text("Folders and files Clean up never touches");
+    if toggle.clicked() {
+        state.show_protected = !state.show_protected;
+    }
+    widths.push(toggle.rect.width());
+    let gaps = widths.len().saturating_sub(1) as f32 * ui.spacing().item_spacing.x;
+    widths.iter().sum::<f32>() + gaps
+}
+
+/// The two lines at the top left: a figure, and what it is.
+fn headline(state: &Cleanup, analysing: bool) -> (String, String) {
+    match (state.view, &state.analysis) {
+        _ if !state.has_something() => state.first_view(analysing),
+        // The traces went with a change to the protected list or a failed read.
+        (View::Slate, _) if state.slate.is_empty() && !analysing => state.first_view(false),
         (View::Slate, _) => slate::headline(&state.slate),
-        (View::Files, None) => state.without_analysis(),
+        (View::Files, None) => state.without_analysis(analysing),
         (View::Files, Some((_, a))) => {
             let choice = state.choice_in(a);
             let n = choice.categories.len();
@@ -478,10 +532,8 @@ fn files_button(
     busy: bool,
     dry_run: bool,
     action: &mut Option<Action>,
-) {
-    let Some((_, analysis)) = &state.analysis else {
-        return;
-    };
+) -> Option<egui::Response> {
+    let (_, analysis) = state.analysis.as_ref()?;
     let choice = state.choice_in(analysis);
     let bytes = util::human_size(analysis.chosen_bytes(&choice));
     let n = choice.categories.len();
@@ -490,15 +542,14 @@ fn files_button(
         (_, true) => format!("Preview cleaning {bytes}"),
         (_, false) => format!("Clean {bytes}"),
     };
-    if ui
-        .add_enabled(
-            !busy && n > 0,
-            primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
-        )
-        .clicked()
-    {
+    let response = ui.add_enabled(
+        !busy && n > 0,
+        primary_button(t, &label).min_size(egui::vec2(150.0, 34.0)),
+    );
+    if response.clicked() {
         *action = Some(Action::Clean(choice));
     }
+    Some(response)
 }
 
 /// The tab's main area: the open view.
@@ -514,7 +565,7 @@ pub fn view(
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if !state.has_something() {
-                if !busy {
+                if !state.analysing() {
                     what_it_counts(ui, t);
                 }
                 return;
@@ -562,7 +613,7 @@ pub fn side(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, make_backups: bool
                 return;
             }
             let Some((places, analysis)) = state.analysis.take() else {
-                let (_, line) = state.without_analysis();
+                let (_, line) = state.without_analysis(state.analysing());
                 ui.label(RichText::new(line).color(t.weak));
                 return;
             };
@@ -693,7 +744,12 @@ fn category_row(
     if !(f.actionable() || (f.skipped && !busy)) {
         cell.disable();
     }
-    if cell.add(egui::Checkbox::without_text(&mut on)).changed() {
+    // The title is painted, so the box carries it for a screen reader.
+    if cell
+        .add(egui::Checkbox::without_text(&mut on))
+        .accessible_name(f.category.title())
+        .changed()
+    {
         state.set(f, on);
         if on && f.skipped {
             *action = Some(Action::FindBuildOutput);
@@ -849,7 +905,11 @@ fn folder_list(ui: &mut egui::Ui, t: &Tint, state: &mut Cleanup, f: &Finding) {
             for o in &f.folders {
                 ui.horizontal_top(|ui| {
                     let mut on = state.folders.contains(&o.path);
-                    if ui.add(egui::Checkbox::without_text(&mut on)).changed() {
+                    if ui
+                        .add(egui::Checkbox::without_text(&mut on))
+                        .accessible_name(o.path.display().to_string())
+                        .changed()
+                    {
                         state.set_folder(&o.path, on);
                         if on && !state.ticked.contains(&Category::Orphans) {
                             state.ticked.push(Category::Orphans);
@@ -920,6 +980,12 @@ fn show_results(
         if let Some(stays) = clean::stays_text(&c.kept) {
             let color = if c.failed() { t.red } else { t.weak };
             ui.add(egui::Label::new(RichText::new(stays).small().color(color)).wrap());
+        }
+        for k in &c.kept {
+            if let clean::KeptReason::NoBackup(refused) = &k.reason {
+                let words = RichText::new(refused.window_text()).small().color(t.weak);
+                ui.add(egui::Label::new(words).wrap());
+            }
         }
         if let Some(name) = &c.backup {
             if ui
@@ -1107,6 +1173,7 @@ pub(crate) mod tests {
             focus: None,
             busy: false,
             cleaning: false,
+            analysis_jobs: 0,
         }
     }
 
@@ -1309,7 +1376,60 @@ pub(crate) mod tests {
         assert_eq!(headline(&c, false).0, "Nothing selected");
         // The traces are still being read.
         c.view = View::Slate;
-        assert_eq!(headline(&c, false).0, "Analysing...");
+        assert_eq!(headline(&c, true).0, "Analysing...");
+    }
+
+    /// Every text the head and the main area of the tab draw in one frame.
+    fn tab_text(state: &mut Cleanup, busy: bool) -> String {
+        let ctx = egui::Context::default();
+        let t = Tint::of(false);
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            strip(ui, &t, state, busy, false, &mut None);
+            view(ui, &t, state, busy, &mut None);
+        });
+        out.textures_delta.clear();
+        let mut shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+        let mut text = String::new();
+        while let Some(shape) = shapes.pop() {
+            match shape {
+                egui::Shape::Vec(inner) => shapes.extend(inner),
+                egui::Shape::Text(t) => {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+                _ => {}
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn other_work_does_not_make_the_tab_say_it_analyses() {
+        // The program list loading at launch, or a removal from the programs.
+        let mut c = tab();
+        c.busy = true;
+        let text = tab_text(&mut c, true);
+        assert!(!text.contains("Analysing..."), "{text}");
+        assert!(text.contains("Clean up this PC"), "{text}");
+        assert!(
+            text.contains("Nothing is deleted until you choose."),
+            "{text}"
+        );
+        assert!(text.contains("What it looks at"), "{text}");
+    }
+
+    #[test]
+    fn an_analysis_under_way_says_so() {
+        let mut c = tab();
+        c.busy = true;
+        c.analysis_jobs = 2;
+        let text = tab_text(&mut c, true);
+        assert!(text.contains("Analysing..."), "{text}");
+        assert!(
+            text.contains("Counting what each category holds."),
+            "{text}"
+        );
+        assert!(!text.contains("What it looks at"), "{text}");
     }
 
     #[test]
@@ -1332,9 +1452,92 @@ pub(crate) mod tests {
         let (big, small) = headline(&c, false);
         assert_eq!(big, format!("{} freed", util::human_size(2048)));
         assert_eq!(small, "Analyse again to see what is left.");
-        // Changing the protected list afterwards keeps the result in view.
-        c.slate = Slate::default();
-        assert!(c.has_something());
+    }
+
+    #[test]
+    fn a_saved_change_of_the_list_drops_an_analysis_and_keeps_what_was_freed() {
+        let dir =
+            std::env::temp_dir().join(format!("oxidize-gui-test-listsave-{}", std::process::id()));
+        let file = dir.join("protected.txt");
+        let mut c = tab();
+        c.list_file = Ok(file.clone());
+        let freed = vec![Cleaned {
+            category: Category::Temp,
+            freed: 2048,
+            removed: 3,
+            kept: Vec::new(),
+            backup: None,
+            notes: Vec::new(),
+        }];
+        c.results = Some(freed.clone());
+        c.new_protected = r"C:\Example Keep".to_string();
+        c.add_protected();
+        let added = protect::load_from(&file).map(|p| p.entries().to_vec());
+        let head = headline(&c, false).0;
+
+        c.take_analysis(Places::default(), analysis());
+        c.results = Some(freed);
+        c.remove_protected(r"C:\Example Keep");
+        let removed = protect::load_from(&file).map(|p| p.entries().to_vec());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(added.unwrap(), [r"C:\Example Keep"]);
+        // A cleaning's results stay in view.
+        assert_eq!(head, format!("{} freed", util::human_size(2048)));
+        assert!(removed.unwrap().is_empty());
+        assert_eq!(c.protect_error, None);
+        assert!(c.analysis.is_none(), "it may hold what the list now covers");
+        assert!(c.results.is_none());
+    }
+
+    /// Every text the side panel draws for `state` in one frame.
+    fn side_text(state: &mut Cleanup) -> String {
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let t = Tint::for_ui(ui);
+            side(ui, &t, state, false);
+        });
+        out.textures_delta.clear();
+        let mut text = String::new();
+        let mut shapes: Vec<egui::Shape> = out.shapes.into_iter().map(|c| c.shape).collect();
+        while let Some(shape) = shapes.pop() {
+            match shape {
+                egui::Shape::Vec(inner) => shapes.extend(inner),
+                egui::Shape::Text(t) => {
+                    text.push_str(t.galley.text());
+                    text.push('\n');
+                }
+                _ => {}
+            }
+        }
+        text
+    }
+
+    #[test]
+    fn the_head_claims_an_analysis_only_while_one_runs() {
+        let first = headline(&tab(), false);
+        // Traces cleared, then the protected list changed: the analysis went.
+        let mut cleared = tab();
+        cleared.slate.results = Some(Vec::new());
+        // A cleaning that stopped on an error, with the traces found.
+        let mut stopped = tab();
+        stopped.slate.found = Some(Vec::new());
+        for c in [&mut cleared, &mut stopped] {
+            assert!(c.has_something());
+            assert_eq!(headline(c, false), first);
+            assert!(!side_text(c).contains("Counting"));
+            assert_eq!(headline(c, true).0, "Analysing...");
+            c.busy = true;
+            assert!(!side_text(c).contains("Counting"));
+            c.analysis_jobs = 1;
+            assert!(side_text(c).contains("Counting what each category holds."));
+        }
+        // Files cleaned, then the protected list changed: the traces went.
+        let mut cleaned = tab();
+        cleaned.results = Some(Vec::new());
+        cleaned.view = View::Slate;
+        assert_eq!(headline(&cleaned, false), first);
+        assert_eq!(headline(&cleaned, true).0, "Analysing...");
     }
 
     #[test]

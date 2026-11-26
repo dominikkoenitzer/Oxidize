@@ -1,6 +1,17 @@
 //! Command handlers: wire the engine together and print results. All
 //! user-facing text lives here so the lower layers stay quiet.
 
+/// `println!` through [`crate::out`]: once the reader of stdout has gone the
+/// rest is left out and the command goes on, where `std`'s would panic.
+macro_rules! println {
+    () => {
+        $crate::out::write(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::out::write(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -373,6 +384,12 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
                 Some(_) => None,
                 None => scanner::publisher_hint(&args.target),
             };
+            let publisher = args
+                .publisher
+                .clone()
+                .or_else(|| hint.as_ref().map(|(p, _)| p.clone()));
+            let target = scanner::name_only_target(&args.target, publisher.as_deref());
+            refuse_wordless(&args.target, &target)?;
             if !g.json {
                 println!(
                     "{}",
@@ -392,11 +409,7 @@ fn cmd_scan(args: &ScanArgs, g: &Global) -> Result<()> {
                     );
                 }
             }
-            let publisher = args.publisher.clone().or_else(|| hint.map(|(p, _)| p));
-            (
-                scanner::name_only_target(&args.target, publisher.as_deref()),
-                args.target.clone(),
-            )
+            (target, args.target.clone())
         }
     };
     let installed = installed.is_some();
@@ -467,6 +480,19 @@ pub(crate) fn scan_subject<'a>(
             Ok(None)
         }
     }
+}
+
+/// Refuses a scan by name that nothing can match: no name word, no publisher word, and a whole name under the scanner's 3-character floor.
+pub(crate) fn refuse_wordless(name: &str, target: &ScanTarget) -> Result<()> {
+    if target.name_tokens.is_empty()
+        && target.publisher_tokens.is_empty()
+        && util::normalize(&target.display_name).len() < 3
+    {
+        bail!(
+            "\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher"
+        );
+    }
+    Ok(())
 }
 
 fn print_remove_hint(high: usize, command: &str) {
@@ -665,6 +691,20 @@ fn uninstall_batch(
     let n = batch.len();
     let apps = batch.iter().filter(|s| matches!(s, Step::Store(_))).count();
     let programs = n - apps;
+    // Read once, before the question that confirms what is ended.
+    let running = if programs > 0 && !keep {
+        (env.running)()
+    } else {
+        Vec::new()
+    };
+    let ends: Vec<Vec<complete::Running>> = targets
+        .iter()
+        .map(|t| {
+            t.as_ref()
+                .map(|t| ends_for(t, &running, env.has_window, how))
+                .unwrap_or_default()
+        })
+        .collect();
 
     if !g.json {
         let head = if n == 1 {
@@ -678,6 +718,9 @@ fn uninstall_batch(
                 Step::Program(b) => {
                     println!("  {}. {}", i + 1, program_head(&b.program));
                     println!("     {}", term::dim(&b.plan.display()));
+                    for line in ends_in_plan(&ends[i]) {
+                        println!("     {}", term::dim(&line));
+                    }
                 }
                 Step::Store(app) => {
                     println!("  {}. {}", i + 1, package_head(app));
@@ -732,7 +775,7 @@ fn uninstall_batch(
     }
 
     let mut runs = Vec::with_capacity(n);
-    for (i, (step, target)) in batch.iter().zip(targets).enumerate() {
+    for (i, ((step, target), ends)) in batch.iter().zip(targets).zip(ends).enumerate() {
         if !g.json {
             println!();
             println!(
@@ -760,6 +803,7 @@ fn uninstall_batch(
                     &b.plan,
                     already_gone,
                     None,
+                    ends,
                     how,
                     levels,
                     g,
@@ -875,9 +919,18 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
     let target = scanner::build_target_with(program, &snap);
     let plan = uninstall::plan(program, how.silent)?;
 
+    let running = if how.keep {
+        Vec::new()
+    } else {
+        system::running_processes()
+    };
+    let ends = ends_for(&target, &running, &system::has_window, how);
     if !g.json {
         println!("{}", program_head(program));
         println!("  {}", term::dim(&plan.display()));
+        for line in ends_in_plan(&ends) {
+            println!("  {}", term::dim(&line));
+        }
     }
 
     let question = if how.keep {
@@ -895,7 +948,17 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         return Err(Failure::cancelled("Cancelled.", true).into());
     }
 
-    let run = run_uninstall(program, &target, &plan, false, Some(snap), how, levels, g)?;
+    let run = run_uninstall(
+        program,
+        &target,
+        &plan,
+        false,
+        Some(snap),
+        ends,
+        how,
+        levels,
+        g,
+    )?;
     if g.json {
         println!("{}", serde_json::to_string_pretty(&run.json)?);
     }
@@ -906,6 +969,32 @@ fn uninstall_program(program: &Program, how: &How, levels: &LevelOpts, g: &Globa
         return Err(run.failure(g.json).into());
     }
     Ok(())
+}
+
+/// The plan's lines for the processes a confirmed removal ends.
+fn ends_in_plan(ends: &[complete::Running]) -> Vec<String> {
+    ends.iter()
+        .map(|p| {
+            format!(
+                "ends {}, which has no window to be asked through",
+                p.exe.display()
+            )
+        })
+        .collect()
+}
+
+/// What a confirmed removal of the program ends: what runs from its own
+/// folder with no window. `--keep` closes nothing, so it ends nothing.
+fn ends_for(
+    target: &ScanTarget,
+    running: &[complete::Running],
+    has_window: &dyn Fn(u32) -> bool,
+    how: &How,
+) -> Vec<complete::Running> {
+    if how.keep {
+        return Vec::new();
+    }
+    complete::to_end(running, target, std::process::id(), has_window)
 }
 
 /// The program's name in bold, then its version and publisher.
@@ -1068,7 +1157,8 @@ impl ProgramRun {
 /// program's folders, run its uninstaller only when Oxidize cannot do without
 /// it, remove the leftovers at `levels` and scan again. `target` is the
 /// footprint captured before anything ran, `snap` the reading of the
-/// machine it was built from, when that is still current.
+/// machine it was built from, when that is still current. `ends` are the
+/// windowless processes the plan named and the confirmation covered.
 #[allow(clippy::too_many_arguments)]
 fn run_uninstall(
     program: &Program,
@@ -1076,6 +1166,7 @@ fn run_uninstall(
     plan: &uninstall::UninstallPlan,
     already_gone: bool,
     snap: Option<scanner::Snapshot>,
+    ends: Vec<complete::Running>,
     how: &How,
     levels: &LevelOpts,
     g: &Global,
@@ -1095,6 +1186,7 @@ fn run_uninstall(
         g,
         wait,
         first: std::cell::RefCell::new(snap),
+        ends,
     };
     let opts = complete::Options {
         level,
@@ -1129,8 +1221,8 @@ fn run_uninstall(
 
 /// A complete removal as JSON. Stable fields for scripts: `nothing_left`,
 /// `still_installed`, `remaining`, `below_level`, `closed`, `uninstaller`,
-/// `uninstaller_step`, `removal`, `seconds`; a dry run has `would_close` and
-/// `would_remove` instead.
+/// `uninstaller_step`, `removal`, `seconds`; a dry run has `would_close`,
+/// `would_end` and `would_remove` instead.
 fn complete_json(
     program: &Program,
     plan: &uninstall::UninstallPlan,
@@ -1150,6 +1242,7 @@ fn complete_json(
     });
     if dry_run {
         json_out["would_close"] = json!(out.would_close);
+        json_out["would_end"] = json!(out.would_end);
         json_out["would_remove"] = json!(out.selected);
     } else {
         json_out["closed"] = json!(out.closed);
@@ -1181,7 +1274,12 @@ fn print_complete(name: &str, out: &complete::Outcome, dry_run: bool) {
             println!();
             println!("{}", term::dim("would close"));
             for p in &out.would_close {
-                println!("  {}", p.exe.display());
+                if out.would_end.contains(p) {
+                    let why = term::dim(", no window to be asked through: it would be ended");
+                    println!("  {}{why}", p.exe.display());
+                } else {
+                    println!("  {}", p.exe.display());
+                }
             }
         }
         return;
@@ -1207,7 +1305,7 @@ fn print_complete(name: &str, out: &complete::Outcome, dry_run: bool) {
             term::green("Nothing left."),
             term::dim(&format!("{:.1} s", out.seconds))
         );
-    } else if v.still_installed && out.error.is_none() {
+    } else if out.uninstaller_left_it_registered() {
         term::warn(&format!(
             "{name} is still registered. The uninstaller may have been cancelled or is still running."
         ));
@@ -1241,6 +1339,8 @@ struct CliPc<'a> {
     /// The reading the target was built from, for the first scan only:
     /// later scans must see what the removal changed.
     first: std::cell::RefCell<Option<scanner::Snapshot>>,
+    /// The windowless processes the confirmed plan named to end.
+    ends: Vec<complete::Running>,
 }
 
 impl complete::Pc for CliPc<'_> {
@@ -1268,6 +1368,22 @@ impl complete::Pc for CliPc<'_> {
             );
         }
         system::close_processes(procs, complete::CLOSE_GRACE)
+    }
+
+    fn may_end(&self) -> Vec<complete::Running> {
+        self.ends.clone()
+    }
+
+    fn end(&self, procs: &[complete::Running]) -> Vec<complete::Closed> {
+        if !self.g.json {
+            for p in procs {
+                println!(
+                    "Ending {}, which has no window to be asked through.",
+                    p.exe.display()
+                );
+            }
+        }
+        system::end_processes(procs)
     }
 
     fn run_uninstaller(&self, plan: &uninstall::UninstallPlan) -> Result<uninstall::Ran> {
@@ -2146,6 +2262,32 @@ fn restore_goes_ahead(dry_run: bool, yes: bool, json: bool, ask: impl FnOnce() -
     ask()
 }
 
+/// `restore --json`: each item, and the backup as it is now. After a real
+/// run it is read again, so a whole restore shows as restored and what went
+/// back no longer counts toward its size.
+fn restore_json(
+    info: &backup::BackupInfo,
+    items: &[restore::RestoreItem],
+    dry_run: bool,
+) -> serde_json::Value {
+    let now = (!dry_run)
+        .then(|| backup::list_backups().ok())
+        .flatten()
+        .and_then(|all| all.into_iter().find(|b| b.path == info.path));
+    let info = now.as_ref().unwrap_or(info);
+    let arr: Vec<_> = items
+        .iter()
+        .map(|i| {
+            json!({
+                "path": i.path,
+                "ok": i.result.is_ok(),
+                "error": i.result.as_ref().err(),
+            })
+        })
+        .collect();
+    json!({ "backup": info, "items": arr })
+}
+
 fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     let info = backup::find_backup(&args.name)?;
     let question = format!(
@@ -2177,19 +2319,9 @@ fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     };
 
     if g.json {
-        let arr: Vec<_> = items
-            .iter()
-            .map(|i| {
-                json!({
-                    "path": i.path,
-                    "ok": i.result.is_ok(),
-                    "error": i.result.as_ref().err(),
-                })
-            })
-            .collect();
         println!(
             "{}",
-            serde_json::to_string_pretty(&json!({ "backup": info, "items": arr }))?
+            serde_json::to_string_pretty(&restore_json(&info, &items, g.dry_run))?
         );
         if failed > 0 && !g.dry_run {
             return Err(incomplete().into());
@@ -2660,6 +2792,11 @@ fn print_cleaned(done: &[Cleaned], freed: u64) {
         if let Some(stays) = clean::stays_text(&c.kept) {
             println!("{INDENT}{}", term::dim(&stays));
         }
+        for k in &c.kept {
+            if let clean::KeptReason::NoBackup(refused) = &k.reason {
+                println!("{INDENT}{}", term::dim(&refused.to_string()));
+            }
+        }
     }
     println!();
     println!("{} freed", util::human_size(freed));
@@ -3113,8 +3250,8 @@ fn resolve_target<'a>(
 /// Programs and Store apps side by side: an exact id (a program's registry
 /// id; an app's family, full or identity name), then an exact name, then a
 /// unique part of a name. A name both kinds answer to equally well is
-/// ambiguous; neither wins. Store apps signed as part of Windows answer only
-/// to their exact id or name.
+/// ambiguous; neither wins. Store apps signed as part of Windows and programs
+/// hidden from the list answer only to their exact id or name.
 pub(crate) fn resolve_any<'a>(
     programs: &'a [Program],
     packages: &'a [Package],
@@ -3158,7 +3295,7 @@ pub(crate) fn resolve_any<'a>(
     let needle = target.to_lowercase();
     let subs: Vec<&Program> = programs
         .iter()
-        .filter(|p| p.display_name.to_lowercase().contains(&needle))
+        .filter(|p| !p.is_system_component && p.display_name.to_lowercase().contains(&needle))
         .collect();
     let sub_apps: Vec<&Package> = packages
         .iter()
@@ -3182,12 +3319,12 @@ fn ambiguous(target: &str, programs: &[&Program], apps: &[&Package]) -> Resolve 
     let n = programs.len() + apps.len();
     let listing = programs
         .iter()
-        .map(|p| format!("  {}  {}", p.display_name, term::dim(p.id())))
+        .map(|p| format!("  {}  {}", p.display_name, term::dim_err(p.id())))
         .chain(apps.iter().map(|a| {
             format!(
                 "  {} (Store app)  {}",
                 a.display_name,
-                term::dim(&a.family_name)
+                term::dim_err(&a.family_name)
             )
         }))
         .take(12)
@@ -3237,6 +3374,35 @@ mod tests {
     use crate::packages::fake::{package, FakePackageStore};
     use crate::safety::ItemOutcome;
     use clap::Parser;
+
+    /// A target by name, not looked up among this machine's programs.
+    fn named(name: &str, publisher: Option<&str>) -> ScanTarget {
+        let none = scanner::Snapshot::with_programs(Vec::new());
+        scanner::name_only_target_with(name, publisher, &none)
+    }
+
+    #[test]
+    fn a_name_too_short_gives_nothing_to_search_by() {
+        for name in ["R", "Go", "7z", "C++"] {
+            let error = refuse_wordless(name, &named(name, None)).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                format!("\"{name}\" has no word to search by, as it is too short; give the name Windows listed it under, or its publisher")
+            );
+        }
+        for name in ["9-Zap", "Knot"] {
+            assert!(refuse_wordless(name, &named(name, None)).is_ok());
+        }
+        let with_publisher = named("Go", Some("Example Studio"));
+        assert!(refuse_wordless("Go", &with_publisher).is_ok());
+    }
+
+    #[test]
+    fn a_name_of_only_common_words_still_scans_by_the_whole_name() {
+        for name in ["Setup", "2024", "Media Player"] {
+            assert!(refuse_wordless(name, &named(name, None)).is_ok());
+        }
+    }
 
     #[test]
     fn the_dead_folder_hint_promises_no_backup_when_backups_are_off() {
@@ -3788,6 +3954,30 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_component_answers_only_to_its_exact_id_or_name() {
+        let mut part = program("Example Suite Runtime", "{RUNTIME-ID}", Some("x.exe"));
+        part.is_system_component = true;
+        let mut programs = installed();
+        programs.push(part);
+        assert!(matches!(
+            resolve_any(&programs, &[], "suite"),
+            Err(Resolve::NotFound)
+        ));
+        // Next to a listed program it does not make the name ambiguous.
+        programs.push(program("Example Suite", "example-suite", Some("y.exe")));
+        assert!(matches!(
+            resolve_any(&programs, &[], "suite"),
+            Ok(Resolved::Program(p)) if p.display_name == "Example Suite"
+        ));
+        for exact in ["example suite runtime", "{RUNTIME-ID}"] {
+            assert!(matches!(
+                resolve_any(&programs, &[], exact),
+                Ok(Resolved::Program(p)) if p.is_system_component
+            ));
+        }
+    }
+
+    #[test]
     fn a_batch_mixes_programs_and_store_apps_in_the_order_given() {
         let programs = installed();
         let apps = store_apps();
@@ -3884,6 +4074,7 @@ mod tests {
             } else {
                 Vec::new()
             },
+            would_end: Vec::new(),
             vendor: complete::VendorStep::Skip {
                 reason: "installed for this user only".to_string(),
             },
@@ -3903,6 +4094,7 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            refused: None,
             seconds: 1.234,
         }
     }
@@ -3946,6 +4138,51 @@ mod tests {
         assert_eq!(j["would_close"][0]["pid"], 100);
         assert!(j.get("nothing_left").is_none());
         assert!(j.get("closed").is_none());
+    }
+
+    #[test]
+    fn a_process_to_be_ended_is_named_in_the_plan_the_dry_run_and_the_result() {
+        let p = program(
+            "Example Player",
+            "example-player",
+            Some(r"C:\x\uninstall.exe"),
+        );
+        let plan = uninstall::plan(&p, true).unwrap();
+        let mut dry = outcome(true);
+        dry.would_end = dry.would_close.clone();
+        let j = complete_json(&p, &plan, &dry, Confidence::High, true);
+        assert_eq!(j["would_end"][0]["pid"], 100);
+        let mut ran = outcome(false);
+        ran.closed[0].how = complete::CloseHow::Ended;
+        ran.closed[0].windowless = true;
+        let j = complete_json(&p, &plan, &ran, Confidence::High, false);
+        assert_eq!(j["closed"][0]["how"], "ended");
+        assert_eq!(j["closed"][0]["windowless"], true);
+        assert!(j.get("would_end").is_none());
+
+        let helper = complete::Running {
+            pid: 100,
+            exe: PathBuf::from(r"D:\Apps\Example Player\helper.exe"),
+        };
+        assert_eq!(
+            ends_in_plan(std::slice::from_ref(&helper)),
+            [r"ends D:\Apps\Example Player\helper.exe, which has no window to be asked through"]
+        );
+        assert!(ends_in_plan(&[]).is_empty());
+
+        let mut target = named("Example Player", Some("Example Studio"));
+        target.install_location = Some(PathBuf::from(r"D:\Apps\Example Player"));
+        target.install_vouched = true;
+        let running = [helper];
+        let mut how = How {
+            silent: false,
+            keep: false,
+            use_uninstaller: false,
+        };
+        assert_eq!(ends_for(&target, &running, &|_| false, &how), running);
+        // Running only the uninstaller ends nothing and names nothing to end.
+        how.keep = true;
+        assert!(ends_for(&target, &running, &|_| false, &how).is_empty());
     }
 
     #[test]
@@ -4770,6 +5007,39 @@ mod tests {
         // otherwise the answer decides
         assert!(restore_goes_ahead(false, false, false, || true));
         assert!(!restore_goes_ahead(false, false, false, || false));
+    }
+
+    #[test]
+    fn a_whole_restore_as_json_lists_the_backup_as_restored_and_emptied() {
+        let root = std::env::temp_dir().join("oxidize_restore_json");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("settings.ini");
+        std::fs::write(&file, vec![b'x'; 65536]).unwrap();
+        let mut session = backup::BackupSession::new("Oxidize Restore Json Test").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        let info = backup::find_backup(&session.name()).unwrap();
+        assert!(info.size_bytes > 65536);
+
+        // A dry run puts nothing back, so the backup is listed as it was.
+        let items = restore::restore(&info, true).unwrap();
+        let j = restore_json(&info, &items, true);
+        assert_eq!(j["backup"]["size_bytes"], info.size_bytes);
+        assert!(j["backup"]["restored"].is_null());
+
+        let items = restore::restore(&info, false).unwrap();
+        let j = restore_json(&info, &items, false);
+        assert_eq!(j["items"][0]["ok"], true);
+        assert!(j["backup"]["restored"].is_string());
+        // Only the manifest is left in it.
+        let manifest = std::fs::metadata(session.root().join(backup::MANIFEST)).unwrap();
+        assert_eq!(j["backup"]["size_bytes"], manifest.len());
+
+        let base = backup::backups_base().unwrap();
+        let _ = std::fs::remove_dir_all(session.root());
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir(&base);
+        let _ = std::fs::remove_dir(base.parent().unwrap());
     }
 
     #[test]

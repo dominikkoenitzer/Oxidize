@@ -194,6 +194,13 @@ impl Snapshot {
         self
     }
 
+    /// Start from the services already read.
+    #[cfg(test)]
+    fn with_services(self, services: Vec<system::ServiceInfo>) -> Self {
+        let _ = self.services.set(services);
+        self
+    }
+
     /// Start from the scheduled tasks already read.
     #[cfg(test)]
     fn with_tasks(self, tasks: Vec<system::TaskInfo>) -> Self {
@@ -294,10 +301,9 @@ pub fn build_target(program: &Program) -> ScanTarget {
     build_target_with(program, &Snapshot::new())
 }
 
-/// `build_target` reading the system through `snap`.
-pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
-    let roots = snap.roots();
-    let install_location = program
+/// The install folder as the program records it, in one form, when it names one.
+pub fn recorded_install_folder(program: &Program) -> Option<PathBuf> {
+    program
         .install_location
         .as_deref()
         .map(util::expand_env_vars)
@@ -316,6 +322,12 @@ pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
         // folder of whatever the current one is; neither says where the
         // program is.
         .filter(|p| p.is_absolute())
+}
+
+/// `build_target` reading the system through `snap`.
+pub fn build_target_with(program: &Program, snap: &Snapshot) -> ScanTarget {
+    let roots = snap.roots();
+    let install_location = recorded_install_folder(program)
         // A program writes its own install location, so a protected one is
         // either a broken installer or a hostile one. Either way nothing may
         // be claimed through it: everything under the folder would count as
@@ -753,8 +765,9 @@ fn name_in_use(target: &ScanTarget, programs: &[Program]) -> bool {
 }
 
 /// The names of the other registered programs whose words, their vendor's
-/// left out, are some but not all of the program's: "Lumen" beside "Lumen
-/// Beta". Each comes sorted and without repeats.
+/// and the program's vendor's left out as `key_names_product` leaves them
+/// out, are some but not all of the program's: "Lumen" or "Brightway Lumen"
+/// beside Brightway's "Lumen Beta". Each comes sorted and without repeats.
 fn shorter_namesakes(target: &ScanTarget, programs: &[Program]) -> Vec<Vec<String>> {
     let own = sorted_words(&target.name_tokens);
     let mut found: Vec<Vec<String>> = programs
@@ -771,7 +784,11 @@ fn shorter_namesakes(target: &ScanTarget, programs: &[Program]) -> Vec<Vec<Strin
                 .as_deref()
                 .map(significant_tokens)
                 .unwrap_or_default();
-            sorted_words(&product_tokens(&p.display_name, &vendor))
+            let words: Vec<String> = product_tokens(&p.display_name, &vendor)
+                .into_iter()
+                .filter(|w| !target.publisher_tokens.contains(w))
+                .collect();
+            sorted_words(&words)
         })
         .filter(|w| !w.is_empty() && w.len() < own.len() && w.iter().all(|t| own.contains(t)))
         .collect();
@@ -802,7 +819,7 @@ fn shared_install_folder(
     let key = norm_path_key(loc);
     if other_installs
         .iter()
-        .any(|o| dir_contains(&key, &norm_path_key(o)))
+        .any(|o| holds_install(&key, &norm_path_key(o)))
     {
         return true;
     }
@@ -985,13 +1002,7 @@ pub fn publisher_hint(name: &str) -> Option<(String, PublisherSource)> {
 /// `name_only_target` for a program that is gone, with the publisher from
 /// `publisher_hint` when none is given.
 pub fn removed_program_target(name: &str, publisher: Option<&str>) -> ScanTarget {
-    match publisher {
-        Some(p) => name_only_target(name, Some(p)),
-        None => match publisher_hint(name) {
-            Some((p, _)) => name_only_target(name, Some(&p)),
-            None => name_only_target(name, None),
-        },
-    }
+    removed_program_target_with(name, publisher, &Snapshot::new())
 }
 
 /// `name_only_target` reading the installed programs through `snap`.
@@ -1014,6 +1025,21 @@ pub fn name_only_target_with(name: &str, publisher: Option<&str>, snap: &Snapsho
     };
     target.shorter_namesakes = shorter_namesakes(&target, snap.programs());
     target
+}
+
+/// `removed_program_target` reading the installed programs through `snap`.
+pub fn removed_program_target_with(
+    name: &str,
+    publisher: Option<&str>,
+    snap: &Snapshot,
+) -> ScanTarget {
+    match publisher {
+        Some(p) => name_only_target_with(name, Some(p), snap),
+        None => match publisher_hint(name) {
+            Some((p, _)) => name_only_target_with(name, Some(&p), snap),
+            None => name_only_target_with(name, None, snap),
+        },
+    }
 }
 
 /// Identity from a display name and publisher.
@@ -1584,6 +1610,11 @@ fn dir_contains(dir: &str, other: &str) -> bool {
     other.len() > dir.len() && other.starts_with(&format!("{dir}\\"))
 }
 
+/// Does another program live in the folder, inside it or recorded as the folder itself?
+fn holds_install(dir: &str, install: &str) -> bool {
+    dir == install || dir_contains(dir, install)
+}
+
 /// Install folders of every other program, so a shared parent folder is never
 /// proposed for deletion.
 fn other_program_install_dirs(
@@ -1960,7 +1991,7 @@ fn scan_dir_children(
                 .unwrap_or(false);
             let houses_other = other_installs
                 .iter()
-                .any(|o| dir_contains(&key, &norm_path_key(o)));
+                .any(|o| holds_install(&key, &norm_path_key(o)));
             // Reading the folder is only worth it where its name counts.
             let family = std::cell::OnceCell::new();
             let family =
@@ -1995,7 +2026,7 @@ fn scan_dir_children(
                 // recorded install folder, is listed on its own. A family
                 // folder is shared the same way.
                 continue;
-            } else if let Some((conf, reason)) = score_product(&name, target) {
+            } else if let Some((conf, reason)) = score_unclaimed(&name, target) {
                 if !family(&path) {
                     push_dir_leftover(out, path, conf, reason, roots);
                 }
@@ -2006,7 +2037,7 @@ fn scan_dir_children(
                 .file_stem()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or(name.clone());
-            if let Some((conf, reason)) = score_product(&stem, target) {
+            if let Some((conf, reason)) = score_unclaimed(&stem, target) {
                 let size = entry.metadata().map(|m| m.len()).ok();
                 out.push(Leftover::fs(
                     LeftoverKind::File,
@@ -2145,7 +2176,7 @@ fn scan_filesystem(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
             let loc_key = norm_path_key(loc);
             let houses_other = other_installs
                 .iter()
-                .any(|other| dir_contains(&loc_key, &norm_path_key(other)));
+                .any(|other| holds_install(&loc_key, &norm_path_key(other)));
             // A folder named exactly like the product is the product's own,
             // even if the publisher name contains that word.
             let vendor_root = matches_publisher(leaf, target) && !is_exact_product(leaf, target);
@@ -2339,28 +2370,31 @@ fn scan_software_root(
 /// Why a key named `name` is the program's: it carries the program's name
 /// and nothing else, give or take the noise, or a name the folders of its
 /// install path carry. A longer name made of it and other words, such as a
-/// test build's, is another product's. So is a shorter name made of some of
-/// its words while another installed program carries exactly those words: a
-/// Beta's scan leaves the stable build's "Lumen" alone.
+/// test build's, is another product's. So is a name a shorter installed
+/// namesake carries (see `score_unclaimed`).
 fn key_names_product(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
-    let hit = score_product(name, target)?;
+    let hit = score_unclaimed(name, target)?;
     if is_exact_product(name, target) {
         return Some(hit);
-    }
-    if !target.shorter_namesakes.is_empty() {
-        let words: Vec<String> = significant_tokens(name)
-            .into_iter()
-            .filter(|w| !target.publisher_tokens.contains(w))
-            .collect();
-        if target.shorter_namesakes.contains(&sorted_words(&words)) {
-            return None;
-        }
     }
     let own = own_name_words(target);
     significant_tokens(name)
         .iter()
         .all(|w| own.contains(w))
         .then_some(hit)
+}
+
+/// `score_product`, refusing a shorter installed namesake's name unless it is the program's exact name.
+fn score_unclaimed(name: &str, target: &ScanTarget) -> Option<(Confidence, String)> {
+    let hit = score_product(name, target)?;
+    if target.shorter_namesakes.is_empty() || is_exact_product(name, target) {
+        return Some(hit);
+    }
+    let words: Vec<String> = significant_tokens(name)
+        .into_iter()
+        .filter(|w| !target.publisher_tokens.contains(w))
+        .collect();
+    (!target.shorter_namesakes.contains(&sorted_words(&words))).then_some(hit)
 }
 
 /// The words of the program's own names: its name, its vendor's, and those
@@ -2947,11 +2981,17 @@ fn scan_system(target: &ScanTarget, snap: &Snapshot) -> Vec<Leftover> {
 /// Drop repeats. Paths compare normalised, so an install folder recorded with
 /// a trailing separator is the entry the walk already found, and of two
 /// findings for one path the more confident one stays whichever came first.
+/// A firewall rule is its own value, so rules that read alike all stay.
 fn dedupe_by_path(items: &mut Vec<Leftover>) {
     let mut best: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut drop = vec![false; items.len()];
     for i in 0..items.len() {
-        let key = norm_path_str(&items[i].path);
+        let key = match (&items[i].kind, &items[i].value_name) {
+            (LeftoverKind::FirewallRule, Some(id)) => {
+                format!("firewall rule {}", id.to_lowercase())
+            }
+            _ => norm_path_str(&items[i].path),
+        };
         match best.get(&key) {
             Some(&j) if items[j].confidence <= items[i].confidence => drop[i] = true,
             Some(&j) => {
@@ -3119,6 +3159,48 @@ mod tests {
             Some(PathBuf::from(r"C:\Users\me"))
         );
         assert_eq!(env_dir("OXIDIZE_ENV_DIR_UNSET"), None);
+    }
+
+    #[test]
+    fn firewall_rules_that_read_alike_stay_apart() {
+        let rule = |id: &str| {
+            Leftover::firewall_rule(
+                id,
+                "Quillmark",
+                "in tcp",
+                r"C:\Program Files\Quillmark\quill.exe",
+                Confidence::High,
+                "program",
+            )
+        };
+        let mut items = vec![rule("{A}"), rule("{B}"), rule("{A}")];
+        dedupe_by_path(&mut items);
+        let ids: Vec<_> = items
+            .iter()
+            .filter_map(|l| l.value_name.as_deref())
+            .collect();
+        assert_eq!(ids, ["{A}", "{B}"]);
+    }
+
+    #[test]
+    fn a_folder_found_twice_is_one_item_the_more_confident_one() {
+        let dir = |path: &str, confidence| {
+            Leftover::fs(
+                LeftoverKind::Directory,
+                PathBuf::from(path),
+                confidence,
+                "folder",
+                None,
+                false,
+            )
+        };
+        let mut items = vec![
+            dir(r"C:\Program Files\Quillmark\", Confidence::Medium),
+            dir(r"C:\Program Files\Quillmark", Confidence::High),
+        ];
+        dedupe_by_path(&mut items);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].confidence, Confidence::High);
     }
 
     fn target() -> ScanTarget {
@@ -3596,18 +3678,90 @@ mod tests {
         assert!(!holds_namesake_child(&root.join("Knot"), &knot));
     }
 
+    /// The machine-wide roots of a standard Windows install, not those of
+    /// the machine running the tests.
+    fn standard_roots() -> Vec<PathBuf> {
+        [
+            r"C:\Program Files",
+            r"C:\Program Files (x86)",
+            r"C:\ProgramData",
+        ]
+        .map(PathBuf::from)
+        .to_vec()
+    }
+
+    /// What a target reads from the system, with `programs` installed and
+    /// no Store app, service or scheduled task.
+    fn installed(programs: Vec<Program>) -> Snapshot {
+        Snapshot::with_programs(programs)
+            .with_store_apps(Vec::new())
+            .with_services(Vec::new())
+            .with_tasks(Vec::new())
+            .with_roots(standard_roots())
+    }
+
+    /// A target by name, with no program installed.
+    fn named(name: &str, publisher: Option<&str>) -> ScanTarget {
+        name_only_target_with(name, publisher, &installed(Vec::new()))
+    }
+
+    /// The target of `program`, the one program installed.
+    fn built(program: &Program) -> ScanTarget {
+        build_target_with(program, &installed(vec![program.clone()]))
+    }
+
     #[test]
     fn name_only_target_guesses_the_vendor() {
-        let t = name_only_target("Corvane Glide", None);
+        let t = named("Corvane Glide", None);
         assert_eq!(t.name_tokens, vec!["glide".to_string()]);
         assert!(matches_publisher("Corvane", &t));
         assert!(matches!(
             score_product("Glide", &t),
             Some((Confidence::High, _))
         ));
-        let t = name_only_target("Ludra", None);
+        let t = named("Ludra", None);
         assert_eq!(t.name_tokens, vec!["ludra".to_string()]);
         assert!(t.publisher.is_none());
+    }
+
+    #[test]
+    fn a_removed_program_takes_its_publisher_from_the_backup_of_its_removal() {
+        let root = std::env::temp_dir().join("oxidize_publisher_hint");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let file = root.join("settings.ini");
+        fs::write(&file, b"x").unwrap();
+        let mut session = crate::backup::BackupSession::new("Penwright").unwrap();
+        session.quarantine(LeftoverKind::File, &file).unwrap();
+        let registry = session.root().join("registry");
+        fs::create_dir_all(&registry).unwrap();
+        let text = "Windows Registry Editor Version 5.00\r\n\r\n\
+            [HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\Penwright]\r\n\
+            \"DisplayName\"=\"Penwright\"\r\n\
+            \"Publisher\"=\"Inkhorn Software\"\r\n\r\n";
+        let mut bytes = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        fs::write(registry.join("uninstall.reg"), bytes).unwrap();
+
+        // Found in the backup, so the names Windows cached are never read.
+        assert_eq!(
+            crate::backup::recorded_publisher("Penwright").as_deref(),
+            Some("Inkhorn Software")
+        );
+        let none = installed(Vec::new());
+        let t = removed_program_target_with("Penwright", None, &none);
+        assert_eq!(t.publisher.as_deref(), Some("Inkhorn Software"));
+        // A publisher the user names comes first.
+        let t = removed_program_target_with("Penwright", Some("Someone Else"), &none);
+        assert_eq!(t.publisher.as_deref(), Some("Someone Else"));
+
+        let base = crate::backup::backups_base().unwrap();
+        let _ = fs::remove_dir_all(session.root());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir(&base);
+        let _ = fs::remove_dir(base.parent().unwrap());
     }
 
     #[test]
@@ -3743,6 +3897,37 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_another_program_records_as_its_own_is_left_alone() {
+        let root = crate::backup::TestDir::new("oxidize_same_folder_test");
+        let host = root.join("Example Editor");
+        fs::create_dir_all(host.join("bin")).unwrap();
+        let mut host_entry = listed("Example Editor", "example-editor", Some("Example Corp"));
+        host_entry.install_location = Some(host.display().to_string());
+        let mut addon = name_target("Example Editor Language Pack", Some("Example Corp"));
+        addon.registry = Some((
+            "example-editor-language-pack".to_string(),
+            RegistrySource::new(Hive::CurrentUser, RegistryView::Native64),
+        ));
+        let others = std::slice::from_ref(&host);
+
+        // The add-on records its host's folder: that folder is not its own.
+        assert!(shared_install_folder(&host, &addon, others, &[]));
+
+        // Nor is it taken by name from the folder it sits in.
+        let editor = name_target("Example Editor", Some("Example Corp"));
+        let mut out = Vec::new();
+        scan_dir_children(&root, &editor, others, false, &[], &mut out);
+        assert!(out.is_empty(), "{out:?}");
+
+        // Nor as the recorded install folder.
+        addon.install_location = Some(host.clone());
+        let snap = Snapshot::with_programs(vec![host_entry]);
+        let _ = snap.roots.set(Vec::new());
+        let out = scan_filesystem(&addon, &snap);
+        assert!(out.iter().all(|l| Path::new(&l.path) != host), "{out:?}");
+    }
+
+    #[test]
     fn an_install_folder_is_not_matched_by_its_own_name() {
         let program = |install: &str| Program {
             registry_key: "Foo Editor".to_string(),
@@ -3761,10 +3946,10 @@ mod tests {
             is_system_component: false,
         };
         // A general folder recorded as the install location stays Medium.
-        let t = build_target(&program(r"D:\Games"));
+        let t = built(&program(r"D:\Games"));
         assert_eq!(install_folder_score("Games", &t).0, Confidence::Medium);
         // A folder that names the product is still the product's.
-        let t = build_target(&program(r"D:\Apps\Foo Editor"));
+        let t = built(&program(r"D:\Apps\Foo Editor"));
         assert_eq!(install_folder_score("Foo Editor", &t).0, Confidence::High);
     }
 
@@ -3798,12 +3983,14 @@ mod tests {
         // its firewall rules stay Ludra's.
         let ludra = r"C:\Program Files (x86)\Ludra\ludra.exe";
         let game_dir = r"C:\Program Files (x86)\Ludra\ludraapps\common\backdrop_engine";
-        let game = build_target(&registered(
+        let game = registered(
             "Backdrop Engine",
             Some(game_dir),
             Some(r"C:\Program Files (x86)\Ludra\ludra\games\5b3bd0d9e5800b93.ico"),
             Some(&format!("\"{ludra}\" ludra://uninstall/431960")),
-        ));
+        );
+        // Not this machine's programs: a real install of the game records the same folder.
+        let game = built(&game);
         assert!(game.exe_names.is_empty(), "{:?}", game.exe_names);
         assert!(match_run_value("Ludra", &format!("\"{ludra}\" -silent"), &game).is_none());
         for rule in ["Ludra", "Ludra Web Helper"] {
@@ -3827,11 +4014,11 @@ mod tests {
             r#""C:\Windows\System32\cmd.exe" /c "C:\Program Files\Foo Editor\remove.cmd""#,
             r#""C:\Program Files\PowerShell\7\pwsh.exe" -File "C:\ProgramData\Foo\remove.ps1""#,
         ] {
-            let t = build_target(&registered("Foo Editor", None, None, Some(uninstall)));
+            let t = built(&registered("Foo Editor", None, None, Some(uninstall)));
             assert!(t.exe_names.is_empty(), "{uninstall}: {:?}", t.exe_names);
         }
         // With one, nothing outside it.
-        let t = build_target(&registered(
+        let t = built(&registered(
             "Foo Editor",
             Some(r"C:\Program Files\Foo Editor"),
             Some(r"C:\Program Files\Foo Editor\foo.exe,0"),
@@ -3847,7 +4034,7 @@ mod tests {
         let icon = Some(r"C:\Program Files\Foo Editor\foo.exe,0");
         let uninstall = Some(r#""C:\Program Files\Foo Editor\uninst.exe" /S"#);
         // In the recorded install folder.
-        let t = build_target(&registered(
+        let t = built(&registered(
             "Foo Editor",
             Some(r"C:\Program Files\Foo Editor"),
             icon,
@@ -3855,10 +4042,10 @@ mod tests {
         ));
         assert_eq!(t.exe_names, ["foo.exe", "uninst.exe"]);
         // Without one, next to the program's own uninstaller.
-        let t = build_target(&registered("Foo Editor", None, icon, uninstall));
+        let t = built(&registered("Foo Editor", None, icon, uninstall));
         assert_eq!(t.exe_names, ["foo.exe", "uninst.exe"]);
         // An MSI product uninstalls through msiexec; its icon still counts.
-        let t = build_target(&registered(
+        let t = built(&registered(
             "Foo Editor",
             None,
             icon,
@@ -3897,7 +4084,7 @@ mod tests {
                 dsa.join("XSAUpdateService.exe"),
             ),
         ];
-        let snap = Snapshot::new();
+        let snap = installed(vec![radio.clone()]);
         let t = build_target_from(&radio, Some(intel.clone()), &[], &runs, &snap);
         assert!(t.install_location.is_none(), "{:?}", t.install_location);
         for (names, exe) in &runs {
@@ -3939,7 +4126,8 @@ mod tests {
             ),
             (vec!["FooSvc".to_string()], dir.join("foosvc.exe")),
         ];
-        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs, &Snapshot::new());
+        let snap = installed(vec![foo.clone()]);
+        let t = build_target_from(&foo, Some(dir.clone()), &[], &runs, &snap);
         assert_eq!(t.install_location.as_deref(), Some(dir.as_path()));
         assert_eq!(t.exe_names, ["foo.exe"]);
         for (names, exe) in &runs {
@@ -4026,7 +4214,7 @@ mod tests {
 
     #[test]
     fn a_bare_program_name_is_never_a_missing_file() {
-        let pwsh = build_target(&registered(
+        let pwsh = built(&registered(
             "PowerShell 7-x64",
             Some(r"C:\Program Files\PowerShell\7"),
             Some(r"C:\Program Files\PowerShell\7\pwsh.exe"),
@@ -4093,7 +4281,7 @@ mod tests {
             None,
         );
         velapp.publisher = Some("Velloran Corporation".to_string());
-        let velapp = build_target(&velapp);
+        let velapp = built(&velapp);
         assert!(velapp.name_tokens.len() > 1, "{:?}", velapp.name_tokens);
         assert!(score_product("Velloran App SelfUpdate_", &velapp).is_some());
 
@@ -4975,6 +5163,145 @@ mod tests {
         assert!(key_names_product("Lumen Beta", &t).is_some());
     }
 
+    fn lumen_root(name: &str) -> crate::backup::TestDir {
+        let root = crate::backup::TestDir::new(name);
+        for dir in ["Lumen", "Brightway Lumen", "Lumen Beta"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        fs::write(root.join("Lumen.lnk"), b"").unwrap();
+        root
+    }
+
+    fn found_names(out: &[Leftover]) -> Vec<String> {
+        let mut names: Vec<String> = out
+            .iter()
+            .map(|l| {
+                Path::new(&l.path)
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_channel_build_leaves_the_stable_builds_folders_and_shortcut_in_a_root() {
+        let root = lumen_root("oxidize_root_namesake_test");
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        let programs = [
+            listed("Lumen Beta", "lumen-beta", Some("Brightway LLC")),
+            listed("Lumen", "lumen", Some("Brightway LLC")),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+        assert_eq!(t.shorter_namesakes, vec![vec!["lumen".to_string()]]);
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(found_names(&out), ["Lumen Beta"]);
+    }
+
+    #[test]
+    fn a_program_installed_alone_keeps_its_shorter_folders_and_shortcut_in_a_root() {
+        let root = lumen_root("oxidize_root_alone_test");
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        assert!(t.shorter_namesakes.is_empty());
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(
+            found_names(&out),
+            ["Brightway Lumen", "Lumen", "Lumen Beta", "Lumen.lnk"]
+        );
+    }
+
+    #[test]
+    fn a_stable_build_named_with_its_vendor_keeps_its_folder_and_key() {
+        // The stable build has no publisher and carries the vendor's word in its name.
+        let root = crate::backup::TestDir::new("oxidize_vendor_namesake_test");
+        for dir in [
+            r"Brightway\Brightway Lumen\User Data",
+            r"Brightway\Lumen Beta\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        t.install_location = Some(program_files().join(r"Brightway\Lumen Beta\Application"));
+        let stable = program_files().join(r"Brightway\Lumen\Application");
+        let programs = [
+            listed("Lumen Beta", "lumen-beta", Some("Brightway LLC")),
+            listed("Brightway Lumen", "lumen", None),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[stable], false, &fs_roots(), &mut out);
+        let found: Vec<&str> = out.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            found,
+            [root.join(r"Brightway\Lumen Beta").display().to_string()]
+        );
+        assert_eq!(t.shorter_namesakes, vec![vec!["lumen".to_string()]]);
+        assert!(key_names_product("Brightway Lumen", &t).is_none());
+        assert!(key_names_product("Lumen", &t).is_none());
+        assert!(key_names_product("Lumen Beta", &t).is_some());
+        assert!(key_names_product("Brightway Lumen Beta", &t).is_some());
+    }
+
+    #[test]
+    fn programs_named_with_the_vendor_that_are_no_shorter_namesake_leave_the_key() {
+        let mut t = name_target("Lumen Beta", Some("Brightway LLC"));
+        let programs = [
+            listed("Brightway Lumen Beta", "lumen-beta-user", None),
+            listed("Brightway Lumen Studio", "lumen-studio", None),
+        ];
+        t.shorter_namesakes = shorter_namesakes(&t, &programs);
+        assert!(t.shorter_namesakes.is_empty());
+        for name in ["Lumen", "Lumen Beta", "Brightway Lumen Beta"] {
+            assert!(key_names_product(name, &t).is_some(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_store_channel_build_leaves_the_stable_builds_folder_in_the_vendor_folder() {
+        let root = crate::backup::TestDir::new("oxidize_store_namesake_test");
+        for dir in [
+            r"Brightway\Lumen\User Data",
+            r"Brightway\Lumen Beta\User Data",
+        ] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let mut app = crate::packages::fake::package("Brightway.LumenBeta", "Lumen Beta");
+        app.publisher = Some("Brightway LLC".to_string());
+        let stable = program_files().join(r"Brightway\Lumen\Application");
+        let report = crate::commands::store_app_leftovers(&app, None, |t| {
+            let mut out = Vec::new();
+            scan_dir_children(
+                &root,
+                t,
+                std::slice::from_ref(&stable),
+                false,
+                &fs_roots(),
+                &mut out,
+            );
+            out
+        });
+        let found: Vec<&str> = report.items.iter().map(|l| l.path.as_str()).collect();
+        assert_eq!(
+            found,
+            [root.join(r"Brightway\Lumen Beta").display().to_string()]
+        );
+
+        let t = crate::packages::scan_target(&app);
+        for name in ["Lumen", "Brightway Lumen"] {
+            assert!(key_names_product(name, &t).is_none(), "{name}");
+        }
+    }
+
     #[test]
     fn a_target_learns_the_installed_programs_named_with_part_of_its_name() {
         let beta = listed("Lumen Beta", "lumen-beta", Some("Brightway LLC"));
@@ -5143,7 +5470,7 @@ mod tests {
         );
 
         // The same for a scan by the word alone.
-        let word = name_only_target("brightway", None);
+        let word = named("brightway", None);
         let mut out = Vec::new();
         scan_dir_children(&root, &word, &[], false, &fs_roots(), &mut out);
         assert!(out
@@ -5318,7 +5645,7 @@ mod tests {
 
         // A folder with a longer namesake stays when another program carries
         // the name.
-        let word = name_only_target("brightway", None);
+        let word = named("brightway", None);
         assert!(name_in_use(&word, &[studio]));
     }
 
@@ -5335,7 +5662,7 @@ mod tests {
         ] {
             let mut p = player();
             p.install_location = Some(recorded.to_string());
-            let t = build_target_with(&p, &Snapshot::with_programs(vec![p.clone()]));
+            let t = built(&p);
             assert!(
                 t.install_location.is_none(),
                 "{recorded}: {:?}",
@@ -5344,7 +5671,7 @@ mod tests {
         }
         let mut p = player();
         p.install_location = Some(r#""D:\Games\Example Player\""#.to_string());
-        let t = build_target_with(&p, &Snapshot::with_programs(vec![p.clone()]));
+        let t = built(&p);
         assert_eq!(
             t.install_location.as_deref(),
             Some(Path::new(r"D:\Games\Example Player"))

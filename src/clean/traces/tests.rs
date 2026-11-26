@@ -20,6 +20,9 @@ struct FakeShell {
     clipboard: Mutex<ClipboardState>,
     recent_dir: Option<PathBuf>,
     fail: bool,
+    /// Also delete what Windows deletes: every recent item and every list
+    /// without pins, whatever the protected list says.
+    whole: Option<PathBuf>,
 }
 
 impl FakeShell {
@@ -29,6 +32,14 @@ impl FakeShell {
             clipboard: Mutex::new(clipboard),
             recent_dir: places.automatic(),
             fail: false,
+            whole: None,
+        }
+    }
+
+    fn like_windows(places: &TracePlaces) -> Self {
+        FakeShell {
+            whole: places.recent.clone(),
+            ..FakeShell::new(places, ClipboardState::Off)
         }
     }
 
@@ -37,19 +48,31 @@ impl FakeShell {
     }
 }
 
+/// Windows refusing a call, as an io error inside the context around it.
+fn refusal(code: i32, doing: &'static str) -> anyhow::Error {
+    anyhow::Error::from(io::Error::from_raw_os_error(code)).context(doing)
+}
+
 impl Shell for FakeShell {
     fn clear_recent(&self) -> Result<()> {
         self.calls.lock().unwrap().push("clear_recent");
         if self.fail {
-            anyhow::bail!("refused");
+            return Err(refusal(2, "clearing the recent items"));
         }
         let Some(dir) = &self.recent_dir else {
             return Ok(());
         };
+        if let Some(recent) = &self.whole {
+            for (path, _) in recent_files(recent) {
+                fs::remove_file(&path).unwrap();
+            }
+        }
         for (path, _) in files_in(dir, |n| n.ends_with(".automaticdestinations-ms")) {
             if let Ok(d) = jumplist::read(&path) {
                 if d.pinned > 0 {
                     fs::write(&path, jump_list(d.pinned, d.pinned)).unwrap();
+                } else if self.whole.is_some() {
+                    fs::remove_file(&path).unwrap();
                 }
             }
         }
@@ -69,7 +92,7 @@ impl Shell for FakeShell {
     fn purge_thumbnails(&self, dir: &Path) -> Result<()> {
         self.calls.lock().unwrap().push("purge_thumbnails");
         if self.fail {
-            anyhow::bail!("refused");
+            return Err(refusal(145, "emptying the thumbnail cache"));
         }
         for (path, _) in thumbnail_files(dir) {
             fs::write(&path, [0u8; 24]).unwrap();
@@ -381,6 +404,59 @@ fn a_protected_folder_keeps_its_traces() {
 }
 
 #[test]
+fn windows_never_clears_what_the_protected_list_keeps() {
+    let lists = r"AutomaticDestinations\a1.automaticDestinations-ms";
+    for (name, keep) in [
+        ("keep_item", "Notes.lnk"),
+        ("keep_list", lists),
+        ("keep_folder", ""),
+    ] {
+        let p = Profile::used(name);
+        let shell = FakeShell::like_windows(&p.places);
+        let kept = if keep.is_empty() {
+            p.recent()
+        } else {
+            p.recent().join(keep)
+        };
+        let protected = Protected::new([kept.display().to_string()]);
+        clear(&p.places, &protected, &shell);
+        assert!(kept.exists(), "{name}");
+        assert!(!shell.calls().contains(&"clear_recent"), "{name}");
+        // What the list does not cover still goes, file by file.
+        if !keep.is_empty() {
+            assert!(!p.recent().join("shot-1.png.lnk").exists(), "{name}");
+        }
+    }
+}
+
+#[test]
+fn with_nothing_protected_windows_clears_first() {
+    let p = Profile::used("whole");
+    let shell = FakeShell::like_windows(&p.places);
+    let done = clear(&p.places, &Protected::default(), &shell);
+    assert_eq!(
+        shell.calls(),
+        ["clear_recent", "purge_thumbnails", "refresh"]
+    );
+    assert!(!p.recent().join("Notes.lnk").exists());
+    let auto = p.recent().join("AutomaticDestinations");
+    assert!(!auto.join("a1.automaticDestinations-ms").exists());
+    let pinned = jumplist::read(&auto.join("b2.automaticDestinations-ms")).unwrap();
+    assert_eq!((pinned.entries, pinned.pinned), (2, 2));
+    assert!(done.iter().all(|f| !f.failed()), "{done:#?}");
+}
+
+#[test]
+fn a_kept_windows_clear_does_not_promise_the_items_of_pinned_lists() {
+    let p = Profile::used("promise");
+    let shell = FakeShell::new(&p.places, ClipboardState::Off);
+    let protected = Protected::new([p.recent().join("Notes.lnk").display().to_string()]);
+    let a = analyse(&p.places, &protected, &shell);
+    // Only the unpinned list's five go; the pinned list keeps all of its own.
+    assert_eq!(find(&a, Trace::JumpLists).notes, ["5 recent items"]);
+}
+
+#[test]
 fn a_list_held_open_stays_and_says_why() {
     use std::os::windows::fs::OpenOptionsExt;
     let p = Profile::used("held");
@@ -523,4 +599,63 @@ fn a_file_explorer_took_first_is_not_a_failure() {
     // Anything else is still an error.
     fs::create_dir_all(dir.join("a folder")).unwrap();
     assert!(remove_if_there(&dir.join("a folder")).is_err());
+}
+
+/// Windows' words for `code`, without the number, the chain or a final full stop.
+fn assert_plain(text: &str, code: i32) {
+    let words = io::Error::from_raw_os_error(code).to_string();
+    assert!(!text.is_empty());
+    assert!(!text.contains("os error"), "{text}");
+    assert!(!text.ends_with('.'), "{text}");
+    assert!(
+        words.starts_with(text),
+        "{text} is not the start of {words}"
+    );
+}
+
+#[test]
+fn a_failed_trace_keeps_the_words_of_windows_without_the_number() {
+    for code in [2, 145] {
+        match reason_of(&io::Error::from_raw_os_error(code)) {
+            KeptReason::Failed(text) => assert_plain(&text, code),
+            other => panic!("{code} became {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn a_failed_windows_call_reads_without_its_code() {
+    use windows::core::HRESULT;
+    let refused = windows::core::Error::from_hresult(HRESULT(0x8007_0005_u32 as i32));
+    let words = refused.message();
+    let e = anyhow::Error::from(refused).context("emptying the thumbnail cache");
+    let text = plain_reason(e.as_ref());
+    assert!(!text.contains("0x"), "{text}");
+    assert!(!text.ends_with('.'), "{text}");
+    assert!(
+        !text.is_empty() && words.starts_with(&text),
+        "{text} is not the start of {words}"
+    );
+}
+
+#[test]
+fn a_refusal_from_windows_reads_without_the_chain() {
+    let p = Profile::used("refused_words");
+    let mut shell = FakeShell::new(&p.places, ClipboardState::Absent);
+    shell.fail = true;
+    let done = clear(&p.places, &Protected::default(), &shell);
+    for (trace, code) in [(Trace::JumpLists, 2), (Trace::Thumbnails, 145)] {
+        let texts: Vec<&String> = find(&done, trace)
+            .kept
+            .iter()
+            .filter_map(|k| match &k.reason {
+                KeptReason::Failed(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(!texts.is_empty(), "{trace:?}");
+        for text in texts {
+            assert_plain(text, code);
+        }
+    }
 }

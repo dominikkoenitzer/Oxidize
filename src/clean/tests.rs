@@ -1,6 +1,7 @@
 //! The analysis and the cleaning end to end, on folders the tests make.
 
 use std::fs;
+use std::io;
 use std::sync::Mutex;
 
 use super::files::tests::{age, file_aged, fixture};
@@ -31,6 +32,8 @@ struct FakeTools {
     /// A path whose presence is noted each time git is asked.
     watched: Mutex<Option<PathBuf>>,
     seen: Mutex<Vec<bool>>,
+    /// Each tool fails as one that cannot be started.
+    broken: Mutex<bool>,
 }
 
 impl FakeTools {
@@ -40,11 +43,19 @@ impl FakeTools {
     fn call(&self, name: &'static str) {
         self.calls.lock().unwrap().push(name);
     }
+    fn start(&self) -> anyhow::Result<()> {
+        if *self.broken.lock().unwrap() {
+            let missing = io::Error::from_raw_os_error(2);
+            return Err(anyhow::Error::from(missing).context("starting dism.exe"));
+        }
+        Ok(())
+    }
 }
 
 impl Tools for FakeTools {
     fn component_store(&self) -> anyhow::Result<StoreReport> {
         self.call("component_store");
+        self.start()?;
         Ok(StoreReport {
             reclaimable_packages: Some(2),
             cleanup_recommended: Some(true),
@@ -53,10 +64,12 @@ impl Tools for FakeTools {
     }
     fn component_cleanup(&self) -> anyhow::Result<()> {
         self.call("component_cleanup");
+        self.start()?;
         Ok(())
     }
     fn delivery_cache(&self) -> anyhow::Result<(usize, u64)> {
         self.call("delivery_cache");
+        self.start()?;
         if *self.delivery_unreadable_after.lock().unwrap()
             && self.calls().contains(&"delete_delivery_cache")
         {
@@ -66,11 +79,13 @@ impl Tools for FakeTools {
     }
     fn delete_delivery_cache(&self) -> anyhow::Result<()> {
         self.call("delete_delivery_cache");
+        self.start()?;
         *self.delivery.lock().unwrap() = *self.delivery_left.lock().unwrap();
         Ok(())
     }
     fn remove_windows_old(&self) -> anyhow::Result<()> {
         self.call("remove_windows_old");
+        self.start()?;
         if let Some(dir) = self.windows_old.lock().unwrap().as_ref() {
             fs::remove_dir_all(dir).unwrap();
         }
@@ -1265,6 +1280,43 @@ fn a_folder_that_came_alive_since_the_analysis_goes_into_the_backup() {
 }
 
 #[test]
+fn folders_that_cannot_be_backed_up_stay_and_say_so_without_a_flag() {
+    let pc = Pc::new("orphans_backup_refused");
+    let tools = FakeTools::default();
+    let (quill, ink, a) = two_removed_programs(&pc, &tools, true);
+    // A file stands where this test's backups folder belongs.
+    let backups = crate::backup::backups_base().unwrap();
+    let run = backups.parent().unwrap().to_path_buf();
+    let _cleanup = crate::backup::TestCleanup(vec![run.clone()]);
+    fs::create_dir_all(&run).unwrap();
+    fs::write(&backups, "x").unwrap();
+
+    let choice = a.choice(&[Category::Orphans], Confidence::High);
+    let done = clean_with(&pc, &a, &choice, &Protected::default(), false, &tools);
+    let o = &done[0];
+    assert_eq!(o.removed, 0);
+    assert!(quill.path.exists() && ink.path.exists());
+    assert!(o.failed());
+    let [k] = &o.kept[..] else {
+        panic!("{:?}", o.kept);
+    };
+    assert!(matches!(k.reason, KeptReason::NoBackup(_)), "{k:?}");
+    assert_eq!((k.count, k.reason.code()), (2, "failed"));
+    let stays = stays_text(&o.kept).unwrap();
+    assert!(stays.contains("not deleted without a backup"), "{stays}");
+    for term in ["--", "os error", "refusing"] {
+        assert!(!stays.contains(term), "{term} in {stays}");
+    }
+    // The command line's JSON keeps the flag that gets past it.
+    let json = serde_json::to_value(k).unwrap();
+    let reason = json["reason"].as_str().unwrap();
+    assert!(
+        reason.ends_with("Leave out --backup to delete anyway."),
+        "{reason}"
+    );
+}
+
+#[test]
 fn a_plain_analysis_does_not_look_for_build_output_or_prove_folders_dead() {
     use super::build::tests::cache;
     let pc = Pc::new("plain_analysis");
@@ -1704,5 +1756,49 @@ fn build_output_a_program_runs_from_or_holds_open_stays_whole() {
             "{}",
             dir.display()
         );
+    }
+}
+
+#[test]
+fn a_windows_tool_that_fails_reads_as_the_words_of_windows() {
+    let words = io::Error::from_raw_os_error(2).to_string();
+    let plain = |kept: &[Kept], what: &str| {
+        let texts: Vec<&String> = kept
+            .iter()
+            .filter_map(|k| match &k.reason {
+                KeptReason::Failed(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.len(), 1, "{what}: {kept:?}");
+        let text = texts[0];
+        assert!(!text.contains("os error"), "{what}: {text}");
+        assert!(!text.ends_with('.'), "{what}: {text}");
+        assert!(words.starts_with(text.as_str()), "{what}: {text}");
+    };
+    let pc = Pc::new("tools_fail");
+    let tools = FakeTools::default();
+    *tools.broken.lock().unwrap() = true;
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    let all = [Category::ComponentStore, Category::DeliveryOptimization];
+    for c in all {
+        plain(&a.finding(c).unwrap().kept, &format!("reading {c:?}"));
+    }
+
+    *tools.broken.lock().unwrap() = false;
+    *tools.delivery.lock().unwrap() = (4, 900);
+    let a = analyse_with(&pc, &Protected::default(), true, &[], &tools, &no_orphans);
+    *tools.broken.lock().unwrap() = true;
+    let done = clean_with(
+        &pc,
+        &a,
+        &a.choice(&all, Confidence::High),
+        &Protected::default(),
+        true,
+        &tools,
+    );
+    for c in all {
+        let d = done.iter().find(|d| d.category == c).unwrap();
+        plain(&d.kept, &format!("cleaning {c:?}"));
     }
 }

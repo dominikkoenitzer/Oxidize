@@ -69,6 +69,11 @@ fn error_line(colors: &Colors, msg: &str) -> String {
     format!("{} {msg}", paint_if(colors.err, "error:", "31"))
 }
 
+/// Dimmed text inside a message bound for stderr, by stderr's switch.
+fn dim_err_with(colors: &Colors, text: &str) -> String {
+    paint_if(colors.err, text, "2")
+}
+
 fn paint_if(on: bool, text: &str, code: &str) -> String {
     if on {
         format!("\x1b[{code}m{text}\x1b[0m")
@@ -95,7 +100,7 @@ pub fn yellow(text: &str) -> String {
 
 /// A plain line on stdout.
 pub fn info(msg: &str) {
-    println!("{msg}");
+    crate::out::write(format_args!("{msg}\n"));
 }
 
 /// `warning: ...` on stderr.
@@ -103,9 +108,19 @@ pub fn warn(msg: &str) {
     eprintln!("{}", warn_line(&switches(), msg));
 }
 
+/// [`warn`], for when stderr may be gone too.
+pub(crate) fn try_warn(msg: &str) {
+    let _ = writeln!(io::stderr(), "{}", warn_line(&switches(), msg));
+}
+
 /// `error: ...` on stderr.
 pub fn error(msg: &str) {
     eprintln!("{}", error_line(&switches(), msg));
+}
+
+/// Dimmed text for a message that `warn` or `error` prints.
+pub fn dim_err(text: &str) -> String {
+    dim_err_with(&switches(), text)
 }
 
 /// Ask a yes/no question. Empty input picks the default. When stdin is not a
@@ -115,13 +130,28 @@ pub fn confirm(question: &str, default_yes: bool) -> bool {
     if !io::stdin().is_terminal() {
         return false;
     }
-    print!("{question} {hint} ");
-    let _ = io::stdout().flush();
+    answer(
+        default_yes,
+        || crate::out::ask(format_args!("{question} {hint} ")),
+        || {
+            let mut line = String::new();
+            io::stdin().read_line(&mut line).ok().map(|_| line)
+        },
+    )
+}
 
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line).is_err() {
+/// The answer to a question put by `show` and read by `read`; one that could not be shown is a no.
+fn answer(
+    default_yes: bool,
+    show: impl FnOnce() -> bool,
+    read: impl FnOnce() -> Option<String>,
+) -> bool {
+    if !show() {
         return false;
     }
+    let Some(line) = read() else {
+        return false;
+    };
     match line.trim().to_lowercase().as_str() {
         "" => default_yes,
         "y" | "yes" => true,
@@ -222,5 +252,51 @@ mod tests {
         };
         assert_eq!(warn_line(&out_only, "x"), "warning: x");
         assert_eq!(error_line(&out_only, "x"), "error: x");
+    }
+
+    #[test]
+    fn a_question_that_could_not_be_shown_is_a_no_without_waiting_for_an_answer() {
+        for default_yes in [true, false] {
+            let read = std::cell::Cell::new(false);
+            let yes = answer(
+                default_yes,
+                || false,
+                || {
+                    read.set(true);
+                    Some("\n".into())
+                },
+            );
+            assert!(!yes, "a question nobody saw is not answered yes");
+            assert!(!read.get(), "no answer is waited for");
+        }
+    }
+
+    #[test]
+    fn a_shown_question_takes_the_answer_typed() {
+        let typed =
+            |line: &'static str, default_yes| answer(default_yes, || true, || Some(line.into()));
+        assert!(typed("\n", true));
+        assert!(!typed("\n", false));
+        assert!(typed("Y\n", false));
+        assert!(typed("yes\n", false));
+        assert!(!typed("n\n", true));
+        assert!(!answer(true, || true, || None), "a failed read is a no");
+    }
+
+    #[test]
+    fn text_dimmed_inside_an_error_follows_the_stderr_switch() {
+        let out_only = Colors {
+            out: true,
+            err: false,
+        };
+        assert_eq!(dim_err_with(&out_only, "Example.App"), "Example.App");
+        let err_only = Colors {
+            out: false,
+            err: true,
+        };
+        assert_eq!(
+            dim_err_with(&err_only, "Example.App"),
+            "\x1b[2mExample.App\x1b[0m"
+        );
     }
 }

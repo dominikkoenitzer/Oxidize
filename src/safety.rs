@@ -88,6 +88,42 @@ impl DeletionOutcome {
     }
 }
 
+/// A removal refused because backups are on and the backup folder could not
+/// be made. Its text is the command line's; the window words it its own way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupRefused {
+    /// Why the folder could not be made.
+    pub reason: String,
+}
+
+impl BackupRefused {
+    /// The refusal that stopped a removal, if that is what `e` is.
+    pub fn of(e: &anyhow::Error) -> Option<&BackupRefused> {
+        e.downcast_ref()
+    }
+
+    /// The refusal for someone in the window, who has no flag to pass but
+    /// has the setting.
+    pub fn window_text(&self) -> String {
+        "The backup folder could not be made. To delete without a backup, turn off \
+         \"Back up before deleting\"."
+            .to_string()
+    }
+}
+
+impl std::fmt::Display for BackupRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "could not create the backup folder ({}); refusing to delete without a backup. \
+             Leave out --backup to delete anyway.",
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for BackupRefused {}
+
 // Elevation
 // ---------
 
@@ -414,10 +450,9 @@ pub fn remove_leftovers_into(
         };
         match session {
             Ok(session) => Some(session),
-            Err(e) => bail!(
-                "could not create the backup folder ({e:#}); refusing to delete without a backup. \
-                 Leave out --backup to delete anyway."
-            ),
+            Err(e) => bail!(BackupRefused {
+                reason: format!("{e:#}")
+            }),
         }
     } else {
         None
@@ -455,7 +490,7 @@ pub fn remove_leftovers_into(
             }
             Err(e) => {
                 outcome.failed += 1;
-                ItemStatus::Failed(format!("{e:#}"))
+                ItemStatus::Failed(crate::util::plain_reason(e.as_ref()))
             }
         };
         outcome.items.push(ItemOutcome {
@@ -487,9 +522,14 @@ pub fn remove_leftovers_into(
         }
     }
 
+    // A backup with no entry cannot be restored, so it is not named.
     if let Some(s) = &session {
-        outcome.backup_dir = Some(s.root().to_path_buf());
-        outcome.backup_name = Some(s.name());
+        if s.has_entries() {
+            outcome.backup_dir = Some(s.root().to_path_buf());
+            outcome.backup_name = Some(s.name());
+        } else {
+            s.discard_if_unused();
+        }
     }
     Ok(outcome)
 }
@@ -695,6 +735,75 @@ mod tests {
     }
 
     #[test]
+    fn a_removal_that_fails_reads_as_the_words_of_windows() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = crate::backup::TestDir::new("oxidize_failed_words_test");
+        let file = base.join("held.txt");
+        std::fs::create_dir_all(&*base).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&file)
+            .unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::File,
+            file,
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let ctx = SafetyContext {
+            dry_run: false,
+            make_backups: false,
+            keep_emptied_parents: true,
+        };
+        let outcome = remove_leftovers(&[item], "Example", &ctx).unwrap();
+        drop(held);
+        let ItemStatus::Failed(text) = &outcome.items[0].status else {
+            panic!("{:?}", outcome.items[0].status);
+        };
+        let words = std::io::Error::from_raw_os_error(32).to_string();
+        assert!(!text.contains("os error"), "{text}");
+        assert!(!text.ends_with('.'), "{text}");
+        assert!(words.starts_with(text.as_str()), "{text}");
+    }
+
+    #[test]
+    fn a_vendor_key_that_still_holds_something_is_kept() {
+        // The test's vendor key goes when the test ends, also when it fails.
+        struct Vendor(String);
+        impl Drop for Vendor {
+            fn drop(&mut self) {
+                let _ = registry::delete_key_tree(Hive::CurrentUser, &self.0);
+            }
+        }
+        let vendor = Vendor(format!(
+            r"Software\OxidizeVendorKeyTest{}",
+            std::process::id()
+        ));
+        let product = format!(r"{}\Removed", vendor.0);
+        let other = format!(r"{}\Other", vendor.0);
+        let hkcu = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
+        assert_eq!(vendor_key_above(&product), Some(vendor.0.as_str()));
+
+        hkcu.create_subkey(&other).unwrap();
+        assert_eq!(empty_vendor_key(Hive::CurrentUser, &product), None);
+
+        hkcu.delete_subkey(&other).unwrap();
+        let (key, _) = hkcu.create_subkey(&vendor.0).unwrap();
+        key.set_value("kept", &"yes").unwrap();
+        assert_eq!(empty_vendor_key(Hive::CurrentUser, &product), None);
+
+        key.delete_value("kept").unwrap();
+        assert_eq!(
+            empty_vendor_key(Hive::CurrentUser, &product),
+            Some(vendor.0.clone())
+        );
+    }
+
+    #[test]
     fn only_a_vendor_folder_left_empty_goes_with_the_product() {
         let base = crate::backup::TestDir::new("oxidize_emptied_parent_test");
         let vendor = base.join("Example Vendor");
@@ -750,6 +859,109 @@ mod tests {
         assert!(may_remove_emptied_beside(&installers, &[]));
     }
 
+    fn with_backups() -> SafetyContext {
+        SafetyContext {
+            dry_run: false,
+            make_backups: true,
+            keep_emptied_parents: true,
+        }
+    }
+
+    fn no_backup_folder_left() -> bool {
+        let base = crate::backup::backups_base().unwrap();
+        std::fs::read_dir(base).map_or(true, |mut entries| entries.next().is_none())
+    }
+
+    #[test]
+    fn a_removal_where_everything_is_already_gone_names_no_backup() {
+        let _cleanup = crate::backup::TestCleanup(vec![crate::backup::backups_base().unwrap()]);
+        let base = crate::backup::TestDir::new("oxidize_nothing_backed_up_test");
+        let item = Leftover::fs(
+            LeftoverKind::File,
+            base.join("gone.txt"),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let outcome = remove_leftovers(&[item], "Example Gone", &with_backups()).unwrap();
+        assert_eq!(outcome.skipped, 1);
+        assert!(outcome.backup_name.is_none() && outcome.backup_dir.is_none());
+        assert!(no_backup_folder_left());
+    }
+
+    #[test]
+    fn a_removal_where_every_item_fails_names_no_backup() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _cleanup = crate::backup::TestCleanup(vec![crate::backup::backups_base().unwrap()]);
+        // Declared before the held file, so it is closed when the guard runs.
+        let base = crate::backup::TestDir::new("oxidize_nothing_moved_test");
+        std::fs::create_dir_all(&*base).unwrap();
+        let file = base.join("held.txt");
+        std::fs::write(&file, "held").unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&file)
+            .unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::File,
+            file.clone(),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let outcome = remove_leftovers(&[item], "Example Held", &with_backups()).unwrap();
+        assert_eq!(outcome.failed, 1);
+        assert!(outcome.backup_name.is_none() && outcome.backup_dir.is_none());
+        assert!(no_backup_folder_left());
+        drop(held);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "held");
+    }
+
+    #[test]
+    fn a_removal_that_backs_something_up_names_the_backup() {
+        let _cleanup = crate::backup::TestCleanup(vec![crate::backup::backups_base().unwrap()]);
+        let base = crate::backup::TestDir::new("oxidize_one_backed_up_test");
+        std::fs::create_dir_all(&*base).unwrap();
+        let file = base.join("settings.ini");
+        std::fs::write(&file, "x=1").unwrap();
+        let leftover = |name: &str| {
+            Leftover::fs(
+                LeftoverKind::File,
+                base.join(name),
+                Confidence::High,
+                "test",
+                None,
+                false,
+            )
+        };
+        let items = [leftover("settings.ini"), leftover("gone.txt")];
+        let outcome = remove_leftovers(&items, "Example Kept", &with_backups()).unwrap();
+        assert_eq!((outcome.deleted, outcome.skipped), (1, 1));
+        assert!(!file.exists());
+        let dir = outcome.backup_dir.clone().unwrap();
+        assert_eq!(
+            outcome.backup_name.as_deref(),
+            dir.file_name().and_then(|n| n.to_str())
+        );
+        let manifest = crate::backup::read_manifest(&dir).unwrap();
+        assert_eq!(manifest.entries.len(), 1);
+
+        // A second pass that finds nothing more still names the first pass's backup.
+        let later = remove_leftovers_into(
+            &[leftover("gone.txt")],
+            "Example Kept",
+            &with_backups(),
+            Some(&dir),
+        )
+        .unwrap();
+        assert_eq!(later.backup_dir.as_deref(), Some(dir.as_path()));
+        assert_eq!(later.backup_name, outcome.backup_name);
+        assert_eq!(crate::backup::read_manifest(&dir).unwrap().entries.len(), 1);
+    }
+
     #[test]
     fn hklm_items_need_administrator_rights() {
         let hklm = Leftover::reg_key(
@@ -766,6 +978,107 @@ mod tests {
         );
         assert!(needs_elevation(&[hklm]));
         assert!(!needs_elevation(&[hkcu]));
+    }
+
+    #[test]
+    fn services_rules_tasks_and_program_folders_need_administrator_rights() {
+        let service = Leftover::service("ExampleSvc", "", Confidence::High, "test");
+        let rule = Leftover::firewall_rule("{rule}", "Example", "", "", Confidence::High, "test");
+        let task = Leftover::task(r"\Example\Updater", "", Confidence::High, "test");
+        for item in [service, rule, task] {
+            assert!(
+                needs_elevation(std::slice::from_ref(&item)),
+                "{}",
+                item.path
+            );
+        }
+        // The paths are only compared with the roots, never touched.
+        let folder = |p: PathBuf| {
+            Leftover::fs(
+                LeftoverKind::Directory,
+                p,
+                Confidence::High,
+                "test",
+                None,
+                false,
+            )
+        };
+        for var in ["ProgramFiles", "ProgramData"] {
+            let root = scanner::env_dir(var).unwrap();
+            assert!(
+                needs_elevation(&[folder(root.join("Example Vendor"))]),
+                "{var}"
+            );
+        }
+        let base = crate::backup::TestDir::new("oxidize_rights_test");
+        assert!(!needs_elevation(&[folder(base.join("Example Vendor"))]));
+    }
+
+    #[test]
+    fn an_emptied_folder_under_a_shared_name_stays() {
+        let base = crate::backup::TestDir::new("oxidize_shared_name_test");
+        let shared = base.join("Microsoft").join("Example");
+        let vendor = base.join("Example Vendor").join("Example");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::create_dir_all(&vendor).unwrap();
+        assert!(!may_remove_emptied_beside(&shared, &[]));
+        assert!(may_remove_emptied_beside(&vendor, &[]));
+    }
+
+    #[test]
+    fn a_later_removal_adds_up_with_the_first_field_by_field() {
+        let item = |path: &str| ItemOutcome {
+            path: path.to_string(),
+            kind: LeftoverKind::File,
+            status: ItemStatus::Removed,
+        };
+        let mut first = DeletionOutcome {
+            attempted: 3,
+            deleted: 2,
+            skipped: 1,
+            failed: 0,
+            backup_dir: Some(PathBuf::from("first backup")),
+            backup_name: Some("first".to_string()),
+            items: vec![item("a"), item("b")],
+            emptied_parents: vec![PathBuf::from("p1")],
+            emptied_keys: vec!["k1".to_string()],
+            dry_run: false,
+            permanent: false,
+        };
+        let later = DeletionOutcome {
+            attempted: 20,
+            deleted: 10,
+            skipped: 4,
+            failed: 6,
+            backup_dir: Some(PathBuf::from("later backup")),
+            backup_name: Some("later".to_string()),
+            items: vec![item("c")],
+            emptied_parents: vec![PathBuf::from("p2")],
+            emptied_keys: vec!["k2".to_string()],
+            dry_run: false,
+            permanent: true,
+        };
+        first.absorb(later.clone());
+        let counts = (first.attempted, first.deleted, first.skipped, first.failed);
+        assert_eq!(counts, (23, 12, 5, 6));
+        let paths: Vec<&str> = first.items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["a", "b", "c"]);
+        assert_eq!(
+            first.emptied_parents,
+            [PathBuf::from("p1"), PathBuf::from("p2")]
+        );
+        assert_eq!(first.emptied_keys, ["k1", "k2"]);
+        // Gone for good if either removal was.
+        assert!(first.permanent);
+        // The first backup stays.
+        assert_eq!(first.backup_dir, Some(PathBuf::from("first backup")));
+        assert_eq!(first.backup_name.as_deref(), Some("first"));
+
+        // A backup only the later removal made is taken.
+        let mut none = DeletionOutcome::default();
+        none.absorb(later);
+        assert_eq!(none.backup_dir, Some(PathBuf::from("later backup")));
+        assert_eq!(none.backup_name.as_deref(), Some("later"));
     }
 
     #[test]
@@ -877,14 +1190,21 @@ mod tests {
             r"C:\Temp\oxidize-elevated-12-345.out"
         )));
         for path in [
-            r"C:\Windows\System32\drivers\etc\hosts",
             r"C:\Temp\oxidize-elevated-12-345.txt",
             r"C:\Temp\other-12-345.out",
             r"C:\Temp\",
         ] {
             assert!(!is_result_file(Path::new(path)), "{path}");
-            // Refused before anything is opened or redirected.
-            assert!(send_output_to(Path::new(path)).is_err(), "{path}");
+        }
+
+        // Refused before anything is opened or redirected, even where it could write.
+        let dir = crate::backup::TestDir::new("oxidize_result_file_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["oxidize-elevated-12-345.txt", "other-12-345.out"] {
+            let path = dir.join(name);
+            std::fs::write(&path, "kept").unwrap();
+            assert!(send_output_to(&path).is_err(), "{name}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "kept", "{name}");
         }
     }
 
@@ -903,6 +1223,41 @@ mod tests {
         for file in [&a, &b] {
             let _ = std::fs::remove_file(file);
             let _ = std::fs::remove_file(error_file(file));
+        }
+    }
+
+    #[test]
+    fn a_backup_folder_that_cannot_be_made_is_a_refusal_each_front_end_words() {
+        // A file stands where this test's backups folder belongs.
+        let backups = crate::backup::backups_base().unwrap();
+        let run = backups.parent().unwrap().to_path_buf();
+        let _cleanup = crate::backup::TestCleanup(vec![run.clone()]);
+        std::fs::create_dir_all(&run).unwrap();
+        std::fs::write(&backups, "x").unwrap();
+        let product = crate::backup::TestDir::new("oxidize_backup_refused_test");
+        std::fs::create_dir_all(&*product).unwrap();
+        let item = Leftover::fs(
+            LeftoverKind::Directory,
+            product.to_path_buf(),
+            Confidence::High,
+            "test",
+            None,
+            false,
+        );
+        let ctx = SafetyContext {
+            dry_run: false,
+            make_backups: true,
+            keep_emptied_parents: true,
+        };
+
+        let e = remove_leftovers(&[item], "Example Product", &ctx).unwrap_err();
+        assert!(product.exists());
+        let refused = BackupRefused::of(&e).expect("a backup refusal");
+        assert!(format!("{e:#}").ends_with("Leave out --backup to delete anyway."));
+        let words = refused.window_text();
+        assert!(words.contains("\"Back up before deleting\""), "{words}");
+        for term in ["--", "os error", "("] {
+            assert!(!words.contains(term), "{term} in {words}");
         }
     }
 }

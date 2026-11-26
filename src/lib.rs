@@ -11,6 +11,7 @@ pub mod lnk;
 pub mod mcp;
 pub mod model;
 pub mod orphans;
+pub mod out;
 pub mod packages;
 pub mod registry;
 pub mod restore;

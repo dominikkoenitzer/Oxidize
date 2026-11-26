@@ -9,7 +9,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use super::{exe_missing, path_names_product, same_vendor, score_product};
+use super::{
+    exe_missing, is_exact_product, own_name_words, path_names_product, same_vendor, score_product,
+};
 use crate::model::{Confidence, Hive, Leftover, LeftoverKind, ScanTarget};
 use crate::{registry, system};
 
@@ -385,10 +387,19 @@ fn app_id_records(hive: Hive, places: &AppIdPlaces, target: &ScanTarget) -> Vec<
 }
 
 /// An app id such as `com.brightway.lumen.windows`: dotted words, one of
-/// them the product and another the vendor. Paths and packaged app ids
-/// (`Vendor.App_hash!App`) are not this kind of name.
+/// them the product and another the vendor, and every other word noise, one
+/// of the program's own or its whole name written as one word. A longer id
+/// such as `com.brightway.lumen.studio` is another product's. Paths and
+/// packaged app ids (`Vendor.App_hash!App`) are not this kind of name.
 fn app_id_is_programs(id: &str, target: &ScanTarget) -> bool {
     if id.is_empty() || !id.contains('.') || id.contains(['\\', '/', '!', ' ']) {
+        return false;
+    }
+    let own = own_name_words(target);
+    if !crate::util::significant_tokens(id)
+        .iter()
+        .all(|w| own.contains(w) || is_exact_product(w, target))
+    {
         return false;
     }
     let words: Vec<String> = id.split('.').map(str::to_lowercase).collect();
@@ -460,37 +471,54 @@ fn vendor_files(publisher: &str) -> Vec<Leftover> {
         if !path.is_absolute() {
             continue;
         }
-        if path.exists() {
-            if downloads
-                .as_deref()
-                .is_some_and(|d| system::path_under(path, d))
-                && path.is_file()
-            {
-                out.push(Leftover::fs(
-                    LeftoverKind::File,
-                    path.to_path_buf(),
-                    Confidence::Medium,
-                    "the vendor's file in Downloads, most likely the installer",
-                    std::fs::metadata(path).ok().map(|m| m.len()),
-                    false,
-                ));
+        match vendor_file(path, downloads.as_deref()) {
+            Some(VendorFile::Download(item)) => out.push(item),
+            Some(VendorFile::Removed) => {
+                for field in [COMPANY_FIELD, NAME_FIELD] {
+                    let value = format!("{file}{field}");
+                    if registry::value_exists(hive, NAME_CACHE, &value) {
+                        out.push(Leftover::reg_value(
+                            hive,
+                            NAME_CACHE,
+                            value,
+                            Confidence::High,
+                            "the name Windows cached for a removed file of the vendor's",
+                        ));
+                    }
+                }
             }
-            continue;
-        }
-        for field in [COMPANY_FIELD, NAME_FIELD] {
-            let value = format!("{file}{field}");
-            if registry::value_exists(hive, NAME_CACHE, &value) {
-                out.push(Leftover::reg_value(
-                    hive,
-                    NAME_CACHE,
-                    value,
-                    Confidence::High,
-                    "the name Windows cached for a removed file of the vendor's",
-                ));
-            }
+            None => {}
         }
     }
     out
+}
+
+/// What became of a file of the vendor's that Windows cached a name for.
+#[derive(Debug)]
+enum VendorFile {
+    /// Still in Downloads, most likely the installer.
+    Download(Leftover),
+    /// Removed, so its cached name points nowhere.
+    Removed,
+}
+
+/// The vendor's file at the full path `path`, with `downloads` the user's Downloads folder.
+fn vendor_file(path: &Path, downloads: Option<&Path>) -> Option<VendorFile> {
+    // A file on a drive that is not plugged in is not removed.
+    if exe_missing(path) {
+        return Some(VendorFile::Removed);
+    }
+    let waiting = downloads.is_some_and(|d| system::path_under(path, d)) && path.is_file();
+    waiting.then(|| {
+        VendorFile::Download(Leftover::fs(
+            LeftoverKind::File,
+            path.to_path_buf(),
+            Confidence::Medium,
+            "the vendor's file in Downloads, most likely the installer",
+            std::fs::metadata(path).ok().map(|m| m.len()),
+            false,
+        ))
+    })
 }
 
 /// The folders not inside another folder of the list.
@@ -682,6 +710,58 @@ mod tests {
         // Without the shortcut on the list, it is not.
         let gone = Gone { files: &[], ..gone };
         assert!(!gone.covers(&shortcut));
+    }
+
+    #[test]
+    fn a_scan_by_name_alone_counts_missing_files_of_the_product_as_gone() {
+        let gone = |target: &ScanTarget, path: &str| {
+            Gone {
+                dirs: &[],
+                files: &[],
+                others: &[],
+                target,
+            }
+            .covers(path)
+        };
+        // Not this machine's programs.
+        let named = |name: &str| {
+            super::super::name_only_target_with(
+                name,
+                None,
+                &super::super::Snapshot::with_programs(Vec::new()),
+            )
+        };
+        let target = named("Quillmark");
+        assert!(target.publisher.is_none());
+        for path in [
+            format!(r"C:\Program Files\Quillmark\{}.exe", unique("quill")),
+            format!(
+                r"C:\Program Files\Quill Labs\Quillmark\bin\{}.exe",
+                unique("quill")
+            ),
+            format!(r"{{{LOCAL}}}\Quillmark\{}.exe", unique("quill")),
+        ] {
+            assert!(gone(&target, &path), "{path}");
+        }
+        // A file that is missing but names nothing of the product stays.
+        assert!(!gone(&target, &format!(r"C:\{}\quill.exe", unique("Apps"))));
+
+        let target = named("Inkwell Notes");
+        for path in [
+            format!(r"C:\Program Files\Inkwell Notes\{}.exe", unique("notes")),
+            format!(r"C:\Program Files\Inkwell\Notes\{}.exe", unique("notes")),
+        ] {
+            assert!(gone(&target, &path), "{path}");
+        }
+
+        // A file of the product that is still there is not gone.
+        let dir = std::env::temp_dir().join("oxidize_records_Quillmark");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("quill.exe");
+        std::fs::write(&file, b"x").unwrap();
+        let target = named("Quillmark");
+        assert!(!gone(&target, &file.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -899,10 +979,29 @@ mod tests {
         assert!(!app_id_is_programs("com.brightway.other", &target));
         assert!(!app_id_is_programs("lumen.app", &target));
         assert!(!app_id_is_programs("com.brightway", &target));
+        // A longer name made from it is another product or channel of the vendor's.
+        assert!(!app_id_is_programs("com.brightway.lumen.studio", &target));
+        assert!(!app_id_is_programs("com.brightway.lumen-beta", &target));
+        assert!(!app_id_is_programs("Brightway.Lumen.Canary", &target));
         // A packaged app, a path or a name without dots is another kind.
         assert!(!app_id_is_programs("Brightway.Lumen_x1y2z3!App", &target));
         assert!(!app_id_is_programs(r"C:\Apps\brightway.lumen.exe", &target));
         assert!(!app_id_is_programs("BrightwayLumen", &target));
+    }
+
+    #[test]
+    fn an_app_id_may_write_the_whole_name_as_one_word() {
+        let studio = super::super::name_target("Lumen Studio", Some("Brightway Labs"));
+        assert!(app_id_is_programs("com.brightway.lumenstudio", &studio));
+        assert!(app_id_is_programs("Brightway.LumenStudio.windows", &studio));
+        assert!(!app_id_is_programs(
+            "com.brightway.lumenstudio.beta",
+            &studio
+        ));
+        let three = super::super::name_target("Lumen 3", Some("Brightway Labs"));
+        assert!(app_id_is_programs("com.brightway.lumen3", &three));
+        let lumen = super::super::name_target("Lumen", Some("Brightway Labs"));
+        assert!(!app_id_is_programs("com.brightway.lumenstudio", &lumen));
     }
 
     #[test]
@@ -916,7 +1015,8 @@ mod tests {
         };
         let ours = "com.brightway.lumen.windows";
         let theirs = "com.brightway.other";
-        for id in [ours, theirs] {
+        let studio = "com.brightway.lumen.studio";
+        for id in [ours, theirs, studio] {
             set_value(&format!(r"{}\{id}", base("Settings")), "Enabled", "0");
             set_value(&format!(r"{}\W~{id}", base("Tiles")), "x", "1");
             set_value(&base("Usage"), id, "1");
@@ -1009,5 +1109,29 @@ mod tests {
         };
         let found = com_classes(Hive::CurrentUser, &root.0, &gone);
         assert_eq!(subpaths(&found), vec![format!(r"{}\{{1-GONE}}", root.0)]);
+    }
+
+    #[test]
+    fn a_vendor_file_on_a_drive_that_is_not_there_is_not_removed() {
+        let downloads = crate::backup::TestDir::new("oxidize_vendor_file_test");
+        let installer = downloads.join("QuillmarkSetup.exe");
+        std::fs::create_dir_all(&*downloads).unwrap();
+        std::fs::write(&installer, b"stand-in").unwrap();
+        match vendor_file(&installer, Some(&*downloads)) {
+            Some(VendorFile::Download(item)) => assert_eq!(item.confidence, Confidence::Medium),
+            other => panic!("{other:?}"),
+        }
+        let gone = std::env::temp_dir()
+            .join(unique("Quillmark"))
+            .join("QuillmarkSetup.exe");
+        assert!(matches!(
+            vendor_file(&gone, Some(&*downloads)),
+            Some(VendorFile::Removed)
+        ));
+        let Some(letter) = ('M'..='Z').find(|l| !Path::new(&format!("{l}:\\")).exists()) else {
+            return;
+        };
+        let away = PathBuf::from(format!(r"{letter}:\Setup\QuillmarkSetup.exe"));
+        assert!(vendor_file(&away, Some(&*downloads)).is_none());
     }
 }

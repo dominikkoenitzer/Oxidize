@@ -170,6 +170,8 @@ pub enum KeptReason {
     /// In a git checkout git could not be asked about.
     CheckoutUnknown,
     Failed(String),
+    /// Not deleted, as the backup folder could not be made.
+    NoBackup(safety::BackupRefused),
 }
 
 impl KeptReason {
@@ -189,7 +191,8 @@ impl KeptReason {
             KeptReason::LeftOut => "left_out",
             KeptReason::Uncommitted => "uncommitted",
             KeptReason::CheckoutUnknown => "checkout_unknown",
-            KeptReason::Failed(_) => "failed",
+            // Scripts read a backup refusal as the failure it always was.
+            KeptReason::Failed(_) | KeptReason::NoBackup(_) => "failed",
         }
     }
 
@@ -209,6 +212,8 @@ impl KeptReason {
             KeptReason::Uncommitted => "in a git checkout with uncommitted work".to_string(),
             KeptReason::CheckoutUnknown => "in a git checkout git could not check".to_string(),
             KeptReason::Failed(e) => e.clone(),
+            // Each front end says why and what to do in its own words.
+            KeptReason::NoBackup(_) => "not deleted without a backup".to_string(),
         }
     }
 }
@@ -225,7 +230,12 @@ impl Serialize for Kept {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         let mut st = s.serialize_struct("Kept", 4)?;
         st.serialize_field("code", self.reason.code())?;
-        st.serialize_field("reason", &self.reason.text())?;
+        // Only the command line writes JSON, so a backup refusal keeps its flag there.
+        let reason = match &self.reason {
+            KeptReason::NoBackup(refused) => refused.to_string(),
+            other => other.text(),
+        };
+        st.serialize_field("reason", &reason)?;
         st.serialize_field("count", &self.count)?;
         st.serialize_field("bytes", &self.bytes)?;
         st.end()
@@ -984,7 +994,7 @@ fn component_store(opts: &Options) -> Finding {
                 .push("the space freed is measured on the drive afterwards".into());
             f.work = Work::Tool(None);
         }
-        Err(e) => f.keep(KeptReason::Failed(format!("{e:#}")), 0, 0),
+        Err(e) => f.keep(KeptReason::Failed(util::plain_reason(e.as_ref())), 0, 0),
     }
     f
 }
@@ -1004,7 +1014,7 @@ fn delivery_optimization(opts: &Options) -> Finding {
                 f.keep(KeptReason::NeedsAdmin, count, bytes);
             }
         }
-        Err(e) => f.keep(KeptReason::Failed(format!("{e:#}")), 0, 0),
+        Err(e) => f.keep(KeptReason::Failed(util::plain_reason(e.as_ref())), 0, 0),
     }
     f
 }
@@ -1300,7 +1310,7 @@ impl Cleaned {
     pub fn failed(&self) -> bool {
         self.kept
             .iter()
-            .any(|k| matches!(k.reason, KeptReason::Failed(_)))
+            .any(|k| matches!(k.reason, KeptReason::Failed(_) | KeptReason::NoBackup(_)))
     }
 }
 
@@ -1398,7 +1408,11 @@ fn run_tool(f: &Finding, dir: Option<&Path>, c: &mut Cleaned, opts: &CleanOption
         _ => Ok(()),
     };
     if let Err(e) = result {
-        c.keep(KeptReason::Failed(format!("{e:#}")), f.count, f.bytes);
+        c.keep(
+            KeptReason::Failed(util::plain_reason(e.as_ref())),
+            f.count,
+            f.bytes,
+        );
         return;
     }
     match f.category {
@@ -1564,8 +1578,14 @@ fn remove_dirs(
                 c.backup = outcome.backup_name;
             }
         }
+        Err(e) if safety::BackupRefused::of(&e).is_some() => {
+            if let Some(refused) = safety::BackupRefused::of(&e) {
+                let bytes = items.iter().map(|(_, b)| b).sum();
+                c.keep(KeptReason::NoBackup(refused.clone()), items.len(), bytes);
+            }
+        }
         Err(e) => c.keep(
-            KeptReason::Failed(format!("{e:#}")),
+            KeptReason::Failed(util::plain_reason(e.as_ref())),
             items.len(),
             items.iter().map(|(_, b)| b).sum(),
         ),

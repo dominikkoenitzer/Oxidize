@@ -197,22 +197,6 @@ pub fn expand_env_vars(s: &str) -> String {
     out
 }
 
-/// Split a Windows command line into arguments following the
-/// `CommandLineToArgvW` / MSVCRT rules (so a quoted path containing spaces is
-/// one argument). `argv[0]` is the executable, the rest are its arguments.
-///
-/// Rules implemented:
-///  * a run of `2n` backslashes before a `"` => `n` backslashes and the quote
-///    toggles quoting;
-///  * a run of `2n+1` backslashes before a `"` => `n` backslashes and a literal
-///    `"`;
-///  * backslashes not before a quote are literal;
-///  * `""` while inside quotes => a literal `"`;
-///  * outside quotes, runs of spaces/tabs separate arguments.
-///
-/// Note: the real API treats `argv[0]` slightly specially, but program paths in
-/// uninstall strings are either quoted or contain no embedded quotes, so the
-/// general rules produce the correct result for our inputs.
 /// Split a registry uninstall command into argv.
 ///
 /// `CommandLineToArgvW` splits an unquoted program path on its spaces, but
@@ -286,6 +270,22 @@ pub fn program_prefix_end(s: &str) -> Option<usize> {
     candidate
 }
 
+/// Split a Windows command line into arguments following the
+/// `CommandLineToArgvW` / MSVCRT rules (so a quoted path containing spaces is
+/// one argument). `argv[0]` is the executable, the rest are its arguments.
+///
+/// Rules implemented:
+///  * a run of `2n` backslashes before a `"` => `n` backslashes and the quote
+///    toggles quoting;
+///  * a run of `2n+1` backslashes before a `"` => `n` backslashes and a literal
+///    `"`;
+///  * backslashes not before a quote are literal;
+///  * `""` while inside quotes => a literal `"`;
+///  * outside quotes, runs of spaces/tabs separate arguments.
+///
+/// Note: the real API treats `argv[0]` slightly specially, but program paths in
+/// uninstall strings are either quoted or contain no embedded quotes, so the
+/// general rules produce the correct result for our inputs.
 pub fn split_command_line(cmd: &str) -> Vec<String> {
     let chars: Vec<char> = cmd.chars().collect();
     let n = chars.len();
@@ -372,6 +372,59 @@ pub fn human_size(bytes: u64) -> String {
     }
 }
 
+/// Why an operation failed, in the words of the first system error in its chain, for a user to read.
+pub fn plain_reason(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut cause = e;
+    while !cause.is::<std::io::Error>() {
+        match cause.source() {
+            Some(next) => cause = next,
+            None => break,
+        }
+    }
+    let text = cause.to_string();
+    let mut plain = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find(" (") {
+        plain.push_str(&rest[..at]);
+        let tail = &rest[at + 2..];
+        match error_code_len(tail) {
+            Some(len) => rest = &tail[len..],
+            None => {
+                plain.push_str(" (");
+                rest = tail;
+            }
+        }
+    }
+    plain.push_str(rest);
+    let plain = plain.trim();
+    plain
+        .strip_suffix('.')
+        .unwrap_or(plain)
+        .trim_end()
+        .to_string()
+}
+
+/// The length of "os error 5)" or "0x80070005)" at the start of `s`, the codes Rust and Windows append.
+fn error_code_len(s: &str) -> Option<usize> {
+    let (body, hex) = match (s.strip_prefix("os error "), s.strip_prefix("0x")) {
+        (Some(body), _) => (body, false),
+        (_, Some(body)) => (body, true),
+        _ => return None,
+    };
+    let len = body
+        .bytes()
+        .take_while(|b| {
+            if hex {
+                b.is_ascii_hexdigit()
+            } else {
+                b.is_ascii_digit()
+            }
+        })
+        .count();
+    let fits = if hex { len == 8 } else { len > 0 };
+    (fits && body[len..].starts_with(')')).then(|| s.len() - body.len() + len + 1)
+}
+
 /// Parse a raw `InstallDate` value into `YYYY-MM-DD`. Installers write the
 /// documented `YYYYMMDD`, but also ISO dates, `MM/DD/YYYY` and free text.
 /// Anything that is not a plausible date yields `None`.
@@ -422,6 +475,36 @@ pub fn file_basename_lower(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_reads_as_the_words_of_the_system_error_in_it() {
+        let missing = std::io::Error::from_raw_os_error(2);
+        let words = missing.to_string();
+        let words = words.split(" (os error").next().unwrap();
+        let words = words.strip_suffix('.').unwrap_or(words);
+        assert_eq!(plain_reason(&missing), words);
+        let chained = anyhow::Error::from(std::io::Error::from_raw_os_error(2))
+            .context("starting dism.exe")
+            .context("reading the component store");
+        assert_eq!(plain_reason(chained.as_ref()), words);
+        // A message that quotes system errors keeps their words and loses each number.
+        let quoted = std::io::Error::other(
+            "part is gone: Not here. (os error 145); stopped: Busy. (os error 32)",
+        );
+        assert_eq!(
+            plain_reason(&quoted),
+            "part is gone: Not here.; stopped: Busy"
+        );
+        let coded = std::io::Error::other("Catastrophic failure (0x8000FFFF)");
+        assert_eq!(plain_reason(&coded), "Catastrophic failure");
+        // Without an io error the root cause speaks, and other parentheses stay.
+        let root =
+            anyhow::anyhow!("dism.exe ended with exit code 5 (os error x)").context("cleaning");
+        assert_eq!(
+            plain_reason(root.as_ref()),
+            "dism.exe ended with exit code 5 (os error x)"
+        );
+    }
 
     #[test]
     fn splits_quoted_exe_with_args() {
@@ -559,6 +642,31 @@ mod tests {
         let v = split_uninstall_command(r"C:\Program Files\Foo\uninst.exe /S");
         assert_eq!(v[0], r"C:\Program Files\Foo\uninst.exe");
         assert_eq!(&v[1..], ["/S"]);
+    }
+
+    #[test]
+    fn an_unquoted_path_without_an_extension_stays_whole_until_it_names_a_file() {
+        let root = crate::backup::TestDir::new("oxidize_split_noext_test");
+        let folder = root.join("Vendor App");
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join("Uninstaller");
+        let program = program.to_str().unwrap();
+        let cmd = format!("{program} /S");
+        assert_eq!(split_uninstall_command(&cmd), [cmd.as_str()]);
+        std::fs::write(program, b"").unwrap();
+        assert_eq!(split_uninstall_command(&cmd), [program, "/S"]);
+    }
+
+    #[test]
+    fn a_real_program_before_an_exe_argument_is_the_program() {
+        let root = crate::backup::TestDir::new("oxidize_split_bat_test");
+        let folder = root.join("My Tools");
+        std::fs::create_dir_all(&folder).unwrap();
+        let bat = folder.join("start.bat");
+        std::fs::write(&bat, b"@echo off\r\n").unwrap();
+        let bat = bat.to_str().unwrap();
+        let v = split_uninstall_command(&format!(r"{bat} C:\App\app.exe"));
+        assert_eq!(v, [bat, r"C:\App\app.exe"]);
     }
 
     #[test]

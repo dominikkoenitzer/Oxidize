@@ -786,7 +786,7 @@ pub struct FirewallRule {
     pub name: String,
     /// The program the rule applies to.
     pub app: PathBuf,
-    /// `in` or `out`, plus the protocol when it is TCP or UDP.
+    /// What [`rule_kind`] reads from the rule.
     pub kind: String,
 }
 
@@ -797,28 +797,14 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
     for (id, data) in registry::enum_string_values(Hive::LocalMachine, FIREWALL_RULES_KEY) {
         let mut app = None;
         let mut name = None;
-        let mut dir = String::new();
-        let mut proto = String::new();
         for part in data.split('|') {
             if let Some(v) = part.strip_prefix("App=") {
                 app = Some(v.to_string());
             } else if let Some(v) = part.strip_prefix("Name=") {
                 name = Some(v.to_string());
-            } else if let Some(v) = part.strip_prefix("Dir=") {
-                dir = v.to_lowercase();
-            } else if let Some(v) = part.strip_prefix("Protocol=") {
-                proto = match v {
-                    "6" => "tcp".to_string(),
-                    "17" => "udp".to_string(),
-                    _ => String::new(),
-                };
             }
         }
-        let kind = [dir, proto]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let kind = rule_kind(&data);
         let Some(app) = app else { continue };
         if app.eq_ignore_ascii_case("System") || !app.contains('\\') {
             continue;
@@ -844,6 +830,31 @@ pub fn firewall_rules() -> Vec<FirewallRule> {
         });
     }
     out
+}
+
+/// How a rule reads after its name: its direction, TCP or UDP, and the profiles it names.
+fn rule_kind(data: &str) -> String {
+    let mut dir = String::new();
+    let mut proto = "";
+    let mut profiles = Vec::new();
+    for part in data.split('|') {
+        if let Some(v) = part.strip_prefix("Dir=") {
+            dir = v.to_lowercase();
+        } else if let Some(v) = part.strip_prefix("Protocol=") {
+            proto = match v {
+                "6" => "tcp",
+                "17" => "udp",
+                _ => "",
+            };
+        } else if let Some(v) = part.strip_prefix("Profile=") {
+            profiles.push(v.to_lowercase());
+        }
+    }
+    [dir, proto.to_string(), profiles.join("/")]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // Processes
@@ -990,12 +1001,9 @@ pub fn close_processes(
     grace: std::time::Duration,
 ) -> Vec<crate::complete::Closed> {
     use crate::complete::{CloseHow, Closed};
-    use windows::Win32::Foundation::{
-        CloseHandle, ERROR_INVALID_PARAMETER, HWND, LPARAM, WAIT_OBJECT_0, WPARAM,
-    };
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WAIT_OBJECT_0, WPARAM};
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, WaitForSingleObject, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
+        OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
     };
     use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, PostMessageW, WM_CLOSE};
 
@@ -1016,6 +1024,7 @@ pub fn close_processes(
         true.into()
     }
 
+    let mut log = |line: &str| Machine.log(line);
     let mut out = Vec::new();
     let mut handles = Vec::new();
     for p in procs {
@@ -1024,24 +1033,7 @@ pub fn close_processes(
         let access = PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
         match unsafe { OpenProcess(access, false, p.pid) } {
             Ok(h) => {
-                // The id may belong to another program by now: Windows
-                // reuses them. Only the image that was picked is touched.
-                let mut buf = [0u16; 1024];
-                let mut len = buf.len() as u32;
-                let image = unsafe {
-                    QueryFullProcessImageNameW(
-                        h,
-                        PROCESS_NAME_WIN32,
-                        windows::core::PWSTR(buf.as_mut_ptr()),
-                        &mut len,
-                    )
-                }
-                .ok()
-                .map(|()| String::from_utf16_lossy(&buf[..len as usize]));
-                let same = image
-                    .as_deref()
-                    .is_some_and(|i| same_image(Path::new(i), &p.exe));
-                if !same {
+                if !runs_image(h, &p.exe) {
                     let _ = unsafe { CloseHandle(h) };
                     continue;
                 }
@@ -1054,21 +1046,7 @@ pub fn close_processes(
                 };
                 handles.push((p.pid, exe, h, ask.windows > 0));
             }
-            // It exited between the listing and now.
-            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => out.push(Closed {
-                pid: p.pid,
-                exe,
-                how: CloseHow::Closed,
-                error: None,
-                windowless: false,
-            }),
-            Err(e) => out.push(Closed {
-                pid: p.pid,
-                exe,
-                how: CloseHow::Failed,
-                error: Some(e.message()),
-                windowless: false,
-            }),
+            Err(e) => out.push(not_opened(p.pid, exe, &e, &mut log)),
         }
     }
     let deadline = std::time::Instant::now() + grace;
@@ -1095,9 +1073,67 @@ pub fn close_processes(
     out
 }
 
+/// What became of a process that could not be opened. Windows refuses an
+/// id that no longer belongs to any process, so that one has closed. Any
+/// other refusal is one plain sentence, and what Windows said goes to the log.
+#[cfg(windows)]
+fn not_opened(
+    pid: u32,
+    exe: String,
+    e: &windows::core::Error,
+    log: &mut impl FnMut(&str),
+) -> crate::complete::Closed {
+    use crate::complete::{CloseHow, Closed};
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+    if e.code() == ERROR_INVALID_PARAMETER.to_hresult() {
+        return Closed {
+            pid,
+            exe,
+            how: CloseHow::Closed,
+            error: None,
+            windowless: false,
+        };
+    }
+    log(&format!(
+        "OpenProcess {exe} (process {pid}) failed with {:#010x}: {}",
+        e.code().0 as u32,
+        e.message()
+    ));
+    Closed {
+        pid,
+        exe,
+        how: CloseHow::Failed,
+        error: Some("Windows refused access to it.".to_string()),
+        windowless: false,
+    }
+}
+
 /// The same executable, whatever the case of the path.
 fn same_image(a: &Path, b: &Path) -> bool {
     a.as_os_str().eq_ignore_ascii_case(b.as_os_str())
+}
+
+/// Does the opened process still run `exe`? The id may belong to another
+/// program by now: Windows reuses them. Only the image that was picked is touched.
+#[cfg(windows)]
+fn runs_image(h: windows::Win32::Foundation::HANDLE, exe: &Path) -> bool {
+    use windows::Win32::System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32};
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    unsafe {
+        QueryFullProcessImageNameW(
+            h,
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    }
+    .is_ok_and(|()| {
+        same_image(
+            Path::new(&String::from_utf16_lossy(&buf[..len as usize])),
+            exe,
+        )
+    })
 }
 
 #[cfg(not(windows))]
@@ -1108,9 +1144,98 @@ pub fn close_processes(
     Vec::new()
 }
 
+/// How long an ended process gets to be gone.
+#[cfg(windows)]
+const END_WAIT_MS: u32 = 2000;
+
+/// End each process by its id while it still runs the image it was listed
+/// with. Only for the windowless processes from a program's own folder that
+/// a removal was confirmed to end.
+#[cfg(windows)]
+pub fn end_processes(procs: &[crate::complete::Running]) -> Vec<crate::complete::Closed> {
+    use crate::complete::{CloseHow, Closed};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, TerminateProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+    };
+
+    let log = |line: &str| Machine.log(line);
+    let mut out = Vec::new();
+    for p in procs {
+        let exe = p.exe.display().to_string();
+        let said = |call: &str, e: &windows::core::Error| {
+            format!(
+                "{call} {exe} (process {}) failed with {:#010x}: {}",
+                p.pid,
+                e.code().0 as u32,
+                e.message()
+            )
+        };
+        let access = PROCESS_TERMINATE | PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION;
+        let (how, error) = match unsafe { OpenProcess(access, false, p.pid) } {
+            // It exited by itself since it was listed.
+            Err(e) if e.code() == ERROR_INVALID_PARAMETER.to_hresult() => (CloseHow::Closed, None),
+            Err(e) => {
+                log(&said("OpenProcess", &e));
+                (CloseHow::Failed, Some("Windows refused access to it."))
+            }
+            Ok(h) => {
+                let done = if !runs_image(h, &p.exe) {
+                    // The id is another program's by now; the listed one is gone.
+                    (CloseHow::Closed, None)
+                } else if let Err(e) = unsafe { TerminateProcess(h, 1) } {
+                    log(&said("TerminateProcess", &e));
+                    (CloseHow::Failed, Some("Windows refused to end it."))
+                } else if unsafe { WaitForSingleObject(h, END_WAIT_MS) } == WAIT_OBJECT_0 {
+                    (CloseHow::Ended, None)
+                } else {
+                    (CloseHow::Running, None)
+                };
+                let _ = unsafe { CloseHandle(h) };
+                done
+            }
+        };
+        out.push(Closed {
+            pid: p.pid,
+            exe,
+            how,
+            error: error.map(str::to_string),
+            windowless: true,
+        });
+    }
+    out
+}
+
+#[cfg(not(windows))]
+pub fn end_processes(_procs: &[crate::complete::Running]) -> Vec<crate::complete::Closed> {
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rule_names_the_networks_it_is_limited_to() {
+        let rule = |profiles: &str| {
+            rule_kind(&format!(
+                r"v2.33|Action=Allow|Active=TRUE|Dir=In|Protocol=6|{profiles}App=C:\Quillmark\quill.exe|Name=Quillmark|"
+            ))
+        };
+        assert_eq!(rule("Profile=Private|"), "in tcp private");
+        assert_eq!(rule("Profile=Public|"), "in tcp public");
+        assert_eq!(
+            rule("Profile=Domain|Profile=Private|"),
+            "in tcp domain/private"
+        );
+        assert_eq!(rule(""), "in tcp");
+        assert_eq!(
+            rule_kind("v2.33|Action=Block|Dir=Out|Protocol=17|"),
+            "out udp"
+        );
+        assert_eq!(rule_kind("v2.33|Action=Allow|Dir=In|Protocol=1|"), "in");
+    }
 
     #[test]
     fn the_windows_folder_is_where_windows_says_it_is() {
@@ -1163,15 +1288,136 @@ mod tests {
         assert!(start.elapsed() < std::time::Duration::from_secs(10));
     }
 
+    /// A copy of a console tool in a folder of its own, started without a
+    /// window: a stand-in for a program's background helper.
+    #[cfg(windows)]
+    fn stand_in(dir: &Path) -> (std::process::Child, crate::complete::Running) {
+        use std::os::windows::process::CommandExt;
+        fs::create_dir_all(dir).unwrap();
+        let exe = dir.join("helper.exe");
+        fs::copy(system32("PING.EXE"), &exe).unwrap();
+        let child = std::process::Command::new(&exe)
+            .args(["-n", "60", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        // The image as Windows names it: a temp folder may be given in short names.
+        let exe = running_processes()
+            .into_iter()
+            .find(|p| p.pid == pid)
+            .map_or(exe, |p| p.exe);
+        (child, crate::complete::Running { pid, exe })
+    }
+
+    /// A program installed in the stand-in's folder.
+    #[cfg(windows)]
+    fn installed_at(helper: &crate::complete::Running) -> crate::model::ScanTarget {
+        // Not this machine's programs.
+        let none = crate::scanner::Snapshot::with_programs(Vec::new());
+        let mut target =
+            crate::scanner::name_only_target_with("Example Player", Some("Example Studio"), &none);
+        target.install_location = helper.exe.parent().map(Path::to_path_buf);
+        target.install_vouched = true;
+        target
+    }
+
+    /// Stop a stand-in the test started, whatever the test did to it.
+    #[cfg(windows)]
+    fn stop(mut child: std::process::Child) -> bool {
+        let ran = child.try_wait().unwrap().is_none();
+        let _ = child.kill();
+        let _ = child.wait();
+        ran
+    }
+
+    #[cfg(windows)]
     #[test]
-    fn closing_never_ends_a_process() {
+    fn a_listed_process_is_ended_by_its_id_and_no_other() {
+        use crate::complete::{CloseHow, Running};
+        let dir = crate::backup::TestDir::new("oxidize end stand-in");
+        let (helper, listed) = stand_in(&dir.join("Example Player"));
+        let (other, beside) = stand_in(&dir.join("Other"));
+
+        // Picked from what really runs, with no window to go by.
+        let target = installed_at(&listed);
+        let ends =
+            crate::complete::to_end(&running_processes(), &target, std::process::id(), |_| false);
+        // The other one's id under the listed image: Windows reused the id.
+        let reused = Running {
+            pid: beside.pid,
+            exe: listed.exe.clone(),
+        };
+        let ended = end_processes(&[listed.clone(), reused]);
+        let helper_ran = stop(helper);
+        let other_ran = stop(other);
+
+        assert_eq!(ends, std::slice::from_ref(&listed));
+        assert!(!helper_ran, "the listed process is still running");
+        assert!(other_ran, "a process that was not listed was ended");
+        assert_eq!(ended.len(), 2, "{ended:?}");
+        assert_eq!(
+            (ended[0].pid, &ended[0].how, ended[0].windowless),
+            (listed.pid, &CloseHow::Ended, true)
+        );
+        // The listed image no longer runs under that id: nothing to end.
+        assert_eq!(ended[1].how, CloseHow::Closed);
+    }
+
+    /// Runs on CI only: it reads which windows exist, which a desktop in
+    /// use should not have done to it.
+    #[cfg(windows)]
+    #[test]
+    fn a_windowless_stand_in_is_asked_first_then_ended() {
+        use crate::complete::CloseHow;
+        if std::env::var_os("CI").is_none() {
+            return;
+        }
+        let dir = crate::backup::TestDir::new("oxidize end asked stand-in");
+        let (helper, listed) = stand_in(&dir.join("Example Player"));
+        let target = installed_at(&listed);
+        let ends = crate::complete::to_end(
+            &running_processes(),
+            &target,
+            std::process::id(),
+            has_window,
+        );
+        let closed = close_processes(&ends, std::time::Duration::from_secs(30));
+        let ended = end_processes(&ends);
+        let ran = stop(helper);
+        assert_eq!(ends, [listed]);
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!(closed[0].how, CloseHow::Running);
+        assert!(closed[0].windowless);
+        assert_eq!(ended[0].how, CloseHow::Ended);
+        assert!(!ran, "the stand-in is still running");
+    }
+
+    #[test]
+    fn asking_to_close_never_ends_a_process() {
         let source = include_str!("system.rs");
+        let start = source.find("pub fn close_processes(").unwrap();
+        let end = source.find("fn same_image(").unwrap();
         for call in [
             concat!("Terminate", "Process"),
             concat!("PROCESS_", "TERMINATE"),
         ] {
-            assert!(!source.contains(call), "{call} is back in system.rs");
+            assert!(
+                !source[start..end].contains(call),
+                "{call} is in close_processes"
+            );
         }
+        // Ending is for the flow's confirmed list on the command line only.
+        let call = concat!("end_", "processes(");
+        for (file, source) in [
+            ("complete.rs", include_str!("complete.rs")),
+            ("mcp.rs", include_str!("mcp.rs")),
+            ("oxidize-gui.rs", include_str!("bin/oxidize-gui.rs")),
+        ] {
+            assert!(!source.contains(call), "{file} ends processes");
+        }
+        assert_eq!(include_str!("commands.rs").matches(call).count(), 1);
     }
 
     #[test]
@@ -1695,6 +1941,56 @@ mod tests {
             [r"schtasks /delete \Vendor\Updater ended with code 1: ERROR: Access is denied."]
         );
         assert!(take_tool_log().is_empty());
+    }
+
+    #[cfg(windows)]
+    fn windows_error(code: windows::Win32::Foundation::WIN32_ERROR) -> windows::core::Error {
+        windows::core::Error::from_hresult(code.to_hresult())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_process_gone_before_it_is_opened_counts_as_closed() {
+        use crate::complete::CloseHow;
+        use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+        let exe = r"C:\Example\player.exe";
+        let mut logged = Vec::new();
+        let c = not_opened(
+            100,
+            exe.into(),
+            &windows_error(ERROR_INVALID_PARAMETER),
+            &mut |line: &str| logged.push(line.to_string()),
+        );
+        assert_eq!((c.pid, c.exe.as_str()), (100, exe));
+        assert_eq!((c.how, c.error), (CloseHow::Closed, None));
+        assert!(logged.is_empty(), "{logged:?}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_process_that_cannot_be_opened_is_one_plain_sentence_and_windows_text_goes_to_the_log() {
+        use crate::complete::CloseHow;
+        use windows::Win32::Foundation::ERROR_ACCESS_DENIED;
+        let exe = r"C:\Example\player.exe";
+        let denied = windows_error(ERROR_ACCESS_DENIED);
+        let said = denied.message();
+        let mut logged = Vec::new();
+        let c = not_opened(100, exe.into(), &denied, &mut |line: &str| {
+            logged.push(line.to_string())
+        });
+        assert_eq!(
+            (c.how, c.error),
+            (
+                CloseHow::Failed,
+                Some("Windows refused access to it.".to_string())
+            )
+        );
+        assert_eq!(
+            logged,
+            [format!(
+                r"OpenProcess C:\Example\player.exe (process 100) failed with 0x80070005: {said}"
+            )]
+        );
     }
 
     #[test]

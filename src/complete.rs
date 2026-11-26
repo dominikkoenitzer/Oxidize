@@ -14,7 +14,7 @@ use serde::Serialize;
 use crate::model::{
     Confidence, Hive, Leftover, LeftoverKind, Package, Program, ScanReport, ScanTarget,
 };
-use crate::safety::{DeletionOutcome, SafetyContext};
+use crate::safety::{BackupRefused, DeletionOutcome, SafetyContext};
 use crate::uninstall::{Ran, UninstallPlan};
 use crate::{scanner, system};
 
@@ -36,13 +36,17 @@ pub struct Running {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CloseHow {
-    /// It closed its windows and exited by itself.
+    /// It exited by itself: once asked to close, or before it could be.
     Closed,
     /// It was still running after the grace period, or had no window to be
-    /// asked through. It is left running and the flow stops.
+    /// asked through and was not listed to end. It is left running and the
+    /// flow stops.
     Running,
     /// It could not be asked, usually for want of administrator rights.
     Failed,
+    /// It had no window and ran from the program's own folder, so it was
+    /// ended by its id once the removal was confirmed.
+    Ended,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -58,12 +62,12 @@ pub struct Closed {
     pub windowless: bool,
 }
 
-/// The one error for processes that did not close, or None when all did.
-/// Nothing is ended by force, so the flow stops on it.
+/// The one error for processes that are still there, or None when none is.
+/// Only a confirmed windowless one is ended, so the flow stops on the rest.
 pub fn still_running(closed: &[Closed]) -> Option<String> {
     let names: Vec<&str> = closed
         .iter()
-        .filter(|c| c.how != CloseHow::Closed)
+        .filter(|c| !matches!(c.how, CloseHow::Closed | CloseHow::Ended))
         .map(|c| {
             Path::new(&c.exe)
                 .file_name()
@@ -136,6 +140,36 @@ pub fn app_processes(running: &[Running], app: &Package, own_pid: u32) -> Vec<Ru
     processes_in(running, &dirs, own_pid)
 }
 
+/// The processes a confirmed removal may end: those running from the
+/// program's own install folder with no window to be asked through.
+pub fn to_end(
+    running: &[Running],
+    target: &ScanTarget,
+    own_pid: u32,
+    has_window: impl Fn(u32) -> bool,
+) -> Vec<Running> {
+    let own = owned_dirs(target, &[]);
+    processes_in(running, &own, own_pid)
+        .into_iter()
+        .filter(|p| !has_window(p.pid))
+        .collect()
+}
+
+/// The processes that stayed for want of a window and were listed to end,
+/// matched by id and image.
+fn listed_to_end(closed: &[Closed], listed: &[Running]) -> Vec<Running> {
+    closed
+        .iter()
+        .filter(|c| c.how == CloseHow::Running && c.windowless)
+        .filter_map(|c| {
+            listed
+                .iter()
+                .find(|p| p.pid == c.pid && p.exe.as_os_str().eq_ignore_ascii_case(&c.exe))
+        })
+        .cloned()
+        .collect()
+}
+
 /// Whether the vendor's uninstaller runs, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "action", rename_all = "lowercase")]
@@ -176,10 +210,21 @@ pub fn vendor_step(
     if program.source.hive != Hive::CurrentUser {
         return run("installed for all users");
     }
-    let has_folder = scanner::own_install_folder(target).is_some()
-        || footprint
-            .iter()
-            .any(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
+    let mut high_dirs = footprint
+        .iter()
+        .filter(|l| l.kind == LeftoverKind::Directory && l.confidence == Confidence::High);
+    // A recorded install folder that would stay, shared ones too, keeps the files the uninstaller removes.
+    let recorded = target
+        .install_location
+        .clone()
+        .or_else(|| scanner::recorded_install_folder(program));
+    let has_folder = match recorded.as_deref() {
+        Some(loc) => {
+            scanner::own_install_folder(target).is_some()
+                || high_dirs.any(|l| system::path_under(loc, Path::new(&l.path)))
+        }
+        None => high_dirs.next().is_some(),
+    };
     if !has_folder {
         return run("no folder of its own is known");
     }
@@ -277,8 +322,30 @@ pub trait Pc {
     fn running(&self) -> Vec<Running>;
     /// Ask these processes to close through their windows; none is ended.
     fn close(&self, procs: &[Running]) -> Vec<Closed>;
+    /// The windowless processes from the program's own folder that the
+    /// removal was confirmed to end. None unless the caller listed them.
+    fn may_end(&self) -> Vec<Running> {
+        Vec::new()
+    }
+    /// End these by their ids. Only ever given processes from `may_end`.
+    fn end(&self, procs: &[Running]) -> Vec<Closed> {
+        procs
+            .iter()
+            .map(|p| Closed {
+                pid: p.pid,
+                exe: p.exe.display().to_string(),
+                how: CloseHow::Running,
+                error: None,
+                windowless: true,
+            })
+            .collect()
+    }
     /// Run the vendor's uninstaller; returns how it went.
     fn run_uninstaller(&self, plan: &UninstallPlan) -> anyhow::Result<Ran>;
+    /// Why the uninstaller cannot start because its file is gone, if it is.
+    fn uninstaller_missing(&self, plan: &UninstallPlan) -> Option<String> {
+        crate::uninstall::missing_program(plan)
+    }
     /// Wait until the program is unregistered; true when it is.
     fn wait_until_gone(&self, program: &Program, plan: &UninstallPlan) -> bool;
     /// Remove the items, with a backup unless told otherwise.
@@ -311,6 +378,9 @@ pub struct Outcome {
     pub closed: Vec<Closed>,
     /// In a dry run, the processes that would be closed.
     pub would_close: Vec<Running>,
+    /// In a dry run, those of `would_close` that would be ended: they have
+    /// no window and run from the program's own folder.
+    pub would_end: Vec<Running>,
     pub vendor: VendorStep,
     /// How the vendor's uninstaller ended, when it ran.
     pub uninstaller: Option<String>,
@@ -322,6 +392,8 @@ pub struct Outcome {
     pub verdict: Verdict,
     /// Why the flow stopped early, when it did.
     pub error: Option<String>,
+    /// The backup refusal that stopped the removal, for the window to word.
+    pub refused: Option<BackupRefused>,
     pub seconds: f64,
 }
 
@@ -331,6 +403,11 @@ impl Outcome {
         self.error.is_none()
             && self.verdict.nothing_left
             && self.removal.as_ref().is_none_or(|o| o.failed == 0)
+    }
+
+    /// The vendor's uninstaller ran without error and the program is still registered.
+    pub fn uninstaller_left_it_registered(&self) -> bool {
+        self.vendor.runs() && self.verdict.still_installed && self.error.is_none()
     }
 }
 
@@ -370,6 +447,7 @@ pub fn remove_completely(
     let mut out = Outcome {
         closed: Vec::new(),
         would_close: Vec::new(),
+        would_end: Vec::new(),
         vendor,
         uninstaller: None,
         report: ScanReport::default(),
@@ -380,6 +458,7 @@ pub fn remove_completely(
             ..Verdict::default()
         },
         error: None,
+        refused: None,
         seconds: 0.0,
     };
 
@@ -388,6 +467,12 @@ pub fn remove_completely(
 
     if opts.dry_run {
         // Everything the removal would take: the footprint as leftovers.
+        let listed = pc.may_end();
+        out.would_end = picked
+            .iter()
+            .filter(|p| listed.contains(p))
+            .cloned()
+            .collect();
         out.would_close = picked;
         out.report = full.unwrap_or_default();
         out.selected = at_level(&out.report, opts.level);
@@ -396,11 +481,31 @@ pub fn remove_completely(
         return out;
     }
 
+    // An uninstaller that cannot start leaves the program as it is, its windows open.
+    if let Some(e) = out
+        .vendor
+        .runs()
+        .then(|| pc.uninstaller_missing(plan))
+        .flatten()
+    {
+        out.error = Some(e);
+        out.verdict.still_installed = pc.still_installed(program);
+        out.seconds = start.elapsed().as_secs_f64();
+        return out;
+    }
+
     if !picked.is_empty() {
         out.closed = pc.close(&picked);
+        let ends = listed_to_end(&out.closed, &pc.may_end());
+        if !ends.is_empty() {
+            for ended in pc.end(&ends) {
+                if let Some(c) = out.closed.iter_mut().find(|c| c.pid == ended.pid) {
+                    *c = ended;
+                }
+            }
+        }
         if let Some(e) = still_running(&out.closed) {
-            // Its files are in use, and it is never ended by force: neither
-            // the uninstaller nor the removal starts under it.
+            // Its files are in use, so neither the uninstaller nor the removal starts.
             out.error = Some(e);
             out.verdict.still_installed = true;
             out.seconds = start.elapsed().as_secs_f64();
@@ -445,7 +550,7 @@ pub fn remove_completely(
     if !out.selected.is_empty() {
         match pc.remove(&out.selected, &program.display_name) {
             Ok(o) => out.removal = Some(o),
-            Err(e) => out.error = Some(format!("{e:#}")),
+            Err(e) => stopped(&mut out, &e),
         }
     }
     if installed {
@@ -461,7 +566,7 @@ pub fn remove_completely(
         if let Some(first) = out.removal.as_mut().filter(|_| !late.is_empty()) {
             match pc.remove_more(&late, &program.display_name, first) {
                 Ok(o) => first.absorb(o),
-                Err(e) => out.error = Some(format!("{e:#}")),
+                Err(e) => stopped(&mut out, &e),
             }
             out.report.items.extend(late.iter().cloned());
             out.selected.extend(late);
@@ -471,6 +576,12 @@ pub fn remove_completely(
     out.verdict = verdict(installed, &rescan, opts.level);
     out.seconds = start.elapsed().as_secs_f64();
     out
+}
+
+/// Keep why the removal stopped, and its kind when it was a backup refusal.
+fn stopped(out: &mut Outcome, e: &anyhow::Error) {
+    out.refused = BackupRefused::of(e).cloned();
+    out.error = Some(format!("{e:#}"));
 }
 
 /// The High items of `rescan` that the scan the removal worked from did not
@@ -647,10 +758,20 @@ mod tests {
         vendor_takes: Vec<String>,
         /// The vendor's uninstaller is still running when the wait ends.
         never_ends: bool,
+        /// The uninstaller's file is gone.
+        uninstaller_gone: bool,
         /// Processes that stay when they are asked to close.
         stays: Vec<u32>,
+        /// Processes with no window, so they are not asked and stay.
+        windowless: Vec<u32>,
+        /// What the removal was confirmed to end.
+        may_end: Vec<Running>,
+        /// An ended process is still there after the wait.
+        outlives_end: bool,
         /// Items a scan finds only once the item at the path is gone.
         shows_once_gone: RefCell<Vec<(String, Leftover)>>,
+        /// The backup folder cannot be made.
+        no_backup: bool,
         /// Backups made so far.
         backups: RefCell<usize>,
         calls: RefCell<Vec<String>>,
@@ -664,8 +785,13 @@ mod tests {
                 stuck: Vec::new(),
                 vendor_takes: Vec::new(),
                 never_ends: false,
+                uninstaller_gone: false,
                 stays: Vec::new(),
+                windowless: Vec::new(),
+                may_end: Vec::new(),
+                outlives_end: false,
                 shows_once_gone: RefCell::new(Vec::new()),
+                no_backup: false,
                 backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
             }
@@ -746,19 +872,47 @@ mod tests {
                 .map(|p| Closed {
                     pid: p.pid,
                     exe: p.exe.display().to_string(),
-                    how: if self.stays.contains(&p.pid) {
+                    how: if self.stays.contains(&p.pid) || self.windowless.contains(&p.pid) {
                         CloseHow::Running
                     } else {
                         CloseHow::Closed
                     },
                     error: None,
-                    windowless: false,
+                    windowless: self.windowless.contains(&p.pid),
+                })
+                .collect()
+        }
+
+        fn may_end(&self) -> Vec<Running> {
+            self.may_end.clone()
+        }
+
+        fn end(&self, procs: &[Running]) -> Vec<Closed> {
+            let pids: Vec<String> = procs.iter().map(|p| p.pid.to_string()).collect();
+            self.calls
+                .borrow_mut()
+                .push(format!("end {}", pids.join(",")));
+            procs
+                .iter()
+                .map(|p| Closed {
+                    pid: p.pid,
+                    exe: p.exe.display().to_string(),
+                    how: if self.outlives_end {
+                        CloseHow::Running
+                    } else {
+                        CloseHow::Ended
+                    },
+                    error: None,
+                    windowless: true,
                 })
                 .collect()
         }
 
         fn run_uninstaller(&self, _plan: &UninstallPlan) -> anyhow::Result<Ran> {
             self.calls.borrow_mut().push("uninstall".to_string());
+            if self.uninstaller_gone {
+                anyhow::bail!("{}: uninstall.exe", crate::uninstall::UNINSTALLER_MISSING);
+            }
             self.items
                 .borrow_mut()
                 .retain(|l| !self.vendor_takes.contains(&l.path));
@@ -774,6 +928,11 @@ mod tests {
             })
         }
 
+        fn uninstaller_missing(&self, _plan: &UninstallPlan) -> Option<String> {
+            self.uninstaller_gone
+                .then(|| format!("{}: uninstall.exe", crate::uninstall::UNINSTALLER_MISSING))
+        }
+
         fn wait_until_gone(&self, _program: &Program, _plan: &UninstallPlan) -> bool {
             *self.installed.borrow_mut() = false;
             true
@@ -783,6 +942,11 @@ mod tests {
             self.calls
                 .borrow_mut()
                 .push(format!("remove {}", items.len()));
+            if self.no_backup {
+                return Err(anyhow::Error::new(BackupRefused {
+                    reason: "Access is denied. (os error 5)".to_string(),
+                }));
+            }
             let n = self.backups.replace_with(|n| *n + 1) + 1;
             Ok(DeletionOutcome {
                 backup_name: Some(format!("backup {n}")),
@@ -876,6 +1040,200 @@ mod tests {
         }
     }
 
+    /// The fake's process that runs from the program's own folder.
+    fn helper() -> Running {
+        FakePc::new(Vec::new()).running()[0].clone()
+    }
+
+    #[test]
+    fn a_windowless_process_from_the_programs_own_folder_is_listed_to_end() {
+        let at = |pid: u32, exe: &str| Running {
+            pid,
+            exe: PathBuf::from(exe),
+        };
+        let running = vec![
+            at(100, r"D:\Apps\Example Player\player.exe"),
+            at(101, r"D:\Apps\Example Player\v2\player.exe"),
+            at(102, r"D:\Apps\Other\player.exe"),
+            // This process, even when it runs from there.
+            at(7, r"D:\Apps\Example Player\oxidize.exe"),
+        ];
+        let has_window = |pid: u32| pid == 101;
+        let pids = |t: &ScanTarget| -> Vec<u32> {
+            to_end(&running, t, 7, has_window)
+                .iter()
+                .map(|p| p.pid)
+                .collect()
+        };
+        let mut t = target();
+        t.install_location = Some(PathBuf::from(r"D:\Apps\Example Player"));
+        assert_eq!(pids(&t), [100]);
+        // A recorded folder that is not the program's own ends nothing.
+        t.install_location = Some(PathBuf::from(r"D:\Apps"));
+        assert!(pids(&t).is_empty());
+        t.install_location = None;
+        assert!(pids(&t).is_empty());
+    }
+
+    #[test]
+    fn a_confirmed_windowless_process_is_ended_and_the_removal_goes_on() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.windowless = vec![100];
+        pc.may_end = vec![helper()];
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert_eq!(
+            pc.calls(),
+            [
+                "scan true",
+                "close 100",
+                "end 100",
+                "remove 2",
+                "scan false"
+            ]
+        );
+        assert_eq!(out.closed.len(), 1);
+        assert_eq!(out.closed[0].how, CloseHow::Ended);
+        assert!(out.closed[0].windowless);
+        assert!(out.complete(), "{out:?}");
+    }
+
+    #[test]
+    fn any_other_process_that_stays_still_stops_the_removal() {
+        let mut other = helper();
+        other.exe.set_file_name("other.exe");
+        type Case = (
+            Vec<u32>,
+            Vec<u32>,
+            Vec<Running>,
+            bool,
+            &'static [&'static str],
+        );
+        // Stayed with a window, windowless but unlisted, listed as another image, outlived the end.
+        let cases: [Case; 4] = [
+            (
+                vec![100],
+                vec![],
+                vec![helper()],
+                false,
+                &["scan true", "close 100"],
+            ),
+            (
+                vec![],
+                vec![100],
+                vec![],
+                false,
+                &["scan true", "close 100"],
+            ),
+            (
+                vec![],
+                vec![100],
+                vec![other],
+                false,
+                &["scan true", "close 100"],
+            ),
+            (
+                vec![],
+                vec![100],
+                vec![helper()],
+                true,
+                &["scan true", "close 100", "end 100"],
+            ),
+        ];
+        for (stays, windowless, may_end, outlives, calls) in cases {
+            let mut pc = FakePc::new(per_user_footprint());
+            pc.stays = stays;
+            pc.windowless = windowless;
+            pc.may_end = may_end;
+            pc.outlives_end = outlives;
+            let p = program(Hive::CurrentUser);
+            let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+            assert_eq!(pc.calls(), calls);
+            assert_eq!(out.closed[0].how, CloseHow::Running, "{out:?}");
+            assert_eq!(
+                out.error.as_deref(),
+                Some(
+                    "player.exe is still running, so nothing was removed. Close it and try again."
+                )
+            );
+            assert!(out.removal.is_none(), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_names_what_would_be_ended_and_ends_nothing() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.windowless = vec![100];
+        pc.may_end = vec![helper()];
+        let p = program(Hive::CurrentUser);
+        let opts = Options {
+            dry_run: true,
+            ..opts(Confidence::High)
+        };
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts);
+        assert_eq!(out.would_close, [helper()]);
+        assert_eq!(out.would_end, [helper()]);
+        let calls = pc.calls();
+        assert!(!calls
+            .iter()
+            .any(|c| c.starts_with("close") || c.starts_with("end")));
+    }
+
+    #[test]
+    fn a_backup_folder_that_cannot_be_made_stops_the_removal_as_a_refusal() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.no_backup = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(
+            pc.calls().contains(&"remove 2".to_string()),
+            "{:?}",
+            pc.calls()
+        );
+        assert_eq!(pc.items.borrow().len(), 3);
+        assert!(out.removal.is_none(), "{out:?}");
+        assert!(!out.complete(), "{out:?}");
+        assert_eq!(
+            out.refused,
+            Some(BackupRefused {
+                reason: "Access is denied. (os error 5)".to_string()
+            })
+        );
+        // The command line keeps its flag.
+        let said = out.error.unwrap_or_default();
+        assert!(
+            said.ends_with("Leave out --backup to delete anyway."),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_registration_left_after_a_skipped_uninstaller_is_not_put_on_it() {
+        // The uninstall entry could not be deleted: still registered, no error.
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.stuck = vec![entry().path];
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(!out.vendor.runs(), "{out:?}");
+        assert!(out.verdict.still_installed, "{out:?}");
+        assert!(out.error.is_none(), "{out:?}");
+        assert!(!out.uninstaller_left_it_registered(), "{out:?}");
+
+        // An uninstaller that ran and has not finished: it may still be running.
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.never_ends = true;
+        let p = program(Hive::LocalMachine);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(out.vendor.runs(), "{out:?}");
+        assert!(out.uninstaller_left_it_registered(), "{out:?}");
+
+        // One that never started is not said to be running.
+        let mut out = out;
+        out.uninstaller = None;
+        out.error = Some("The uninstaller did not start.".to_string());
+        assert!(!out.uninstaller_left_it_registered(), "{out:?}");
+    }
+
     #[test]
     fn processes_that_stay_are_named_in_one_sentence() {
         let closed = |how: CloseHow, exe: &str| Closed {
@@ -887,6 +1245,10 @@ mod tests {
         };
         assert_eq!(
             still_running(&[closed(CloseHow::Closed, r"C:\a\a.exe")]),
+            None
+        );
+        assert_eq!(
+            still_running(&[closed(CloseHow::Ended, r"C:\a\tray.exe")]),
             None
         );
         assert_eq!(
@@ -1068,6 +1430,30 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_uninstaller_stops_the_flow_before_anything_closes() {
+        let mut items = per_user_footprint();
+        items.push(Leftover::service(
+            "ExampleSvc",
+            r"D:\ExamplePlayer\svc.exe",
+            Confidence::High,
+            "named after the program",
+        ));
+        let mut pc = FakePc::new(items);
+        pc.uninstaller_gone = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        assert!(out.vendor.runs());
+        assert_eq!(pc.calls(), ["scan true"]);
+        assert!(out.closed.is_empty());
+        let error = out.error.unwrap_or_default();
+        assert!(
+            error.starts_with(crate::uninstall::UNINSTALLER_MISSING),
+            "{error}"
+        );
+        assert!(out.verdict.still_installed);
+    }
+
+    #[test]
     fn an_uninstaller_still_running_keeps_its_leftovers() {
         let mut pc = FakePc::new(per_user_footprint());
         pc.never_ends = true;
@@ -1161,7 +1547,9 @@ mod tests {
     }
 
     fn target() -> ScanTarget {
-        let mut t = scanner::name_only_target("Example Player", Some("Example Studio"));
+        // Not this machine's programs.
+        let none = scanner::Snapshot::with_programs(Vec::new());
+        let mut t = scanner::name_only_target_with("Example Player", Some("Example Studio"), &none);
         t.install_location = Some(PathBuf::from(r"C:\Users\me\AppData\Local\ExamplePlayer"));
         t.registry = Some((
             "example-player".to_string(),
@@ -1274,6 +1662,55 @@ mod tests {
             &machine(),
         );
         assert!(step.runs());
+    }
+
+    #[test]
+    fn a_recorded_folder_that_stays_keeps_the_uninstaller() {
+        // The settings folder goes, the program files named otherwise would stay.
+        let mut t = target();
+        t.install_location = Some(PathBuf::from(r"D:\Example Studio\EP-files"));
+        let settings = dir(r"D:\Settings\ExamplePlayer", Confidence::High);
+        let step = vendor_step(
+            &program(Hive::CurrentUser),
+            &plan(false),
+            &t,
+            std::slice::from_ref(&settings),
+            &machine(),
+        );
+        assert!(step.runs(), "{step:?}");
+
+        // A High folder around the recorded one takes it along.
+        let around = dir(r"D:\Example Studio", Confidence::High);
+        let step = vendor_step(
+            &program(Hive::CurrentUser),
+            &plan(false),
+            &t,
+            &[settings, around],
+            &machine(),
+        );
+        assert!(!step.runs(), "{step:?}");
+    }
+
+    #[test]
+    fn a_shared_recorded_folder_keeps_the_uninstaller() {
+        // Another program records the same folder, so the target drops it and the scan leaves it.
+        let p = program(Hive::CurrentUser);
+        let mut t = target();
+        t.install_location = None;
+        let settings = dir(r"D:\Settings\ExamplePlayer", Confidence::High);
+        let step = vendor_step(
+            &p,
+            &plan(false),
+            &t,
+            std::slice::from_ref(&settings),
+            &machine(),
+        );
+        assert!(step.runs(), "{step:?}");
+
+        // A High folder that is the recorded one still takes it along.
+        let own = dir(p.install_location.as_deref().unwrap(), Confidence::High);
+        let step = vendor_step(&p, &plan(false), &t, &[settings, own], &machine());
+        assert!(!step.runs(), "{step:?}");
     }
 
     #[test]
