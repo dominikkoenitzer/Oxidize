@@ -276,12 +276,30 @@ pub fn key_of(path: &Path) -> String {
         .strip_prefix("\\\\?\\unc\\")
         .map(|rest| format!("\\\\{rest}"))
         .unwrap_or_else(|| s.strip_prefix("\\\\?\\").unwrap_or(&s).to_string());
+    // An entry written through this machine's own admin share names a local
+    // folder; scanned paths never come that way, so it would cover nothing.
+    let computer = std::env::var("COMPUTERNAME").ok();
+    let s = local_admin_share(&s, computer.as_deref()).unwrap_or(s);
     s.split('\\')
         .map(|part| part.trim_end_matches(['.', ' ']))
         .collect::<Vec<_>>()
         .join("\\")
         .trim_end_matches('\\')
         .to_string()
+}
+
+/// `\\host\x$\rest` as `x:\rest` when `host` is this machine: `localhost`,
+/// `127.0.0.1` or its own name. `s` is already lower case with backslashes.
+fn local_admin_share(s: &str, computer: Option<&str>) -> Option<String> {
+    let rest = s.strip_prefix("\\\\")?;
+    let (host, rest) = rest.split_once('\\')?;
+    let (share, tail) = rest.split_once('\\').unwrap_or((rest, ""));
+    let local = matches!(host, "localhost" | "127.0.0.1")
+        || computer.is_some_and(|c| !c.is_empty() && c.eq_ignore_ascii_case(host));
+    let drive = share
+        .strip_suffix('$')
+        .filter(|d| d.len() == 1 && d.as_bytes()[0].is_ascii_alphabetic())?;
+    local.then(|| format!("{drive}:\\{tail}"))
 }
 
 /// `path` with the real name of its deepest existing part, and the rest
@@ -319,6 +337,19 @@ pub(crate) fn under(p: &str, dir: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_entry_through_this_machines_admin_share_covers_the_local_folder() {
+        let p = Protected::new([r"\\localhost\C$\Work\Keep".to_string()]);
+        assert!(p.covers(Path::new(r"C:\Work\Keep\inner.txt")));
+        assert!(!p.covers(Path::new(r"C:\Work\Other")));
+        assert_eq!(local_admin_share(r"\\server\c$\work", Some("my-pc")), None);
+        assert_eq!(local_admin_share(r"\\localhost\share\work", None), None);
+        assert_eq!(
+            local_admin_share(r"\\my-pc\d$\x", Some("MY-PC")).as_deref(),
+            Some(r"d:\x")
+        );
+    }
 
     #[test]
     fn a_protected_folder_covers_what_it_holds_and_nothing_beside_it() {
