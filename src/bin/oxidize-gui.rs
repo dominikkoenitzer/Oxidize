@@ -4552,6 +4552,7 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            error_chain: None,
             refused: None,
             seconds: 4.2,
         }

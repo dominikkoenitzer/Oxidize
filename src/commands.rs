@@ -1265,7 +1265,7 @@ fn complete_json(
     if out.removal.is_some() {
         json_out["removal"] = removal_json(&out.removal);
     }
-    if let Some(e) = &out.error {
+    if let Some(e) = out.error_chain.as_ref().or(out.error.as_ref()) {
         json_out["error"] = json!(e);
     }
     json_out
@@ -4125,9 +4125,28 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            error_chain: None,
             refused: None,
             seconds: 1.234,
         }
+    }
+
+    #[test]
+    fn a_complete_removal_as_json_keeps_the_whole_error_chain() {
+        let p = program(
+            "Example Player",
+            "example-player",
+            Some(r"C:\x\uninstall.exe"),
+        );
+        let plan = uninstall::plan(&p, true).unwrap();
+        let mut out = outcome(false);
+        out.error = Some(r"removing C:\Example: Access is denied".to_string());
+        out.error_chain = Some(r"removing C:\Example: Access is denied. (os error 5)".to_string());
+        let j = complete_json(&p, &plan, &out, Confidence::High, false);
+        assert_eq!(j["error"], out.error_chain.clone().unwrap());
+        out.error_chain = None;
+        let j = complete_json(&p, &plan, &out, Confidence::High, false);
+        assert_eq!(j["error"], out.error.clone().unwrap());
     }
 
     #[test]
