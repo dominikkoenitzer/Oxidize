@@ -2249,6 +2249,31 @@ fn report_deleted_or_cancelled(names: &[String], cancelled: bool, g: &Global) ->
     Ok(())
 }
 
+/// The question `restore` asks, and its default answer. A backup restored
+/// before is asked about plainly and defaults to no: restoring it again
+/// writes its registry keys and values back over whatever changed since.
+fn restore_question(info: &backup::BackupInfo) -> (String, bool) {
+    let items = plural(info.items, "item", "items");
+    match &info.restored {
+        Some(stamp) => {
+            // `mark_restored` writes an RFC 3339 stamp; the question shows
+            // its date and time, or the stamp as it is if it does not parse.
+            let when = chrono::DateTime::parse_from_rfc3339(stamp).map_or_else(
+                |_| stamp.clone(),
+                |t| t.format("%Y-%m-%d %H:%M").to_string(),
+            );
+            (
+                format!(
+                    "{} was already restored ({when}). Restoring it again writes its settings back over any change made since. Restore {items} again?",
+                    info.name
+                ),
+                false,
+            )
+        }
+        None => (format!("Restore {items} from {}?", info.name), true),
+    }
+}
+
 /// Whether a restore goes ahead. A dry run never asks. Enter means yes,
 /// since a restore puts things back. `--json` cannot ask, so it needs
 /// `--yes`.
@@ -2290,12 +2315,10 @@ fn restore_json(
 
 fn cmd_restore(args: &RestoreArgs, g: &Global) -> Result<()> {
     let info = backup::find_backup(&args.name)?;
-    let question = format!(
-        "Restore {} from {}?",
-        plural(info.items, "item", "items"),
-        info.name
-    );
-    if !restore_goes_ahead(g.dry_run, g.yes, g.json, || term::confirm(&question, true)) {
+    let (question, default) = restore_question(&info);
+    if !restore_goes_ahead(g.dry_run, g.yes, g.json, || {
+        term::confirm(&question, default)
+    }) {
         if g.json {
             return Err(Failure::cancelled(
                 "nothing was restored; add --yes to restore with --json",
@@ -4992,6 +5015,30 @@ mod tests {
         let json = removal_json(&Some(outcome));
         assert_eq!(json["items"][0]["status"], "removed_after_restart");
         assert_eq!(json["removed"], 1);
+    }
+
+    #[test]
+    fn a_backup_restored_before_is_asked_about_plainly_and_defaults_to_no() {
+        let mut info = backup::BackupInfo {
+            id: "b".into(),
+            name: "2026-11-20 Example".into(),
+            path: PathBuf::from("b"),
+            program: "Example".into(),
+            created: String::new(),
+            items: 3,
+            size_bytes: 0,
+            restored: None,
+        };
+        let (fresh, yes) = restore_question(&info);
+        assert!(yes && fresh.starts_with("Restore 3 items from"), "{fresh}");
+        // The stamp as `mark_restored` writes it.
+        info.restored = Some("2026-11-21T09:00:12.3456789+01:00".into());
+        let (again, yes) = restore_question(&info);
+        assert!(!yes, "a second restore must not be the default");
+        assert!(
+            again.contains("already restored (2026-11-21 09:00)") && again.contains("again"),
+            "{again}"
+        );
     }
 
     #[test]
