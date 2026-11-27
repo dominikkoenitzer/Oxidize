@@ -334,11 +334,20 @@ impl BackupSession {
         Ok(dest)
     }
 
-    /// `C:\ProgramData\Foo` becomes `<backup>\files\C\ProgramData\Foo`.
+    /// `C:\ProgramData\Foo` becomes `<backup>\files\C\ProgramData\Foo`, and
+    /// `\\server\share\Foo` becomes `<backup>\files\UNC\server\share\Foo`: under a
+    /// folder of its own, so a server with a one-letter name is never read
+    /// back as a drive.
     fn quarantine_dest(&self, original: &Path) -> PathBuf {
         let mut dest = self.root.join("files");
         let s = original.to_string_lossy();
-        let rel = if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        let rel = if let Some(unc) = s
+            .strip_prefix(r"\\")
+            .filter(|rest| !rest.starts_with(['?', '.']))
+        {
+            dest.push("UNC");
+            unc.to_string()
+        } else if s.len() >= 2 && s.as_bytes()[1] == b':' {
             dest.push(&s[0..1]);
             s[2..].trim_start_matches(['\\', '/']).to_string()
         } else {

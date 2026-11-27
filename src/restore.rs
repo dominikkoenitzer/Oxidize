@@ -130,8 +130,10 @@ fn within(dir: &Path, p: &Path) -> bool {
 }
 
 /// Where a quarantined copy came from: `<backup>\files\C\ProgramData\Foo`
-/// was `C:\ProgramData\Foo`, and `<backup>\files\server\share\Foo` was
-/// `\\server\share\Foo`. The reverse of the quarantine's own naming.
+/// was `C:\ProgramData\Foo`, and `<backup>\files\UNC\server\share\Foo` was
+/// `\\server\share\Foo`. The reverse of the quarantine's own naming. Backups
+/// made before the `UNC` folder put a share straight under `files`, and are
+/// still read that way.
 fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
     let files = norm(&root.join("files"));
     let s = from.to_string_lossy().replace('/', "\\");
@@ -152,6 +154,9 @@ fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
     let (first, tail) = rest.split_once('\\').unwrap_or((rest, ""));
     if first.is_empty() {
         return None;
+    }
+    if first.eq_ignore_ascii_case("UNC") && !tail.is_empty() {
+        return Some(format!(r"\\{tail}").into());
     }
     let first_is_drive = first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic();
     Some(if first_is_drive {
@@ -812,6 +817,11 @@ mod tests {
         assert_eq!(
             origin(r"C:\B\backups\2026-10-18 Example\files\server\share\Foo"),
             Some(r"\\server\share\Foo".into())
+        );
+        // A share under the UNC folder, whatever its server is called.
+        assert_eq!(
+            origin(r"C:\B\backups\2026-10-18 Example\files\UNC\a\share\Foo"),
+            Some(r"\\a\share\Foo".into())
         );
         for outside in [
             r"C:\B\backups\2026-10-18 Example\registry\x.reg",
