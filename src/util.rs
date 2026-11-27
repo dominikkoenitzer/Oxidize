@@ -404,6 +404,24 @@ pub fn plain_reason(e: &(dyn std::error::Error + 'static)) -> String {
         .to_string()
 }
 
+/// What failed and why, for a user to read: the outermost message, then the
+/// plain words of the first system error under it. An error with no system
+/// error in it reads as its whole chain, as `{e:#}` shows it.
+pub fn plain_error(e: &(dyn std::error::Error + 'static)) -> String {
+    let causes = || std::iter::successors(Some(e), |c| c.source());
+    if !causes().any(|c| c.is::<std::io::Error>()) {
+        return causes()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(": ");
+    }
+    let reason = plain_reason(e);
+    if e.is::<std::io::Error>() {
+        return reason;
+    }
+    format!("{e}: {reason}")
+}
+
 /// The length of "os error 5)" or "0x80070005)" at the start of `s`, the codes Rust and Windows append.
 fn error_code_len(s: &str) -> Option<usize> {
     let (body, hex) = match (s.strip_prefix("os error "), s.strip_prefix("0x")) {
@@ -504,6 +522,39 @@ mod tests {
             plain_reason(root.as_ref()),
             "dism.exe ended with exit code 5 (os error x)"
         );
+    }
+
+    #[test]
+    fn an_access_denied_error_reads_as_what_failed_and_why() {
+        let denied = || std::io::Error::from_raw_os_error(5);
+        let words = plain_reason(&denied());
+        let err = anyhow::Error::from(denied())
+            .context("opening the key")
+            .context(r"removing C:\Example");
+        // The whole chain, number and all, is what users used to see.
+        let chain = format!("{err:#}");
+        assert!(chain.contains("opening the key"), "{chain}");
+        assert!(chain.contains("(os error 5)"), "{chain}");
+        assert_eq!(
+            plain_error(err.as_ref()),
+            format!(r"removing C:\Example: {words}")
+        );
+        assert!(!plain_error(err.as_ref()).contains("os error"));
+        assert_eq!(plain_error(&denied()), words);
+        let kind = anyhow::Error::from(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            .context("reading protected.txt");
+        let kind_words = plain_reason(kind.as_ref());
+        assert_eq!(
+            plain_error(kind.as_ref()),
+            format!("reading protected.txt: {kind_words}")
+        );
+    }
+
+    #[test]
+    fn an_error_with_no_system_error_keeps_its_whole_chain() {
+        let err = anyhow::anyhow!("no backup").context("restoring");
+        assert_eq!(plain_error(err.as_ref()), format!("{err:#}"));
+        assert_eq!(plain_error(err.as_ref()), "restoring: no backup");
     }
 
     #[test]

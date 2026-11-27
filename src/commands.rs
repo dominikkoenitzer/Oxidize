@@ -163,7 +163,10 @@ pub(crate) fn list_rows(
         Ok(packages) => rows.extend(store_rows(&packages, args.system)),
         Err(e) if args.store => return Err(e),
         // The programs are still worth listing.
-        Err(e) => term::warn(&format!("Store apps left out: {e:#}")),
+        Err(e) => term::warn(&format!(
+            "Store apps left out: {}",
+            util::plain_error(e.as_ref())
+        )),
     }
     if let Some(filter) = &args.filter {
         let needle = filter.to_lowercase();
@@ -783,11 +786,13 @@ fn uninstall_batch(
                 term::bold(&format!("[{}/{n}] {}", i + 1, step.name()))
             );
         }
+        // The JSON keeps the whole chain; the terminal and its summary get plain words.
         let failed = |e: anyhow::Error| {
-            let error = format!("{e:#}");
-            if !g.json {
-                term::error(&error);
+            if g.json {
+                return format!("{e:#}");
             }
+            let error = util::plain_error(e.as_ref());
+            term::error(&error);
             error
         };
         // One failing does not stop the others.
@@ -1667,7 +1672,10 @@ fn close_app(env: &StoreEnv, app: &Package, g: &Global) -> Vec<complete::Closed>
 fn installed_store_apps(store: &dyn PackageStore, g: &Global) -> Vec<Package> {
     store.list().unwrap_or_else(|e| {
         if !g.json {
-            term::warn(&format!("Store apps left out: {e:#}"));
+            term::warn(&format!(
+                "Store apps left out: {}",
+                util::plain_error(e.as_ref())
+            ));
         }
         Vec::new()
     })
@@ -2189,7 +2197,7 @@ fn clear_backups(
     for b in all {
         if !g.dry_run {
             if let Err(e) = delete(b) {
-                term::warn(&format!("{e:#}"));
+                term::warn(&util::plain_error(e.as_ref()));
                 failed += 1;
                 continue;
             }

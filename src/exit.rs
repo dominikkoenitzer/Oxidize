@@ -87,25 +87,31 @@ impl std::error::Error for Failure {}
 pub struct Outcome {
     pub exit: i32,
     pub code: &'static str,
+    /// The whole chain, for `--json`.
     pub message: String,
+    /// What failed and why in plain words, for the terminal.
+    pub text: String,
     pub reported: bool,
 }
 
 /// Read the [`Failure`] out of an error, wherever it sits in the chain. The
-/// message is the whole chain, as `error:` has always shown it.
+/// message is the whole chain; the text says it without error numbers.
 pub fn outcome(err: &anyhow::Error) -> Outcome {
     let message = format!("{err:#}");
+    let text = crate::util::plain_error(err.as_ref());
     match err.chain().find_map(|e| e.downcast_ref::<Failure>()) {
         Some(f) => Outcome {
             exit: f.exit,
             code: f.code,
             message,
+            text,
             reported: f.reported,
         },
         None => Outcome {
             exit: ERROR,
             code: "error",
             message,
+            text,
             reported: false,
         },
     }
@@ -181,6 +187,18 @@ mod tests {
         assert_eq!(o.code, "error");
         assert_eq!(o.message, "disk full");
         assert!(!o.reported);
+    }
+
+    #[test]
+    fn the_terminal_says_an_access_denied_error_without_its_number() {
+        let err = anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+            .context("opening the key")
+            .context("removing the leftovers");
+        let words = crate::util::plain_reason(err.as_ref());
+        let o = outcome(&err);
+        assert_eq!(o.message, format!("{err:#}"));
+        assert!(o.message.contains("(os error 5)"), "{}", o.message);
+        assert_eq!(o.text, format!("removing the leftovers: {words}"));
     }
 
     #[test]
