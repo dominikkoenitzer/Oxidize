@@ -299,7 +299,7 @@ struct OxidizeApp {
 fn restore_backup(name: &str, dry_run: bool) -> Result<Vec<RestoreItem>, String> {
     backup::find_backup(name)
         .and_then(|info| restore::restore(&info, dry_run))
-        .map_err(|e| format!("{e:#}"))
+        .map_err(|e| util::plain_error(e.as_ref()))
 }
 
 /// Scans the machine for `program`, with one reading of it for both steps.
@@ -489,9 +489,16 @@ impl OxidizeApp {
                     still_installed: uninstall::still_installed(&program),
                     program,
                 },
-                Err(e) => Msg::Error(window_error(&format!("Uninstall failed: {e:#}"))),
+                Err(e) => Msg::Error(window_error(&format!(
+                    "Uninstall failed: {}",
+                    util::plain_error(e.as_ref())
+                ))),
             },
-            Err(e) => Msg::Error(format!("Cannot uninstall {}: {e:#}", program.display_name)),
+            Err(e) => Msg::Error(format!(
+                "Cannot uninstall {}: {}",
+                program.display_name,
+                util::plain_error(e.as_ref())
+            )),
         });
     }
 
@@ -508,7 +515,7 @@ impl OxidizeApp {
                 Ok(outcome) => Msg::Removed(outcome),
                 Err(e) => Msg::Error(match safety::BackupRefused::of(&e) {
                     Some(refused) => format!("Nothing was removed. {}", refused.window_text()),
-                    None => format!("Removal failed: {e:#}"),
+                    None => format!("Removal failed: {}", util::plain_error(e.as_ref())),
                 }),
             }
         });
@@ -535,7 +542,11 @@ impl OxidizeApp {
             let plan = match uninstall::plan(&program, true) {
                 Ok(plan) => plan,
                 Err(e) => {
-                    return Msg::Error(format!("Cannot remove {}: {e:#}", program.display_name))
+                    return Msg::Error(format!(
+                        "Cannot remove {}: {}",
+                        program.display_name,
+                        util::plain_error(e.as_ref())
+                    ))
                 }
             };
             let pc = complete::ThisPc {
@@ -557,7 +568,7 @@ impl OxidizeApp {
     }
 
     fn not_elevated(&mut self, e: anyhow::Error) {
-        let line = format!("Could not elevate: {e:#}");
+        let line = format!("Could not elevate: {}", util::plain_error(e.as_ref()));
         self.log.push(line.clone());
         self.status = line;
     }
@@ -1591,7 +1602,11 @@ impl OxidizeApp {
                                 self.status = line;
                             }
                             Err(e) => {
-                                let line = format!("Cannot uninstall {}: {e:#}", p.display_name);
+                                let line = format!(
+                                    "Cannot uninstall {}: {}",
+                                    p.display_name,
+                                    util::plain_error(e.as_ref())
+                                );
                                 self.log.push(line.clone());
                                 self.status = line;
                             }
@@ -4537,6 +4552,7 @@ mod tests {
                 kept: Vec::new(),
             },
             error: None,
+            error_chain: None,
             refused: None,
             seconds: 4.2,
         }

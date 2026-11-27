@@ -107,9 +107,9 @@ impl Cleanup {
 
     /// The tab with the protected list read from `file`.
     pub fn from_file(file: anyhow::Result<PathBuf>) -> Self {
-        let list_file = file.map_err(|e| format!("{e:#}"));
+        let list_file = file.map_err(|e| util::plain_error(e.as_ref()));
         let read = match &list_file {
-            Ok(f) => protect::load_from(f).map_err(|e| format!("{e:#}")),
+            Ok(f) => protect::load_from(f).map_err(|e| util::plain_error(e.as_ref())),
             Err(e) => Err(e.clone()),
         };
         let (protected, unreadable) = match read {
@@ -306,7 +306,7 @@ impl Cleanup {
         self.protect_error = match &self.list_file {
             Ok(f) => protect::save_to(&self.protected, f)
                 .err()
-                .map(|e| format!("{e:#}")),
+                .map(|e| util::plain_error(e.as_ref())),
             Err(e) => Some(e.clone()),
         };
         // A refusal such as "Already protected." may no longer hold.

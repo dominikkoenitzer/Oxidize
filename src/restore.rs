@@ -22,13 +22,19 @@ pub struct RestoreItem {
 /// `dry_run` only lists what would happen.
 pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
     let manifest = backup::read_manifest(&info.path)?;
+    // A backup restored whole before entries were recorded counts as all home.
+    let came_home = |i: usize| manifest.restored.is_some() || manifest.home.contains(&i);
+    let mut moved_home = Vec::new();
     let mut out = Vec::new();
-    for entry in manifest.entries.iter().rev() {
+    for (i, entry) in manifest.entries.iter().enumerate().rev() {
         let result = match stays_inside(&info.path, &entry.undo) {
             Err(e) => Err(e),
-            Ok(()) if dry_run => check(&entry.undo),
-            Ok(()) => undo(&entry.undo),
+            Ok(()) if dry_run => check(&entry.undo, came_home(i)),
+            Ok(()) => undo(&entry.undo, came_home(i)),
         };
+        if !dry_run && result.is_ok() && matches!(entry.undo, Undo::MoveBack { .. }) {
+            moved_home.push(i);
+        }
         out.push(RestoreItem {
             path: entry.path.clone(),
             result: result.map_err(|e| format!("{e:#}")),
@@ -36,6 +42,9 @@ pub fn restore(info: &BackupInfo, dry_run: bool) -> Result<Vec<RestoreItem>> {
     }
     // Listed as restored from now on, so its old item count does not read
     // as something still waiting in it. A partial restore stays unmarked.
+    if !dry_run {
+        let _ = backup::record_home(&info.path, &moved_home);
+    }
     if !dry_run && out.iter().all(|i| i.result.is_ok()) {
         let _ = backup::mark_restored(&info.path);
         // What went home leaves the folders it sat in behind, empty.
@@ -130,8 +139,10 @@ fn within(dir: &Path, p: &Path) -> bool {
 }
 
 /// Where a quarantined copy came from: `<backup>\files\C\ProgramData\Foo`
-/// was `C:\ProgramData\Foo`, and `<backup>\files\server\share\Foo` was
-/// `\\server\share\Foo`. The reverse of the quarantine's own naming.
+/// was `C:\ProgramData\Foo`, and `<backup>\files\UNC\server\share\Foo` was
+/// `\\server\share\Foo`. The reverse of the quarantine's own naming. Backups
+/// made before the `UNC` folder put a share straight under `files`, and are
+/// still read that way.
 fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
     let files = norm(&root.join("files"));
     let s = from.to_string_lossy().replace('/', "\\");
@@ -153,6 +164,9 @@ fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
     if first.is_empty() {
         return None;
     }
+    if first.eq_ignore_ascii_case("UNC") && !tail.is_empty() {
+        return Some(format!(r"\\{tail}").into());
+    }
     let first_is_drive = first.len() == 1 && first.as_bytes()[0].is_ascii_alphabetic();
     Some(if first_is_drive {
         format!("{first}:\\{tail}").into()
@@ -164,7 +178,7 @@ fn origin_of(root: &Path, from: &Path) -> Option<std::path::PathBuf> {
 /// What a dry run can say without writing anything: the pieces the undo needs
 /// are still there. A dry run that reports "would restore" for an entry whose
 /// quarantined copy is gone is worse than no dry run at all.
-fn check(action: &Undo) -> Result<()> {
+fn check(action: &Undo, came_home: bool) -> Result<()> {
     match action {
         Undo::RegImport { file, .. } | Undo::TaskImport { file, .. } => {
             if file.exists() {
@@ -181,6 +195,10 @@ fn check(action: &Undo) -> Result<()> {
             (false, false) => {
                 anyhow::bail!("the quarantined copy is missing: {}", from.display())
             }
+            (false, true) if !came_home => anyhow::bail!(
+                "the quarantined copy is missing, and what is at {} did not come from it",
+                to.display()
+            ),
             _ => Ok(()),
         },
         Undo::PathAdd { .. } | Undo::ValueWrite { .. } => Ok(()),
@@ -190,10 +208,10 @@ fn check(action: &Undo) -> Result<()> {
     }
 }
 
-fn undo(action: &Undo) -> Result<()> {
+fn undo(action: &Undo, came_home: bool) -> Result<()> {
     match action {
         Undo::RegImport { file, .. } => backup::import_registry_file(file),
-        Undo::MoveBack { from, to, partial } => move_back(from, to, *partial),
+        Undo::MoveBack { from, to, partial } => move_back(from, to, *partial, came_home),
         Undo::TaskImport { name, file } => system::import_task(name, file),
         Undo::PathAdd { hive, entry, index } => path_add(*hive, entry, *index),
         Undo::ValueWrite {
@@ -263,12 +281,20 @@ fn reg_type(vtype: u32) -> Option<winreg::enums::RegType> {
         _ => return None,
     })
 }
-fn move_back(from: &Path, to: &Path, partial: bool) -> Result<()> {
+fn move_back(from: &Path, to: &Path, partial: bool, came_home: bool) -> Result<()> {
     if !from.exists() {
-        // Restoring the same backup twice: the first run already moved this
-        // one home, which is the state the caller wanted either way.
+        // Restoring the same backup twice: the first run moved this one home,
+        // which is the state the caller wanted. Only then: a copy that is gone
+        // with something else standing at its place did not come home, and
+        // saying "restored" would hide that it is lost.
         if to.exists() {
-            return Ok(());
+            if came_home {
+                return Ok(());
+            }
+            anyhow::bail!(
+                "the quarantined copy is missing, and what is at {} did not come from it",
+                to.display()
+            );
         }
         anyhow::bail!("quarantined copy is missing: {}", from.display());
     }
@@ -798,6 +824,31 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_copy_is_restored_only_when_it_came_home() {
+        let root = backup::TestDir::new("oxidize_restore_false_ok");
+        let from = root.join("files").join("C").join("App");
+        let to = root.join("App");
+        fs::create_dir_all(&to).unwrap();
+        // The copy is gone and something stands at its place.
+        assert!(!from.exists());
+
+        let err = move_back(&from, &to, false, false).unwrap_err();
+        assert!(format!("{err:#}").contains("missing"), "{err:#}");
+        assert!(check(
+            &Undo::MoveBack {
+                from: from.clone(),
+                to: to.clone(),
+                partial: false
+            },
+            false
+        )
+        .is_err());
+
+        // The same, after a restore recorded it as moved home: fine.
+        assert!(move_back(&from, &to, false, true).is_ok());
+    }
+
+    #[test]
     fn a_copy_goes_back_only_where_it_came_from() {
         let root = Path::new(r"C:\B\backups\2026-10-18 Example");
         let origin = |from: &str| origin_of(root, Path::new(from));
@@ -812,6 +863,11 @@ mod tests {
         assert_eq!(
             origin(r"C:\B\backups\2026-10-18 Example\files\server\share\Foo"),
             Some(r"\\server\share\Foo".into())
+        );
+        // A share under the UNC folder, whatever its server is called.
+        assert_eq!(
+            origin(r"C:\B\backups\2026-10-18 Example\files\UNC\a\share\Foo"),
+            Some(r"\\a\share\Foo".into())
         );
         for outside in [
             r"C:\B\backups\2026-10-18 Example\registry\x.reg",

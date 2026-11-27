@@ -702,6 +702,45 @@ fn is_brand_name(name: &str, target: &ScanTarget) -> bool {
             && is_publisher_exactly(name, target))
 }
 
+/// Does the vendor's folder at `dir` hold a folder named for another of the
+/// vendor's products: one that carries the brand or reads as a product name,
+/// with a word in it that is not the program's own (`Corvane Studio` beside
+/// `Corvane Glide`)? Plain folders such as `Logs` name no product.
+fn holds_other_product(dir: &Path, target: &ScanTarget) -> bool {
+    let Some(brand) = target.brand.as_deref() else {
+        return false;
+    };
+    let own = own_name_words(target);
+    // The program's whole name glued into one word is its own too:
+    // `BrightwayPlayerInstaller` for `Brightway Player`. Generic words such
+    // as `player` count here, only versions and editions do not.
+    let name: Vec<String> = target
+        .display_name
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|w| {
+            !w.is_empty() && !util::is_noise_word(w) && !w.chars().all(|c| c.is_ascii_digit())
+        })
+        .collect();
+    let glued = (name.len() > 1).then(|| name.concat());
+    let is_own =
+        |w: &String| own.contains(w) || glued.as_ref().is_some_and(|g| w.contains(g.as_str()));
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+                return false;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            let words = significant_tokens(&name);
+            !words.is_empty()
+                && !words.iter().all(is_own)
+                && (carries_brand(&name, brand) || score_product(&name, target).is_some())
+        })
+}
+
 /// Is the recorded install folder the program's own? Its path has to be
 /// below an install root, nothing another program records may be in it, and
 /// it or a folder on the way down has to carry the brand: `Vendor\Versions\
@@ -2056,16 +2095,16 @@ fn scan_dir_children(
                 |p: &Path| *family.get_or_init(|| name_shared && holds_namesake_child(p, target));
             if is_brand_name(&name, target) && !houses_other && !desktop {
                 // The vendor's own folder, with nothing else of theirs
-                // installed and no other program inside: all of it goes,
-                // whatever the vendor's other products left in it. On the
-                // desktop a folder is the user's.
-                push_dir_leftover(
-                    out,
-                    path,
-                    Confidence::High,
-                    VENDOR_FOLDER.to_string(),
-                    roots,
-                );
+                // installed and no other program inside: all of it goes. A
+                // folder in it named for another of their products may be
+                // that product's data, kept after it was uninstalled, so then
+                // it is worth a look first.
+                let conf = if holds_other_product(&path, target) {
+                    Confidence::Medium
+                } else {
+                    Confidence::High
+                };
+                push_dir_leftover(out, path, conf, VENDOR_FOLDER.to_string(), roots);
             } else if is_exact_product(&name, target)
                 && !target.vendor_is_shared
                 && !houses_other
@@ -2085,6 +2124,15 @@ fn scan_dir_children(
                 // folder is shared the same way.
                 continue;
             } else if let Some((conf, reason)) = score_unclaimed(&name, target) {
+                // A longer name made of the program's and other words, such as
+                // a test build's "Lumen Beta", may be another product: the
+                // check `key_names_product` makes for keys, so High at most
+                // when every word is the program's own.
+                let conf = if key_names_product(&name, target).is_some() {
+                    conf
+                } else {
+                    conf.max(Confidence::Medium)
+                };
                 if !family(&path) {
                     push_dir_leftover(out, path, conf, reason, roots);
                 }
@@ -3952,6 +4000,58 @@ mod tests {
             &mut out,
         );
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_longer_folder_name_is_never_high_for_the_shorter_product() {
+        let root = crate::backup::TestDir::new("oxidize_longer_folder_test");
+        fs::create_dir_all(root.join("Lumen Beta")).unwrap();
+        fs::create_dir_all(root.join("Lumen")).unwrap();
+        let lumen = name_target("Lumen", Some("Brightway"));
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &lumen, &[], false, &fs_roots(), &mut out);
+        let conf = |leaf: &str| {
+            out.iter()
+                .find(|l| Path::new(&l.path).file_name().is_some_and(|n| n == leaf))
+                .map(|l| l.confidence)
+        };
+        assert_eq!(conf("Lumen"), Some(Confidence::High), "{out:?}");
+        assert_ne!(conf("Lumen Beta"), Some(Confidence::High), "{out:?}");
+    }
+
+    #[test]
+    fn a_vendor_folder_holding_another_of_their_products_is_not_high() {
+        let root = crate::backup::TestDir::new("oxidize_vendor_sibling_test");
+        let mut t = name_target("Corvane Glide", Some("Corvane LLC"));
+        t.brand = Some(normalize("Corvane"));
+        t.brand_alone = true;
+        let vendor = root.join("Corvane");
+        fs::create_dir_all(vendor.join("Glide")).unwrap();
+        fs::create_dir_all(vendor.join("Logs")).unwrap();
+        fs::create_dir_all(vendor.join("CorvaneGlideUpdater")).unwrap();
+
+        let whole = |out: &[Leftover]| {
+            out.iter()
+                .find(|l| {
+                    Path::new(&l.path)
+                        .file_name()
+                        .is_some_and(|n| n == "Corvane")
+                })
+                .map(|l| l.confidence)
+        };
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(
+            whole(&out),
+            Some(Confidence::High),
+            "only its own folders: {out:?}"
+        );
+
+        fs::create_dir_all(vendor.join("Corvane Studio")).unwrap();
+        let mut out = Vec::new();
+        scan_dir_children(&root, &t, &[], false, &fs_roots(), &mut out);
+        assert_eq!(whole(&out), Some(Confidence::Medium), "{out:?}");
     }
 
     #[test]

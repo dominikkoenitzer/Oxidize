@@ -94,7 +94,7 @@ fn finish(result: anyhow::Result<i32>, json: bool) -> ! {
                     let doc = serde_json::to_string_pretty(&doc).unwrap_or_default();
                     out::write(format_args!("{doc}\n"));
                 } else {
-                    term::error(&o.message);
+                    term::error(&o.text);
                 }
             }
             o.exit

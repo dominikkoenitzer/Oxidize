@@ -392,6 +392,9 @@ pub struct Outcome {
     pub verdict: Verdict,
     /// Why the flow stopped early, when it did.
     pub error: Option<String>,
+    /// `error` with its whole chain, system error numbers included, for JSON.
+    /// None when `error` already says it all.
+    pub error_chain: Option<String>,
     /// The backup refusal that stopped the removal, for the window to word.
     pub refused: Option<BackupRefused>,
     pub seconds: f64,
@@ -458,6 +461,7 @@ pub fn remove_completely(
             ..Verdict::default()
         },
         error: None,
+        error_chain: None,
         refused: None,
         seconds: 0.0,
     };
@@ -518,7 +522,7 @@ pub fn remove_completely(
         let ran = match pc.run_uninstaller(plan) {
             Ok(ran) => ran,
             Err(e) => {
-                out.error = Some(format!("{e:#}"));
+                set_error(&mut out, &e);
                 out.verdict.still_installed = pc.still_installed(program);
                 out.seconds = start.elapsed().as_secs_f64();
                 return out;
@@ -581,7 +585,16 @@ pub fn remove_completely(
 /// Keep why the removal stopped, and its kind when it was a backup refusal.
 fn stopped(out: &mut Outcome, e: &anyhow::Error) {
     out.refused = BackupRefused::of(e).cloned();
-    out.error = Some(format!("{e:#}"));
+    set_error(out, e);
+}
+
+/// Keep `e` as plain words for the window and the terminal, and as its whole
+/// chain for JSON.
+fn set_error(out: &mut Outcome, e: &anyhow::Error) {
+    let plain = crate::util::plain_error(e.as_ref());
+    let chain = format!("{e:#}");
+    out.error_chain = (chain != plain).then_some(chain);
+    out.error = Some(plain);
 }
 
 /// The High items of `rescan` that the scan the removal worked from did not
@@ -772,6 +785,8 @@ mod tests {
         shows_once_gone: RefCell<Vec<(String, Leftover)>>,
         /// The backup folder cannot be made.
         no_backup: bool,
+        /// The removal fails with an access-denied system error under a context.
+        denied: bool,
         /// Backups made so far.
         backups: RefCell<usize>,
         calls: RefCell<Vec<String>>,
@@ -792,6 +807,7 @@ mod tests {
                 outlives_end: false,
                 shows_once_gone: RefCell::new(Vec::new()),
                 no_backup: false,
+                denied: false,
                 backups: RefCell::new(0),
                 calls: RefCell::new(Vec::new()),
             }
@@ -946,6 +962,10 @@ mod tests {
                 return Err(anyhow::Error::new(BackupRefused {
                     reason: "Access is denied. (os error 5)".to_string(),
                 }));
+            }
+            if self.denied {
+                return Err(anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+                    .context(r"removing C:\Example"));
             }
             let n = self.backups.replace_with(|n| *n + 1) + 1;
             Ok(DeletionOutcome {
@@ -1177,6 +1197,33 @@ mod tests {
         assert!(!calls
             .iter()
             .any(|c| c.starts_with("close") || c.starts_with("end")));
+    }
+
+    #[test]
+    fn an_access_denied_removal_reads_plain_and_keeps_its_chain_for_json() {
+        let mut pc = FakePc::new(per_user_footprint());
+        pc.denied = true;
+        let p = program(Hive::CurrentUser);
+        let out = remove_completely(&pc, &p, &target(), &plan(false), &opts(Confidence::High));
+        let plain = out.error.clone().unwrap_or_default();
+        assert!(plain.starts_with(r"removing C:\Example: "), "{plain}");
+        assert!(!plain.contains("os error"), "{plain}");
+        let chain = out.error_chain.clone().unwrap_or_default();
+        assert!(chain.contains("(os error 5)"), "{chain}");
+    }
+
+    #[test]
+    fn an_error_without_a_system_error_has_no_separate_chain() {
+        let mut out = remove_completely(
+            &FakePc::new(per_user_footprint()),
+            &program(Hive::CurrentUser),
+            &target(),
+            &plan(false),
+            &opts(Confidence::High),
+        );
+        set_error(&mut out, &anyhow::anyhow!("no backup").context("restoring"));
+        assert_eq!(out.error.as_deref(), Some("restoring: no backup"));
+        assert_eq!(out.error_chain, None);
     }
 
     #[test]

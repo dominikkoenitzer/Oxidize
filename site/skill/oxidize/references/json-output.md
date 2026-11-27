@@ -149,6 +149,7 @@ An object:
 | `nothing_left` | bool, missing in a dry run: the program is gone, every item went and nothing at the chosen level is left |
 | `removal` | Removal. In a real run, missing when nothing reached the level or the run stopped before the removal. |
 | `error` | string, sometimes missing: why the run stopped early |
+| `error_chain` | string, sometimes missing: the whole error with every cause, when it says more than `error`; `error` is then the plain sentence |
 | `cancelled` | `true`, sometimes missing: the leftover question was answered no |
 
 The exit code is 0 when `nothing_left` is true, 3 when `still_installed` is true, 4 when an item failed or `remaining` is not empty, 1 with an `error`, and 5 when cancelled.
@@ -166,7 +167,7 @@ With `--keep`: `{ "kind", "program", "command", "uninstaller", "still_installed"
 - `uninstaller` is `"removed by Windows"` or `"not started, no longer registered"`. It and `still_installed` are missing in a dry run.
 - `may_come_back` is present once the app was removed: Windows may bring it back, as it installs the app for every new account.
 - `removal` is missing when the report is empty, with `--keep`, or while the app is still registered.
-- A removal that fails prints `{ "kind": "store", "program", "command", "error" }`, with `closed` when processes were closed before Windows failed, and exits with 1. An app still registered afterwards exits with 3.
+- A removal that fails prints `{ "kind": "store", "program", "command", "error" }` (plus `error_chain` with every cause when it says more than `error`), with `closed` when processes were closed before Windows failed, and exits with 1. An app still registered afterwards exits with 3.
 
 ## uninstall, several names
 
@@ -174,7 +175,7 @@ With `--keep`: `{ "kind", "program", "command", "uninstaller", "still_installed"
 { "programs": [ ... ], "uninstalled": 1, "failed": 0, "cancelled": false }
 ```
 
-Each entry of `programs` is the one-program or Store app object plus `"failed": bool`. A program that stopped with an error is `{ "kind", "program", "command", "error", "failed": true }`. A program counts as failed when it stopped with an error, is still registered afterwards, has a leftover that failed, or has something left at the chosen level. The batch exits with the code of the first program that failed.
+Each entry of `programs` is the one-program or Store app object plus `"failed": bool`. A program that stopped with an error is `{ "kind", "program", "command", "error", "failed": true }`, with `error_chain` as above. A program counts as failed when it stopped with an error, is still registered afterwards, has a leftover that failed, or has something left at the chosen level. The batch exits with the code of the first program that failed.
 
 Cancelled: every entry is `{ "kind", "program", "command", "cancelled": true }`, `uninstalled` and `failed` are 0, `cancelled` is true, exit code 5.
 

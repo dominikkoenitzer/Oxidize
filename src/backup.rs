@@ -95,6 +95,10 @@ pub struct Manifest {
     /// When everything in it was put back, if it was.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restored: Option<String>,
+    /// The entries, by position, whose copy a restore moved back home. A copy
+    /// that is gone counts as home only when its entry is listed here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub home: Vec<usize>,
 }
 
 pub struct BackupSession {
@@ -122,6 +126,7 @@ impl BackupSession {
                 created: now.to_rfc3339(),
                 entries: Vec::new(),
                 restored: None,
+                home: Vec::new(),
             },
             made: true,
         })
@@ -140,6 +145,7 @@ impl BackupSession {
                 created: chrono::Local::now().to_rfc3339(),
                 entries: Vec::new(),
                 restored: None,
+                home: Vec::new(),
             }
         };
         Ok(BackupSession {
@@ -334,11 +340,20 @@ impl BackupSession {
         Ok(dest)
     }
 
-    /// `C:\ProgramData\Foo` becomes `<backup>\files\C\ProgramData\Foo`.
+    /// `C:\ProgramData\Foo` becomes `<backup>\files\C\ProgramData\Foo`, and
+    /// `\\server\share\Foo` becomes `<backup>\files\UNC\server\share\Foo`: under a
+    /// folder of its own, so a server with a one-letter name is never read
+    /// back as a drive.
     fn quarantine_dest(&self, original: &Path) -> PathBuf {
         let mut dest = self.root.join("files");
         let s = original.to_string_lossy();
-        let rel = if s.len() >= 2 && s.as_bytes()[1] == b':' {
+        let rel = if let Some(unc) = s
+            .strip_prefix(r"\\")
+            .filter(|rest| !rest.starts_with(['?', '.']))
+        {
+            dest.push("UNC");
+            unc.to_string()
+        } else if s.len() >= 2 && s.as_bytes()[1] == b':' {
             dest.push(&s[0..1]);
             s[2..].trim_start_matches(['\\', '/']).to_string()
         } else {
@@ -530,6 +545,18 @@ fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
     fs::write(&tmp, json).context("writing manifest")?;
     fs::rename(&tmp, dir.join(MANIFEST)).context("replacing manifest")?;
     Ok(())
+}
+
+/// Note in a backup's manifest which entries a restore moved back home.
+pub fn record_home(dir: &Path, entries: &[usize]) -> Result<()> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut manifest = read_manifest(dir)?;
+    manifest.home.extend_from_slice(entries);
+    manifest.home.sort_unstable();
+    manifest.home.dedup();
+    write_manifest(dir, &manifest)
 }
 
 /// Note in a backup's manifest that everything in it was put back.
@@ -1655,6 +1682,7 @@ mod tests {
             program: "X".into(),
             created: "now".into(),
             restored: None,
+            home: Vec::new(),
             entries: vec![ManifestEntry {
                 kind: LeftoverKind::PathEntry,
                 path: "PATH entry C:\\x".into(),
