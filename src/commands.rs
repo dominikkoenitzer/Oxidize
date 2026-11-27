@@ -786,14 +786,11 @@ fn uninstall_batch(
                 term::bold(&format!("[{}/{n}] {}", i + 1, step.name()))
             );
         }
-        // The JSON keeps the whole chain; the terminal and its summary get plain words.
-        let failed = |e: anyhow::Error| {
-            if g.json {
-                return format!("{e:#}");
+        // The terminal gets plain words; the JSON keeps the whole chain apart.
+        let failed = |e: &anyhow::Error| {
+            if !g.json {
+                term::error(&util::plain_error(e.as_ref()));
             }
-            let error = util::plain_error(e.as_ref());
-            term::error(&error);
-            error
         };
         // One failing does not stop the others.
         let run = match step {
@@ -813,7 +810,10 @@ fn uninstall_batch(
                     levels,
                     g,
                 )
-                .unwrap_or_else(|e| ProgramRun::stopped(&b.program, &b.plan, failed(e)))
+                .unwrap_or_else(|e| {
+                    failed(&e);
+                    ProgramRun::stopped(&b.program, &b.plan, &e)
+                })
             }
             Step::Store(app) => {
                 // A lookup that fails counts as registered: the removal then
@@ -821,8 +821,12 @@ fn uninstall_batch(
                 let already_gone =
                     !g.dry_run && !env.store.is_registered(&app.family_name).unwrap_or(true);
                 let mut closed = Vec::new();
-                run_package(env, app, already_gone, keep, levels, g, &mut closed)
-                    .unwrap_or_else(|e| ProgramRun::stopped_package(app, failed(e), &closed))
+                run_package(env, app, already_gone, keep, levels, g, &mut closed).unwrap_or_else(
+                    |e| {
+                        failed(&e);
+                        ProgramRun::stopped_package(app, &e, &closed)
+                    },
+                )
             }
         };
         runs.push(run);
@@ -1018,6 +1022,21 @@ fn program_head(program: &Program) -> String {
     head
 }
 
+/// `e` as plain words, and as its whole chain when that says more.
+fn error_parts(e: &anyhow::Error) -> (String, Option<String>) {
+    let plain = util::plain_error(e.as_ref());
+    let chain = format!("{e:#}");
+    let chain = (chain != plain).then_some(chain);
+    (plain, chain)
+}
+
+/// Add the whole chain next to the plain "error" of `json`.
+fn set_error_chain(json: &mut serde_json::Value, chain: Option<String>) {
+    if let Some(chain) = chain {
+        json["error_chain"] = json!(chain);
+    }
+}
+
 /// What one uninstall did, for the JSON output and a batch summary.
 struct ProgramRun {
     name: String,
@@ -1035,10 +1054,13 @@ struct ProgramRun {
 
 impl ProgramRun {
     /// An uninstall that stopped with an error before it finished.
-    fn stopped(program: &Program, plan: &uninstall::UninstallPlan, error: String) -> Self {
+    fn stopped(program: &Program, plan: &uninstall::UninstallPlan, e: &anyhow::Error) -> Self {
+        let (error, chain) = error_parts(e);
+        let mut json = json!({ "kind": "program", "program": program, "command": plan.display(), "error": error });
+        set_error_chain(&mut json, chain);
         ProgramRun {
             name: program.display_name.clone(),
-            json: json!({ "kind": "program", "program": program, "command": plan.display(), "error": error }),
+            json,
             gone: false,
             found: 0,
             removal: None,
@@ -1048,9 +1070,11 @@ impl ProgramRun {
     }
 
     /// A Store app whose removal stopped with an error.
-    /// A Store app whose run ended in `error`, after closing `closed`.
-    fn stopped_package(app: &Package, error: String, closed: &[complete::Closed]) -> Self {
+    /// A Store app whose run ended in `e`, after closing `closed`.
+    fn stopped_package(app: &Package, e: &anyhow::Error, closed: &[complete::Closed]) -> Self {
+        let (error, chain) = error_parts(e);
         let mut json = json!({ "kind": "store", "program": app, "command": package_command(app), "error": error });
+        set_error_chain(&mut json, chain);
         if !closed.is_empty() {
             json["closed"] = json!(closed);
         }
@@ -1265,9 +1289,10 @@ fn complete_json(
     if out.removal.is_some() {
         json_out["removal"] = removal_json(&out.removal);
     }
-    if let Some(e) = out.error_chain.as_ref().or(out.error.as_ref()) {
+    if let Some(e) = &out.error {
         json_out["error"] = json!(e);
     }
+    set_error_chain(&mut json_out, out.error_chain.clone());
     json_out
 }
 
@@ -1731,7 +1756,7 @@ fn uninstall_package(
         Ok(run) => run,
         Err(e) => {
             if g.json {
-                let stopped = ProgramRun::stopped_package(app, format!("{e:#}"), &closed);
+                let stopped = ProgramRun::stopped_package(app, &e, &closed);
                 println!("{}", serde_json::to_string_pretty(&stopped.json)?);
                 return Err(exit::reported(e));
             }
@@ -3787,11 +3812,13 @@ mod tests {
         assert!(run("A", false, 0, None).failed(false));
         assert!(run("A", true, 3, Some(removed(2, 1, Some("b")))).failed(false));
         let plan = uninstall::plan(&program("A", "A", Some("x.exe")), false).unwrap();
-        let stopped = ProgramRun::stopped(&program("A", "A", None), &plan, "boom".into());
+        let stopped =
+            ProgramRun::stopped(&program("A", "A", None), &plan, &anyhow::anyhow!("boom"));
         assert!(stopped.failed(false));
         assert_eq!(stopped.state(false), "failed");
         assert_eq!(stopped.leftovers(false), "boom");
         assert_eq!(stopped.json["error"], "boom");
+        assert!(stopped.json.get("error_chain").is_none());
         assert_eq!(stopped.json["kind"], "program");
         // A dry run never ran anything, so still registered is expected.
         assert!(!run("A", false, 3, None).failed(true));
@@ -4132,7 +4159,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_removal_as_json_keeps_the_whole_error_chain() {
+    fn a_complete_removal_as_json_has_plain_words_and_the_whole_error_chain() {
         let p = program(
             "Example Player",
             "example-player",
@@ -4143,10 +4170,35 @@ mod tests {
         out.error = Some(r"removing C:\Example: Access is denied".to_string());
         out.error_chain = Some(r"removing C:\Example: Access is denied. (os error 5)".to_string());
         let j = complete_json(&p, &plan, &out, Confidence::High, false);
-        assert_eq!(j["error"], out.error_chain.clone().unwrap());
+        assert_eq!(j["error"], out.error.clone().unwrap());
+        assert_eq!(j["error_chain"], out.error_chain.clone().unwrap());
         out.error_chain = None;
         let j = complete_json(&p, &plan, &out, Confidence::High, false);
         assert_eq!(j["error"], out.error.clone().unwrap());
+        assert!(j.get("error_chain").is_none());
+    }
+
+    #[test]
+    fn a_stopped_run_as_json_has_plain_words_and_the_whole_error_chain() {
+        let denied = || {
+            anyhow::Error::from(std::io::Error::from_raw_os_error(5))
+                .context("opening the key")
+                .context(r"removing C:\Example")
+        };
+        let chain = format!("{:#}", denied());
+        assert!(chain.contains("os error 5"), "{chain}");
+        let p = program("A", "A", Some("x.exe"));
+        let plan = uninstall::plan(&p, false).unwrap();
+        let program_run = ProgramRun::stopped(&p, &plan, &denied());
+        let store_run =
+            ProgramRun::stopped_package(&package("Vendor.Notes", "Notes"), &denied(), &[]);
+        for run in [program_run, store_run] {
+            let error = run.json["error"].as_str().unwrap();
+            assert!(!error.contains("os error"), "{error}");
+            assert!(error.starts_with(r"removing C:\Example"), "{error}");
+            assert_eq!(run.json["error_chain"], chain.as_str());
+            assert_eq!(run.error.as_deref(), Some(error));
+        }
     }
 
     #[test]
@@ -4448,7 +4500,7 @@ mod tests {
         ) else {
             panic!("the removal was to fail");
         };
-        let stopped = ProgramRun::stopped_package(&notes, format!("{err:#}"), &closed);
+        let stopped = ProgramRun::stopped_package(&notes, &err, &closed);
         let pids: Vec<u64> = stopped.json["closed"]
             .as_array()
             .unwrap()
@@ -4458,7 +4510,7 @@ mod tests {
         assert_eq!(pids, [100, 101]);
         assert!(stopped.json["error"].as_str().unwrap().contains("in use"));
         // Nothing closed, nothing to say.
-        let quiet = ProgramRun::stopped_package(&notes, "refused".to_string(), &[]);
+        let quiet = ProgramRun::stopped_package(&notes, &anyhow::anyhow!("refused"), &[]);
         assert!(quiet.json.get("closed").is_none());
     }
 
@@ -4642,7 +4694,7 @@ mod tests {
             panic!("the removal fails");
         };
         assert!(format!("{err:#}").contains("0x80073CFA"), "{err:#}");
-        let stopped = ProgramRun::stopped_package(&notes, format!("{err:#}"), &[]);
+        let stopped = ProgramRun::stopped_package(&notes, &err, &[]);
         assert!(stopped.failed(false));
         assert_eq!(stopped.json["kind"], "store");
         assert_eq!(stopped.json["program"]["family_name"], notes.family_name);

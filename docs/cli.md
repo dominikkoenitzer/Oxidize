@@ -104,7 +104,9 @@ needs `-y` as well; without it the answer is no.
 reasons), `below_level` and `kept` (the items below the chosen level, with
 reasons), `closed` (the processes it closed), `uninstaller`,
 `uninstaller_step`, `removal` (with the `backup` name, and `permanent`, true
-when no backup was kept) and `seconds`. A dry
+when no backup was kept) and `seconds`; a run that stopped early has
+`error`, the plain sentence, and `error_chain` with every cause when that
+says more. A dry
 run has `would_close` and `would_remove` instead. With several names a batch
 prints `{"programs": [...], "uninstalled", "failed", "cancelled"}`; a single
 name keeps the single-program shape. `oxidize scan <program> --json` prints
