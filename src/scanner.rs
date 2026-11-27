@@ -2085,6 +2085,15 @@ fn scan_dir_children(
                 // folder is shared the same way.
                 continue;
             } else if let Some((conf, reason)) = score_unclaimed(&name, target) {
+                // A longer name made of the program's and other words, such as
+                // a test build's "Lumen Beta", may be another product: the
+                // check `key_names_product` makes for keys, so High at most
+                // when every word is the program's own.
+                let conf = if key_names_product(&name, target).is_some() {
+                    conf
+                } else {
+                    conf.max(Confidence::Medium)
+                };
                 if !family(&path) {
                     push_dir_leftover(out, path, conf, reason, roots);
                 }
@@ -3952,6 +3961,24 @@ mod tests {
             &mut out,
         );
         assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_longer_folder_name_is_never_high_for_the_shorter_product() {
+        let root = crate::backup::TestDir::new("oxidize_longer_folder_test");
+        fs::create_dir_all(root.join("Lumen Beta")).unwrap();
+        fs::create_dir_all(root.join("Lumen")).unwrap();
+        let lumen = name_target("Lumen", Some("Brightway"));
+
+        let mut out = Vec::new();
+        scan_dir_children(&root, &lumen, &[], false, &fs_roots(), &mut out);
+        let conf = |leaf: &str| {
+            out.iter()
+                .find(|l| Path::new(&l.path).file_name().is_some_and(|n| n == leaf))
+                .map(|l| l.confidence)
+        };
+        assert_eq!(conf("Lumen"), Some(Confidence::High), "{out:?}");
+        assert_ne!(conf("Lumen Beta"), Some(Confidence::High), "{out:?}");
     }
 
     #[test]
